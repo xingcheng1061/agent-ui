@@ -1,0 +1,45 @@
+{
+	"name": "agent-ui",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "Standalone web UI for coding agents: Monaco editor, file tree and a real PTY terminal.",
+	"engines": {
+		"node": ">=20.19"
+	},
+	"scripts": {
+		"dev": "concurrently -n server,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+		"dev:server": "tsx watch server/index.ts",
+		"dev:web": "vite",
+		"build": "npm run typecheck && vite build",
+		"typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+		"start": "tsx server/index.ts"
+	},
+	"dependencies": {
+		"@streamdown/math": "^1.0.3",
+		"@xterm/addon-fit": "^0.10.0",
+		"@xterm/xterm": "^5.5.0",
+		"cordis": "^3.18.1",
+		"express": "^5.1.0",
+		"katex": "^0.19.0",
+		"monaco-editor": "^0.52.2",
+		"node-pty": "^1.0.0",
+		"react": "^18.3.1",
+		"react-dom": "^18.3.1",
+		"shiki": "^4.5.0",
+		"streamdown": "^2.7.1",
+		"ws": "^8.18.0"
+	},
+	"devDependencies": {
+		"@types/express": "^5.0.0",
+		"@types/node": "^22.10.2",
+		"@types/react": "^18.3.17",
+		"@types/react-dom": "^18.3.5",
+		"@types/ws": "^8.5.13",
+		"@vitejs/plugin-react": "^4.3.4",
+		"concurrently": "^9.1.0",
+		"tsx": "^4.19.2",
+		"typescript": "^5.7.2",
+		"vite": "^6.0.5"
+	}
+}
