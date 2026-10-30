@@ -81,11 +81,12 @@
 新页面加载
   ├─ getTranscript(sessionId)      ← jsonl：截至上一个已完成轮的全部内容
   ├─ 连接池里这一轮的镜像（或 IndexedDB）
-  └─ attach{lastSeq}               ← 告诉服务端已经收到哪一条
-        ├─ session_state{live, busy, lastSeq, oldestSeq}
-        └─ 若仍在跑：补发 seq > lastSeq 的事件
+  └─ attach{lastSeq}               ← 握手；服务端不缓冲，也就不补发
+        └─ session_state{live, busy, lastSeq}
  拼接顺序：jsonl 历史 → 镜像 → 之后到达的实时 delta（按 seq 去重）
 ```
+
+服务端的 `LiveSession.log`（事件缓冲 + `_replayTail` 补发）是停用状态，代码以注释形式保留。切会话不断 socket，回来看的是镜像；真断线时丢的是"正在流式输出的那半句"，jsonl 逐条落盘，已完成的消息不受影响。
 
 `result` 一到就删掉镜像——那一轮已经写进 jsonl 了，留着会重复。
 
@@ -191,7 +192,9 @@ CLI 只在一条消息**写完后**才把它追加进 jsonl。所以流式进行
 - **服务端内存镜像**：实现简单，但服务重启就没，且服务端要多存一份状态
 - **浏览器 IndexedDB 镜像**：刷新/关标签页都能恢复，服务端保持无状态
 
-当前实现是后者（`web/components/liveTurnStore.ts`），服务端那份以注释形式保留在 `LiveSession.log`，想切回去取消 `emit` 里几行注释即可。
+当前实现是后者（`web/components/liveTurnStore.ts`），服务端那份以注释形式保留：`LiveSession.log` 的写入（`emit` 里的 `entry.log.push`）、下一轮开始时的 `entry.log.length = 0`、`_replayTail()` 及它在 `attach` 里的调用。要切回服务端镜像，这四块一起取消注释即可。
+
+不用它的另一个理由：缓冲按**条数**（4000）封顶而没有字节上限，`tool_result` 又不截断，一条大文件输出就能占掉几 MB；而且一轮结束后要等到下一轮发消息才清，进程活着的会话都会各留一份。
 
 代价：换一个浏览器看不到进行中的那半轮。这是该方案固有的边界。
 

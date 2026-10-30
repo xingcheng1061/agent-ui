@@ -49,7 +49,7 @@ export type AgentServerPayload =
 		readonly agent?: string;
 		readonly agents?: readonly AgentInfo[];
 	}
-	/** `lastSeq`/`oldestSeq` locate the stream and expose a truncated buffer. */
+	/** `lastSeq` locates the stream; there is no server-side buffer any more. */
 	| {
 		readonly type: 'session_state';
 		readonly live: boolean;

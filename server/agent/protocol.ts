@@ -62,10 +62,10 @@ export type AgentServerPayload =
 	/**
 	 * Answer to `attach`: whether a live CLI process backs this session.
 	 *
-	 * `lastSeq` is the highest sequence number handed out so far, and
-	 * `oldestSeq` is the oldest event still buffered. When `oldestSeq` is
-	 * greater than the client's own position the buffer was truncated, so the
-	 * client has to reload the transcript instead of replaying.
+	 * `lastSeq` is the highest sequence number handed out so far — informational
+	 * only, since the server keeps no event buffer and replays nothing. A client
+	 * that missed events (its socket dropped) has to recover from its own mirror;
+	 * `oldestSeq` is no longer sent.
 	 */
 	| {
 		readonly type: 'session_state';

@@ -670,7 +670,8 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 
 		// The socket lives in the pool, keyed by conversation: leaving this panel
 		// no longer closes it, so a turn that is still running keeps streaming
-		// into the IndexedDB mirror and is replayed from `seq` on return.
+		// into this connection and the IndexedDB mirror. Coming back re-renders
+		// from that snapshot — the server keeps no buffer to replay from.
 		const connection = acquireAgentConnection(root, agent, resumeIdRef.current);
 		connectionRef.current = connection;
 		const stopState = connection.watchState(state => {

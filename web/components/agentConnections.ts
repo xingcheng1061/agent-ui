@@ -15,8 +15,9 @@ import { deleteLiveTurn, writeLiveTurn } from './liveTurnStore';
  *   IndexedDB mirror stays complete and no delta is lost;
  * - it is closed once idle (see `IDLE_GRACE_MS`), so background conversations
  *   cannot pile up sockets forever (`MAX_BACKGROUND` is the hard cap);
- * - reconnecting sends the last applied `seq`, and the server replays exactly
- *   the tail this client missed (see `_replayTail` on the server).
+ * - reconnecting sends the last applied `seq`, but the server no longer buffers
+ *   events, so anything missed while the socket was down is gone; this side's
+ *   IndexedDB mirror is what a panel falls back to.
  */
 
 /** Reconnect delay after the socket drops. */

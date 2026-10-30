@@ -51,10 +51,17 @@ interface LiveSession {
 	/**
 	 * Buffered events of the turn in flight, each already carrying its `seq`.
 	 *
-	 * This is what makes "switch to another conversation and come back" lossless:
-	 * the process keeps emitting while nobody watches, and a client that returns
-	 * with its last `seq` is replayed exactly the tail it missed. Cleared when the
-	 * next turn starts — from then on the jsonl owns the finished one.
+	 * DISABLED: nothing is written here any more. Switching conversations never
+	 * closes the socket (the browser pool keeps it, see `agentConnections.ts`),
+	 * so the panel coming back has its own copy already, and a finished turn
+	 * belongs to the jsonl. The server-side copy therefore only cost memory on
+	 * every session that still had a process — up to `MAX_LOG_EVENTS` events,
+	 * with no byte cap, kept until the next turn started.
+	 *
+	 * The field, the `entry.log.push` block, `MAX_LOG_EVENTS` and `_replayTail`
+	 * are kept commented/empty so the mechanism can be restored as a unit: the
+	 * price of turning it back on is that a dropped socket loses whatever the
+	 * browser missed mid-stream, which the jsonl does not have yet.
 	 */
 	readonly log: AgentServerEvent[];
 	/** Highest `seq` handed out for this session; never reset. */
@@ -63,8 +70,8 @@ interface LiveSession {
 	queued: string[];
 }
 
-/** Upper bound on the in-flight event log; deltas are numerous. */
-const MAX_LOG_EVENTS = 4000;
+// /** Upper bound on the in-flight event log; deltas are numerous. */
+// const MAX_LOG_EVENTS = 4000;
 
 /** How often dead peers are probed; a missed pong terminates the socket. */
 const KEEP_ALIVE_INTERVAL_MS = 30_000;
@@ -338,7 +345,9 @@ class AgentConnection {
 					this._attach(entry);
 					const lastSeq = typeof command.lastSeq === 'number' && command.lastSeq > 0 ? command.lastSeq : undefined;
 					this._log(`attach adopted ${entry.cliSessionId?.slice(0, 8) ?? '(pending)'} busy=${entry.busy} lastSeq=${lastSeq ?? '-'}`);
-					this._replayTail(entry, lastSeq);
+					// Buffering is disabled: the browser pool keeps its socket, so a
+					// panel that comes back already has the events it needs.
+					// this._replayTail(entry, lastSeq);
 					if (entry.queued.length > 0) {
 						this._sendQueue(entry);
 					}
@@ -377,11 +386,11 @@ class AgentConnection {
 					this._sendQueue(entry);
 					this._log(`queued (${entry.queued.length} waiting)`);
 				}
-				if (!entry.busy) {
-					// A fresh turn starts: the previous one is on disk by now, so its
-					// buffered tail is no longer needed for replay.
-					entry.log.length = 0;
-				}
+				// if (!entry.busy) {
+				// 	// A fresh turn starts: the previous one is on disk by now, so its
+				// 	// buffered tail is no longer needed for replay.
+				// 	entry.log.length = 0;
+				// }
 				entry.busy = true;
 				entry.session.sendUserMessage(text);
 				return;
@@ -567,14 +576,15 @@ class AgentConnection {
 
 			entry.lastSeq += 1;
 			const outbound = { ...event, seq: entry.lastSeq } satisfies AgentServerEvent;
-			// Only the turn in flight is buffered; a finished one is replayed from
-			// the jsonl instead.
-			if (entry.busy || event.type === 'result' || event.type === 'exit') {
-				entry.log.push(outbound);
-				if (entry.log.length > MAX_LOG_EVENTS) {
-					entry.log.splice(0, entry.log.length - MAX_LOG_EVENTS);
-				}
-			}
+			// Buffering is disabled (see `LiveSession.log`): events go straight to
+			// the watchers. Only the turn in flight used to be kept, and it was
+			// cleared when the next turn started.
+			// if (entry.busy || event.type === 'result' || event.type === 'exit') {
+			// 	entry.log.push(outbound);
+			// 	if (entry.log.length > MAX_LOG_EVENTS) {
+			// 		entry.log.splice(0, entry.log.length - MAX_LOG_EVENTS);
+			// 	}
+			// }
 			this._broadcast(entry, JSON.stringify(outbound));
 		};
 
@@ -632,7 +642,9 @@ class AgentConnection {
 			sessionId: entry.cliSessionId,
 			busy: entry.busy,
 			lastSeq: entry.lastSeq,
-			oldestSeq: entry.log[0]?.seq,
+			// No buffer, so there is nothing to report: a client that missed events
+			// has to fall back to its own mirror.
+			// oldestSeq: entry.log[0]?.seq,
 		});
 		// Let a reconnecting client learn the id it should keep using, plus the
 		// model/mode the running backend is actually in.
@@ -685,27 +697,26 @@ class AgentConnection {
 	}
 
 	/**
-	 * Replays the part of the running turn a returning client has not seen.
+	 * DISABLED with the buffer itself — there is nothing to replay.
 	 *
-	 * `lastSeq` is the client's own high-water mark, so replay is exact rather
-	 * than "everything we have": a tab that was open in the background while
-	 * another one watched gets only the tail it missed. A client with no mark
-	 * (fresh page) gets nothing — the jsonl is authoritative for it, and
-	 * replaying on top of that history would duplicate the turn.
+	 * What it used to do: replay the part of the running turn a returning client
+	 * had not seen, using the client's own high-water mark so only the missed
+	 * tail was sent. Kept here so the mechanism can be restored as a unit
+	 * together with `LiveSession.log` and the `entry.log.push` block.
 	 */
-	private _replayTail(entry: LiveSession, lastSeq: number | undefined): void {
-		if (lastSeq === undefined || !entry.busy) {
-			return;
-		}
-		const tail = entry.log.filter(event => (event.seq ?? 0) > lastSeq);
-		if (tail.length === 0) {
-			return;
-		}
-		this._log(`replaying ${tail.length} buffered events after seq ${lastSeq}`);
-		for (const event of tail) {
-			this._send(event);
-		}
-	}
+	// private _replayTail(entry: LiveSession, lastSeq: number | undefined): void {
+	// 	if (lastSeq === undefined || !entry.busy) {
+	// 		return;
+	// 	}
+	// 	const tail = entry.log.filter(event => (event.seq ?? 0) > lastSeq);
+	// 	if (tail.length === 0) {
+	// 		return;
+	// 	}
+	// 	this._log(`replaying ${tail.length} buffered events after seq ${lastSeq}`);
+	// 	for (const event of tail) {
+	// 		this._send(event);
+	// 	}
+	// }
 
 	private _detach(): void {
 		const entry = this._entry;
