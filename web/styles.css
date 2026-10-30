@@ -348,6 +348,19 @@ button {
 	animation: agent-pulse 1.2s ease-in-out infinite;
 }
 
+/* A conversation blocked on an approval. Shown even when the approval was
+   raised in a tab this page is not attached to, or the turn stalls silently. */
+.session-badge {
+	flex: none;
+	padding: 0 4px;
+	border: 1px solid var(--warn-border);
+	border-radius: 3px;
+	background: var(--warn-bg);
+	color: var(--warn);
+	font-size: 10px;
+	line-height: 14px;
+}
+
 .session-meta {
 	display: flex;
 	align-items: center;

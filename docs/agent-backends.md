@@ -222,6 +222,8 @@ const agents = await createAgentRuntime({
 
 如果后端有自己的审批机制，把决策转成 `permission_request` 事件，前端会渲染统一的审批卡片（允许 / 本会话总是允许 / 拒绝）。`resolvePermission` 返回 `false` 表示这个 requestId 不存在或已过期。
 
+实现 `pendingPermission?()` 后，客户端重连时路由会重发那条审批：浏览器里的卡片是易失的，后端那边的阻塞不是，不重发就会出现「界面以为没事了、CLI 一直等着」。返回值要给全 `requestId` + 原始 prompt，否则重发的卡片点下去对不上。
+
 ## 与 claude 后端的差异点
 
 `plugins/claude.ts` + `claudeCliSession.ts` 里这些是 claude 特有的，新后端不需要照抄：

@@ -55,7 +55,7 @@ claude --print --verbose \
 | `task_progress` | `taskId`、`description`、`usage` | 子 agent 的实时步骤描述与 token 增量 |
 | `task_output` | `taskId`、`file`、`chunk` | 后台任务输出文件的增量 |
 | `task_notification` | `taskId`、`status`、`summary`、`outputFile`、`usage` | 任务结束 |
-| `permission_request` | `requestId`、`toolName`、`input`、`toolUseId?` | 需要审批 |
+| `permission_request` | `requestId`、`toolName`、`input`、`toolUseId?` | 需要审批。`attach` 时若该会话仍有未答复的审批，会以同一个 `requestId` **补发一次**（刷新、换标签、切走再回来都能重新看到卡片） |
 | `permission_cancelled` | — | 用户发了新消息，未处理的审批被取消 |
 | `result` | `subtype`、`isError`、`text`、`costUsd`、`durationMs`、`numTurns` | 一轮结束 |
 | `error` | `message` | CLI 报错或服务端主动提示 |

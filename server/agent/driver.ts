@@ -27,6 +27,12 @@ export interface PermissionPrompt {
 	readonly toolUseId?: string;
 }
 
+/** An approval the backend is blocked on, replayed to a client that reconnects. */
+export interface PendingPermissionInfo {
+	readonly requestId: string;
+	readonly prompt: PermissionPrompt;
+}
+
 export interface AgentSessionOptions {
 	readonly cwd: string;
 	readonly permissionMode: string;
@@ -47,6 +53,14 @@ export interface AgentSession {
 	setPermissionMode(mode: string): void;
 	resolvePermission(requestId: string, decision: PermissionDecision): boolean;
 	hasPendingPermission(): boolean;
+	/**
+	 * The approval this session is blocked on right now, if any.
+	 *
+	 * A client that reconnects (a refresh, another tab, switching conversations
+	 * and back) only receives events emitted *after* it attached, so without
+	 * this the approval card vanished while the backend kept waiting.
+	 */
+	pendingPermission?(): PendingPermissionInfo | undefined;
 	/**
 	 * Whether approvals in `mode` can still reach the user on *this* process.
 	 *

@@ -13,6 +13,13 @@ interface SessionSidebarProps {
 	 * attached to, so this comes from the server's run registry.
 	 */
 	readonly running?: ReadonlyMap<string, boolean>;
+	/**
+	 * Session id → the tool it is blocked on, waiting for the user's decision.
+	 *
+	 * Also server-side: an approval raised by a conversation this page is not
+	 * attached to still has to be visible here, or it waits unnoticed.
+	 */
+	readonly approvals?: ReadonlyMap<string, string>;
 }
 
 const ALL = 'all';
@@ -25,6 +32,7 @@ export function SessionSidebar({
 	onSelectSession,
 	onNewSession,
 	running,
+	approvals,
 }: SessionSidebarProps) {
 	const [filter, setFilter] = useState<string>(ALL);
 
@@ -67,17 +75,19 @@ export function SessionSidebar({
 					<div className="bucket-title">{bucket.label}</div>
 					{bucket.sessions.map(session => {
 						const live = running?.get(session.id);
+						const pendingTool = approvals?.get(session.id);
 						return (
 							<button
 								type="button"
 								key={session.id}
 								className={`session-row${session.id === activeSessionId ? ' active' : ''}`}
 								onClick={() => onSelectSession(session)}
-								title={`${session.title}\n${session.cwd}${live === true ? '\n正在回答' : live === false ? '\n进程在运行，空闲' : ''}`}
+								title={`${session.title}\n${session.cwd}${pendingTool ? `\n等待审批：${pendingTool}` : ''}${live === true ? '\n正在回答' : live === false ? '\n进程在运行，空闲' : ''}`}
 							>
 								<span className="session-title">
 									{live !== undefined && <i className={`session-run${live ? ' busy' : ''}`} />}
 									<span className="session-text">{session.title}</span>
+									{pendingTool && <span className="session-badge">待审批</span>}
 								</span>
 								<span className="session-meta">
 									<span className="session-project">{projectName(session.projectId)}</span>

@@ -82,7 +82,7 @@ const childrenOf = (id: string) => items.filter(item => parentOf(item) === id);
 - `task_started` / `task_progress` / `task_notification` 更新 `tasks`，同时挂到对应的 `Agent` 工具卡片上
 - `task_output` 追加到 `outputs[taskId]`，200KB 封顶
 - `result` → `streaming=false`、清空思考计数、推 `result` 摘要卡片、触发父组件刷新 git 变更
-- `permission_request` → 弹审批卡；`autoAllowRef` 里有的工具名直接自动允许
+- `permission_request` → 弹审批卡；`autoAllowRef` 里有的工具名直接自动允许。页面不可见时额外走 `web/attention.ts`：提示音 + 系统通知 + 标题角标，同一个 `requestId` 的重发不会重复提醒（见 `attach` 的补发）
 
 ## 渲染管线
 

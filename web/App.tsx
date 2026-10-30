@@ -6,6 +6,7 @@ import { NewSessionDialog } from './components/NewSessionDialog';
 import { PasswordDialog } from './components/PasswordDialog';
 import { SessionSidebar } from './components/SessionSidebar';
 import { Splitter, clamp, usePersistedSize } from './components/Splitter';
+import { attentionEnabled, onAttentionChange, setAttentionEnabled } from './attention';
 import { getTheme, toggleTheme } from './theme';
 import { Workspace } from './components/Workspace';
 
@@ -66,10 +67,21 @@ export function App() {
 	 * events never reach this page, so the server has to be asked.
 	 */
 	const [running, setRunning] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+	/**
+	 * Session id → the tool it is blocked on, waiting for the user to decide.
+	 * Polled with `running` for the same reason: the approval may belong to a
+	 * conversation this tab is not attached to.
+	 */
+	const [approvals, setApprovals] = useState<ReadonlyMap<string, string>>(() => new Map());
 	// The label has to follow the theme, so it lives in state rather than being
 	// read once during render.
 	const [theme, setThemeState] = useState(getTheme);
+	// Approvals arrive from a background tab, so the reminder switch is part of
+	// the shell rather than of the chat panel that happens to be open.
+	const [attentionOn, setAttentionOn] = useState(attentionEnabled);
 	const [auth, setAuth] = useState<AuthState>({ kind: 'loading' });
+
+	useEffect(() => onAttentionChange(setAttentionOn), []);
 
 	// Chat and code are side by side, so both widths are user controlled and
 	// remembered across reloads.
@@ -128,6 +140,9 @@ export function App() {
 		try {
 			const list = await runningSessions();
 			setRunning(new Map(list.map(session => [session.sessionId, session.busy])));
+			setApprovals(new Map(list.flatMap(session => session.pendingTool === undefined
+				? []
+				: [[session.sessionId, session.pendingTool] as const])));
 		} catch {
 			// A failed poll keeps the previous answer; the next one corrects it.
 		}
@@ -251,6 +266,14 @@ export function App() {
 				>
 					{theme === 'dark' ? '明亮主题' : '暗色主题'}
 				</button>
+				<button
+					type="button"
+					className="toggle"
+					title="需要审批时用声音和系统通知提醒；开启会请求浏览器通知权限"
+					onClick={() => { void setAttentionEnabled(!attentionOn); }}
+				>
+					{attentionOn ? '提醒：开' : '提醒：关'}
+				</button>
 				<button type="button" className="toggle" onClick={() => { void refresh().catch(reason => setError(String(reason))); }}>刷新</button>
 			</header>
 
@@ -262,6 +285,7 @@ export function App() {
 					onSelectSession={selectSession}
 					onNewSession={() => setDialogOpen(true)}
 					running={running}
+					approvals={approvals}
 				/>
 				<Splitter axis="x" onResize={delta => setRailWidth(clamp(railWidth + delta, 160, 520))} />
 

@@ -79,6 +79,8 @@ export interface RunningSessionInfo {
 	readonly agent: string;
 	/** A turn is being answered right now. */
 	readonly busy: boolean;
+	/** The tool the process is blocked on, waiting for the user to decide. */
+	readonly pendingTool?: string;
 	readonly permissionMode?: string;
 	readonly lastSeq: number;
 }
@@ -114,6 +116,7 @@ export function createAgentServer(options: Omit<AgentServerOptions, 'cwd'>): Web
 				root: entry.root,
 				agent: entry.agentId,
 				busy: entry.busy,
+				pendingTool: entry.session.pendingPermission?.()?.prompt.toolName,
 				permissionMode: entry.permissionMode,
 				lastSeq: entry.lastSeq,
 			});
@@ -646,6 +649,18 @@ class AgentConnection {
 				skills: entry.skills,
 				agents: entry.agents,
 				models: driver.models,
+			});
+		}
+		// A client that reconnects (refresh, another tab, switching back) never saw
+		// the original request, while the CLI is still blocked on it. Replay it.
+		const pending = entry.session.pendingPermission?.();
+		if (pending) {
+			this._send({
+				type: 'permission_request',
+				requestId: pending.requestId,
+				toolName: pending.prompt.toolName,
+				input: pending.prompt.input,
+				toolUseId: pending.prompt.toolUseId,
 			});
 		}
 	}

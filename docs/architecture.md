@@ -91,7 +91,7 @@
 
 会话之间**不共享连接**：连接池按会话各开一条，切走时只是没人渲染，事件继续进那一条的镜像，所以「A 在跑、你去看 B」不会打断 A，切回来也不需要重新加载历史。细节见 [agent-protocol.md](./agent-protocol.md#多会话并行seq缓冲与观众)。
 
-侧栏的「正在回答」标记来自 `GET /api/agents/running`（3 秒轮询）：聊天 socket 只认识自己连着的那一个会话，没打开的会话在干什么只能问服务端。接口返回 `{sessionId, root, agent, busy, permissionMode, lastSeq}`，`busy` 决定圆点是脉冲还是静态。
+侧栏的「正在回答」标记来自 `GET /api/agents/running`（3 秒轮询）：聊天 socket 只认识自己连着的那一个会话，没打开的会话在干什么只能问服务端。接口返回 `{sessionId, root, agent, busy, pendingTool?, permissionMode, lastSeq}`，`busy` 决定圆点是脉冲还是静态；`pendingTool` 非空表示该会话正卡在审批上，侧栏据此显示「待审批」——包括在别的标签页里被卡住的那种。
 
 ### 3. 工具审批
 
@@ -104,6 +104,8 @@ claude 需要授权
   → gateway resolve → MCP 工具返回 {behavior:'allow', updatedInput}
   → claude 继续执行
 ```
+
+审批不会因为界面丢失而蒸发。卡片状态存在浏览器里，而 CLI 仍阻塞在 MCP 调用上，所以 `attach` 时服务端会用**同一个 `requestId` 重发**一次 `permission_request`——刷新、换标签、切到别的会话再回来，卡片都会重新出现。等待上限是 `AGENT_UI_PERMISSION_TIMEOUT_MS`（默认 24 小时），到点自动拒绝并记 `permission timeout -> deny`；用户主动发新消息则立刻取消挂起的审批。
 
 ## 多后端并存
 

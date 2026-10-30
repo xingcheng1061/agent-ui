@@ -244,6 +244,8 @@ export interface RunningSession {
 	readonly root: string;
 	readonly agent: string;
 	readonly busy: boolean;
+	/** Set while the process is blocked on an approval the user has not given. */
+	readonly pendingTool?: string;
 	readonly permissionMode?: string;
 }
 

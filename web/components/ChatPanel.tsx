@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentClientCommand, AgentInfo, AgentServerEvent, AgentTaskUsage } from '../agentTypes';
 import { getTranscript, reportClientLog, searchFiles, type TranscriptItem } from '../api';
+import { clearAttention, requestAttention } from '../attention';
 import { acquireAgentConnection, type AgentConnectionHandle } from './agentConnections';
 import { CodeHighlight, guessLanguage } from './CodeHighlight';
 import { deleteLiveTurn, pruneLiveTurns, readLiveTurn } from './liveTurnStore';
@@ -280,6 +281,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		setTasks([]);
 		setOutputs({});
 		setPermission(undefined);
+		clearAttention();
 		setStreaming(false);
 		setBackendLive(undefined);
 		setQueued([]);
@@ -607,6 +609,13 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						input: event.input,
 						toolUseId: event.toolUseId,
 					});
+					// The CLI is blocked until this is answered, so reach the user
+					// even when the tab is in the background.
+					requestAttention({
+						title: '需要审批',
+						body: `${event.toolName} 正在等待你的决定`,
+						requestId: event.requestId,
+					});
 					return;
 				case 'result': {
 					closeStream();
@@ -640,6 +649,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				case 'permission_cancelled':
 					setPermission(undefined);
 					setStatus('已取消审批');
+					clearAttention();
 					return;
 				case 'error':
 					setStreaming(false);
@@ -648,6 +658,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				case 'exit':
 					setStreaming(false);
 					setPermission(undefined);
+					clearAttention();
 					setItems(previous => [...previous, {
 						kind: 'error',
 						id: nextId(),
@@ -811,7 +822,9 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		}
 		streamRef.current.clear();
 		setItems(previous => [...previous, { kind: 'user', id: nextId(), text }]);
+		// Sending a message drops a pending approval on the server side.
 		setPermission(undefined);
+		clearAttention();
 		setDraft('');
 		setCursor(0);
 		setPicker(undefined);
@@ -871,6 +884,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		});
 		setPermission(undefined);
 		setStatus('就绪');
+		clearAttention();
 	};
 
 	const runningTasks = tasks.filter(task => task.status === 'running').length;

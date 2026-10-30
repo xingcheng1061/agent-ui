@@ -44,11 +44,15 @@ function durationFromEnv(name: string, fallback: number): number {
 export const REAP_DELAY_MS = durationFromEnv('AGENT_UI_REAP_MS', 60 * 60 * 1000);
 
 /**
- * How long an approval card may sit unanswered before it is denied. An hour:
- * the user often walks away mid-turn, and the card is resolved immediately when
- * they send a new message instead (see the `user` command handler).
+ * How long an approval card may sit unanswered before it is denied.
+ *
+ * A day, not an hour: the user routinely walks away mid-turn (lunch, a meeting,
+ * overnight) and coming back to "the agent denied everything and moved on" is
+ * worse than a process that idles until it is stopped. The card is also resolved
+ * immediately when the user sends a new message instead (see the `user` command
+ * handler), and the process is killed with the session, so nothing leaks.
  */
-export const PERMISSION_TIMEOUT_MS = durationFromEnv('AGENT_UI_PERMISSION_TIMEOUT_MS', 60 * 60 * 1000);
+export const PERMISSION_TIMEOUT_MS = durationFromEnv('AGENT_UI_PERMISSION_TIMEOUT_MS', 24 * 60 * 60 * 1000);
 
 /** Grace period for the CLI to acknowledge an interrupt before a hard kill. */
 export const INTERRUPT_GRACE_MS = durationFromEnv('AGENT_UI_INTERRUPT_GRACE_MS', 5000);

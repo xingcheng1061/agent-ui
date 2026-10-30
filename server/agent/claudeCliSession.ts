@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { DEBUG, INTERRUPT_GRACE_MS, INTERNAL_ORIGIN, INTERNAL_TOKEN, MODELS, PERMISSION_TIMEOUT_MS, stamp } from '../config.js';
-import type { AgentSession, AgentSessionOptions, PermissionDecision, PermissionPrompt } from './driver.js';
+import type { AgentSession, AgentSessionOptions, PendingPermissionInfo, PermissionDecision, PermissionPrompt } from './driver.js';
 import { bindPermissionHost } from './permissionGateway.js';
 import type { AgentServerEvent, AgentTaskUsage } from './protocol.js';
 
@@ -117,7 +117,17 @@ export class ClaudeCliSession implements AgentSession {
 	private readonly _messageIds = new Map<string, string>();
 	private readonly _stderrLines: string[] = [];
 	private readonly _pendingControl = new Map<string, (subtype: string) => void>();
-	private readonly _pendingPermissions = new Map<string, (decision: PermissionDecision) => void>();
+	/**
+	 * Blocked approvals, keyed by request id.
+	 *
+	 * The prompt is kept alongside the resolver so a client that reconnects can
+	 * be shown the same card again — the CLI is still blocked on it, and a
+	 * missing card used to mean a silent denial an hour later.
+	 */
+	private readonly _pendingPermissions = new Map<string, {
+		readonly prompt: PermissionPrompt;
+		readonly settle: (decision: PermissionDecision) => void;
+	}>();
 	/** Mirrors the CLI's current mode; it changes without a restart. */
 	private _permissionMode: string;
 	private readonly _taskIdByToolUse = new Map<string, string>();
@@ -292,13 +302,21 @@ export class ClaudeCliSession implements AgentSession {
 			return false;
 		}
 		this._pendingPermissions.delete(requestId);
-		pending(decision);
+		pending.settle(decision);
 		return true;
 	}
 
 	/** Whether the CLI is currently blocked waiting for an approval. */
 	hasPendingPermission(): boolean {
 		return this._pendingPermissions.size > 0;
+	}
+
+	/** Replayed by the router when a client attaches mid-approval. */
+	pendingPermission(): PendingPermissionInfo | undefined {
+		for (const [requestId, pending] of this._pendingPermissions) {
+			return { requestId, prompt: pending.prompt };
+		}
+		return undefined;
 	}
 
 	/** The bridge is always registered, so every mode can reach the browser. */
@@ -315,8 +333,8 @@ export class ClaudeCliSession implements AgentSession {
 			return;
 		}
 		this._log(`cancel ${this._pendingPermissions.size} pending approval(s)`);
-		for (const settle of [...this._pendingPermissions.values()]) {
-			settle({ behavior: 'deny', message: reason });
+		for (const pending of [...this._pendingPermissions.values()]) {
+			pending.settle({ behavior: 'deny', message: reason });
 		}
 		this._pendingPermissions.clear();
 	}
@@ -342,9 +360,12 @@ export class ClaudeCliSession implements AgentSession {
 				resolve({ behavior: 'deny', message: '审批超时。' });
 			}, PERMISSION_TIMEOUT_MS);
 			timer.unref?.();
-			this._pendingPermissions.set(requestId, decision => {
-				clearTimeout(timer);
-				resolve(decision);
+			this._pendingPermissions.set(requestId, {
+				prompt,
+				settle: decision => {
+					clearTimeout(timer);
+					resolve(decision);
+				},
 			});
 		});
 	}
@@ -360,7 +381,7 @@ export class ClaudeCliSession implements AgentSession {
 		}
 		this._pendingControl.clear();
 		for (const pending of this._pendingPermissions.values()) {
-			pending({ behavior: 'deny', message: '会话已关闭。' });
+			pending.settle({ behavior: 'deny', message: '会话已关闭。' });
 		}
 		this._pendingPermissions.clear();
 		for (const taskId of [...this._tails.keys()]) {

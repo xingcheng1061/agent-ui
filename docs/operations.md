@@ -23,7 +23,7 @@
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `AGENT_UI_REAP_MS` | `3600000`（1 小时） | WS 断开且空闲多久后回收 CLI 进程 |
-| `AGENT_UI_PERMISSION_TIMEOUT_MS` | `3600000`（1 小时） | 审批卡挂多久没点就自动拒绝 |
+| `AGENT_UI_PERMISSION_TIMEOUT_MS` | `86400000`（24 小时） | 审批卡挂多久没点就自动拒绝。设得长是有意的：离开一段时间回来发现「被自动拒绝、任务继续跑偏」比进程空等更糟 |
 | `AGENT_UI_INTERRUPT_GRACE_MS` | `5000` | 优雅中断多久没收到 ack 就降级为强杀 |
 | `AGENT_UI_DEBUG` | 空 | `=1` 打开服务端事件日志 |
 | `AGENT_UI_ADMIN_USER` | 空 | 与 `AGENT_UI_ADMIN_PASSWORD` 一起在启动时创建（或重置密码）管理员账号 |
