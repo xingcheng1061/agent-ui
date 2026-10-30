@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentClientCommand, AgentInfo, AgentServerEvent, AgentTaskUsage } from '../agentTypes';
-import { agentUrl, getTranscript, reportClientLog, searchFiles, type TranscriptItem } from '../api';
+import { getTranscript, reportClientLog, searchFiles, type TranscriptItem } from '../api';
+import { acquireAgentConnection, type AgentConnectionHandle } from './agentConnections';
 import { CodeHighlight, guessLanguage } from './CodeHighlight';
-import { deleteLiveTurn, pruneLiveTurns, readLiveTurn, writeLiveTurn } from './liveTurnStore';
+import { deleteLiveTurn, pruneLiveTurns, readLiveTurn } from './liveTurnStore';
 import { Markdown } from './Markdown';
 
 interface ToolResultInfo {
@@ -91,12 +92,6 @@ const SHELL_TOOLS: ReadonlySet<string> = new Set(['Bash', 'PowerShell', 'Shell',
 /** Cap per task so a chatty background shell cannot blow up the DOM. */
 const MAX_TASK_LOG = 200_000;
 
-/** Cap per session so a chatty turn cannot blow up IndexedDB. */
-const MAX_LIVE_EVENTS = 4000;
-
-/** How often the in-flight mirror is flushed to IndexedDB. */
-const LIVE_FLUSH_MS = 250;
-
 /** Fallback until the backend sends its advertised modes. */
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'] as const;
 
@@ -137,6 +132,17 @@ function toChatItems(items: readonly TranscriptItem[]): Item[] {
 		}
 	}
 	return result;
+}
+
+/** Highest `seq` in a batch, so a replay can skip whatever is already applied. */
+function maxSeqOf(events: readonly AgentServerEvent[] | null | undefined): number {
+	let max = 0;
+	for (const event of events ?? []) {
+		if (typeof event.seq === 'number' && event.seq > max) {
+			max = event.seq;
+		}
+	}
+	return max;
 }
 
 /**
@@ -200,7 +206,11 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	const [picker, setPicker] = useState<'model' | 'mode' | undefined>(undefined);
 	const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
-	const socketRef = useRef<WebSocket | undefined>(undefined);
+	/**
+	 * Borrowed from the connection pool, not owned here: switching conversation
+	 * must not cut a stream that is still running. See `agentConnections.ts`.
+	 */
+	const connectionRef = useRef<AgentConnectionHandle | undefined>(undefined);
 	const resumeIdRef = useRef<string | undefined>(sessionId);
 	const loadedIdRef = useRef<string | undefined>(undefined);
 	/** True while this panel is the one building the conversation it is showing. */
@@ -222,19 +232,11 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	const lastEventRef = useRef(Date.now());
 	const [stalled, setStalled] = useState(false);
 	const stalledRef = useRef(false);
+	/** Set between a stop click and the turn actually ending, so the click shows. */
+	const [stopRequested, setStopRequested] = useState(false);
 	const streamingRef = useRef(false);
 	/** Messages waiting for the running turn, mirrored from the server. */
 	const [queued, setQueued] = useState<readonly string[]>([]);
-	/**
-	 * Mirror of the in-flight turn, kept in IndexedDB. The CLI only appends to
-	 * its jsonl once a message is finished, so this is the only durable copy of
-	 * a turn that is still streaming.
-	 */
-	const liveEventsRef = useRef<AgentServerEvent[]>([]);
-	const liveQueuedRef = useRef<readonly string[]>([]);
-	const liveBusyRef = useRef(false);
-	const liveDirtyRef = useRef(false);
-	const liveSessionRef = useRef<string | undefined>(undefined);
 	const onSessionStartedRef = useRef(onSessionStarted);
 	const onTurnEndRef = useRef(onTurnEnd);
 
@@ -282,28 +284,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		setBackendLive(undefined);
 		setQueued([]);
 		setThinkingTokens(0);
-		liveEventsRef.current = [];
-		liveQueuedRef.current = [];
-		liveBusyRef.current = false;
-		liveSessionRef.current = undefined;
 	};
-
-	/**
-	 * True once per tab. A refresh keeps `sessionStorage`, a new tab or a closed
-	 * and reopened window does not — that is when the server has to resend the
-	 * queue of the running turn.
-	 */
-	const freshPageRef = useRef<boolean | undefined>(undefined);
-	if (freshPageRef.current === undefined) {
-		let fresh = true;
-		try {
-			fresh = sessionStorage.getItem('agent-ui:tab') === null;
-			sessionStorage.setItem('agent-ui:tab', '1');
-		} catch {
-			// Storage blocked: assume fresh, replaying is the safer default.
-		}
-		freshPageRef.current = fresh;
-	}
 
 	/**
 	 * Live events are held until the jsonl history has been applied, so the final
@@ -340,7 +321,6 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		loadedIdRef.current = sessionId;
 		resetTranscript();
 		serverBusyRef.current = undefined;
-		liveSessionRef.current = sessionId;
 		void pruneLiveTurns();
 		getTranscript(sessionId)
 			.then(async transcript => {
@@ -365,10 +345,14 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				if (buffered) {
 					flushReplay(buffered);
 				}
-				// Then the browser's mirror of the turn that was streaming when
-				// the page went away. Live deltas keep arriving after this, so the
-				// two join without a gap and without overlap.
-				const local = await readLiveTurn(sessionId);
+				// Everything up to `seenSeq` is on screen already; the mirror is a
+				// superset (the pooled connection keeps recording while history loads).
+				const seenSeq = maxSeqOf(buffered);
+				// Then the mirror of the turn that was streaming when the page went away
+				// or another conversation was open. The connection's own buffer is a beat
+				// newer than IndexedDB, so it wins when it has anything.
+				const liveSnapshot = connectionRef.current?.snapshot();
+				const local = liveSnapshot && liveSnapshot.events.length > 0 ? liveSnapshot : await readLiveTurn(sessionId);
 				if (loadedIdRef.current !== sessionId || !local || local.events.length === 0) {
 					return;
 				}
@@ -387,6 +371,9 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					return;
 				}
 				for (const event of dropDurableDeltas(local.events, transcript)) {
+					if (typeof event.seq === 'number' && event.seq <= seenSeq) {
+						continue;
+					}
 					handleEventRef.current(event);
 				}
 				if (local.queued.length > 0) {
@@ -412,7 +399,6 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 
 	useEffect(() => {
 		let disposed = false;
-		let retryTimer: number | undefined;
 
 		const upsertTask = (next: TaskState) => {
 			const index = tasksRef.current.findIndex(task => task.taskId === next.taskId);
@@ -671,72 +657,52 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			}
 		};
 
-		const connect = () => {
-			const socket = new WebSocket(agentUrl(root, agent));
-			socketRef.current = socket;
-			socket.addEventListener('open', () => {
-				reportClientLog({ event: 'ws-open', session: loadedIdRef.current });
-				// Handshake: adopt the process still running for this session, if
-				// any. Without it the model/mode/command lists only appeared after
-				// the next message was sent. `replay` asks for the in-flight turn.
-				socket.send(JSON.stringify({
-					type: 'attach',
-					sessionId: resumeIdRef.current,
-					replay: freshPageRef.current === true,
-				}));
-				if (!disposed) {
-					setConnection('open');
-					setStatus(previous => previous === '未连接' ? '就绪，等待输入' : previous);
-				}
-			});
-			socket.addEventListener('close', event => {
-				reportClientLog({
-					event: 'ws-close',
-					code: event.code,
-					reason: event.reason,
-					wasClean: event.wasClean,
-					streaming: streamingRef.current,
-					session: loadedIdRef.current,
-				});
-				if (disposed) {
-					return;
-				}
-				setConnection('closed');
+		// The socket lives in the pool, keyed by conversation: leaving this panel
+		// no longer closes it, so a turn that is still running keeps streaming
+		// into the IndexedDB mirror and is replayed from `seq` on return.
+		const connection = acquireAgentConnection(root, agent, resumeIdRef.current);
+		connectionRef.current = connection;
+		const stopState = connection.watchState(state => {
+			if (disposed) {
+				return;
+			}
+			setConnection(state);
+			if (state === 'closed') {
 				setStreaming(false);
-				retryTimer = window.setTimeout(connect, 1500);
-			});
-			socket.addEventListener('message', event => {
-				let parsed: AgentServerEvent;				try {
-					parsed = JSON.parse(String(event.data)) as AgentServerEvent;
-				} catch {
-					return;
-				}
-				lastEventRef.current = Date.now();
-				if (stalledRef.current) {
-					stalledRef.current = false;
-					setStalled(false);
-				}
-				// Hold replayed events until the jsonl history has been applied,
-				// otherwise the turn would appear before the conversation.
-				if (replayBuffer.current !== null && parsed.type !== 'session_state') {
-					replayBuffer.current.push(parsed);
-					return;
-				}
-				handleEvent(parsed);
-				recordLiveEvent(parsed);
-			});
-		};
+			}
+			if (state === 'open') {
+				setStatus(previous => previous === '未连接' ? '就绪，等待输入' : previous);
+			}
+		});
+		const stopEvents = connection.listen(parsed => {
+			if (disposed) {
+				return;
+			}
+			lastEventRef.current = Date.now();
+			if (stalledRef.current) {
+				stalledRef.current = false;
+				setStalled(false);
+			}
+			// Hold replayed events until the jsonl history has been applied,
+			// otherwise the turn would appear before the conversation.
+			if (replayBuffer.current !== null && parsed.type !== 'session_state') {
+				replayBuffer.current.push(parsed);
+				return;
+			}
+			handleEvent(parsed);
+		});
 
 		// Lets the transcript loader flush replayed events once history is ready.
 		handleEventRef.current = handleEvent;
 
-		connect();
 		return () => {
 			disposed = true;
-			if (retryTimer) {
-				clearTimeout(retryTimer);
+			stopEvents();
+			stopState();
+			connection.release();
+			if (connectionRef.current === connection) {
+				connectionRef.current = undefined;
 			}
-			socketRef.current?.close();
 		};
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [root, agent]);
@@ -798,6 +764,22 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		return () => window.clearInterval(timer);
 	}, [streaming]);
 
+	// The turn ended (or never started): the stop request has been answered.
+	useEffect(() => {
+		if (!streaming) {
+			setStopRequested(false);
+		}
+	}, [streaming]);
+
+	// ...and if nothing answers it, drop the notice rather than leave it lying.
+	useEffect(() => {
+		if (!stopRequested) {
+			return;
+		}
+		const timer = window.setTimeout(() => setStopRequested(false), 10_000);
+		return () => window.clearTimeout(timer);
+	}, [stopRequested]);
+
 	// Keep "running for Ns" labels ticking while a task is in flight.
 	const hasRunningTask = tasks.some(task => task.status === 'running');
 	const [now, setNow] = useState(() => Date.now());
@@ -809,71 +791,16 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		return () => window.clearInterval(timer);
 	}, [hasRunningTask]);
 
-	/** Appends one server event to the IndexedDB mirror of the live turn. */
-	const recordLiveEvent = (event: AgentServerEvent) => {
-		if (event.type === 'session_state') {
-			return;
-		}
-		if (event.type === 'queue') {
-			liveQueuedRef.current = event.items;
-			liveDirtyRef.current = true;
-			return;
-		}
-		if (event.type === 'result') {
-			// The turn is over: the jsonl owns it now, so the mirror goes away.
-			// Keeping it would replay a turn that is already in the history.
-			liveEventsRef.current = [];
-			liveQueuedRef.current = [];
-			liveBusyRef.current = false;
-			liveDirtyRef.current = true;
-			return;
-		}
-		liveEventsRef.current.push(event);
-		if (liveEventsRef.current.length > MAX_LIVE_EVENTS) {
-			liveEventsRef.current.shift();
-		}
-		liveDirtyRef.current = true;
-	};
-
-	// Batched writes: a stream pushes hundreds of deltas per second.
-	useEffect(() => {
-		const flush = () => {
-			if (!liveDirtyRef.current) {
-				return;
-			}
-			liveDirtyRef.current = false;
-			const sessionId = liveSessionRef.current;
-			if (!sessionId) {
-				return;
-			}
-			if (liveEventsRef.current.length === 0) {
-				void deleteLiveTurn(sessionId);
-				return;
-			}
-			void writeLiveTurn({
-				sessionId,
-				events: liveEventsRef.current,
-				queued: liveQueuedRef.current,
-				busy: liveBusyRef.current,
-				updatedAt: Date.now(),
-			});
-		};
-		const timer = window.setInterval(flush, LIVE_FLUSH_MS);
-		// A refresh or tab close is exactly when the mirror matters most.
-		window.addEventListener('pagehide', flush);
-		return () => {
-			window.clearInterval(timer);
-			window.removeEventListener('pagehide', flush);
-		};
-	}, []);
-
 	const send = (command: AgentClientCommand) => {
-		const socket = socketRef.current;
-		if (socket?.readyState === WebSocket.OPEN) {
-			socket.send(JSON.stringify(command));
-		}
+		connectionRef.current?.send(command);
 	};
 	sendRef.current = send;
+
+	// A conversation started here gets its id from `system`; the pooled
+	// connection has to follow it, or a later reattach would resume the wrong one.
+	useEffect(() => {
+		connectionRef.current?.follow(sessionId);
+	}, [sessionId]);
 
 	const submitText = (text: string) => {
 		// Sending while a turn runs is a queue, not an error: the CLI runs stdin
@@ -890,11 +817,12 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		setPicker(undefined);
 		setMenuDismissed(false);
 		setStreaming(true);
-		liveBusyRef.current = true;
+		connectionRef.current?.markBusy();
 		setThinkingTokens(0);
 		lastEventRef.current = Date.now();
 		stalledRef.current = false;
 		setStalled(false);
+		setStopRequested(false);
 		stickToBottomRef.current = true;
 		// `newSession` is what makes "new conversation" mean it: the socket may
 		// still be attached to the previous session, and without the flag the
@@ -906,6 +834,27 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	};
 
 	const submit = () => submitText(draft.trim());
+
+	/**
+	 * Which session a stop/kill click is aimed at. The server's default target is
+	 * whatever this socket spawned, which is empty after a reattach; naming the
+	 * session lets it find the live process anyway instead of doing nothing.
+	 */
+	const stopTargetId = () => meta.sessionId ?? resumeIdRef.current;
+
+	/**
+	 * Sends a stop and makes the click visible. A dropped socket used to swallow
+	 * it silently, which read as "the button is broken".
+	 */
+	const requestStop = (kind: 'interrupt' | 'kill') => {
+		const target = connectionRef.current;
+		if (target?.state !== 'open') {
+			setStatus('连接已断开，正在重连…');
+			return;
+		}
+		setStopRequested(true);
+		target.send({ type: kind, sessionId: stopTargetId() });
+	};
 
 	const answerPermission = (behavior: 'allow' | 'deny', always = false) => {
 		if (!permission) {
@@ -1233,17 +1182,19 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 							? '等待审批… 也可以直接发送新消息，这会取消本次审批'
 							: unknownSlash
 								? `“/${leadingSlash}”不是已注册命令，agent 会把它当斜杠命令拦截并返回空内容`
-								: stalled
-									? '已超过 1 分钟没有新输出，可能卡住了（可点「停止」后重发）'
-									: streaming
-										? '正在执行，可停止或强制结束'
-										: '/ 命令 · @ 文件 · Enter 发送'}
+								: stopRequested
+									? '已请求停止，等待当前轮收尾…'
+									: stalled
+										? '已超过 1 分钟没有新输出，可能卡住了（可点「停止」后重发）'
+										: streaming
+											? '正在执行，可停止或强制结束'
+											: '/ 命令 · @ 文件 · Enter 发送'}
 					</span>
-					{streaming && <button type="button" className="chip danger" onClick={() => send({ type: 'kill' })}>强制结束</button>}
+					{streaming && <button type="button" className="chip danger" onClick={() => requestStop('kill')}>强制结束</button>}
 					<button
 						type="button"
 						className={stopping ? 'primary stop' : 'primary'}
-						onClick={canSend ? submit : () => send({ type: 'interrupt' })}
+						onClick={canSend ? submit : () => requestStop('interrupt')}
 						disabled={!canSend && !streaming}
 					>
 						{/*

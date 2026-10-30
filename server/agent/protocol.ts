@@ -17,8 +17,19 @@ export interface AgentInfo {
 	readonly supportsResume: boolean;
 }
 
-/** Events pushed from the server to the browser over `WS /agent`. */
-export type AgentServerEvent =
+/**
+ * Events pushed from the server to the browser over `WS /agent`.
+ *
+ * Every event a session emits carries a `seq` that never resets for that
+ * session. A client keeps the highest one it has seen and sends it back on
+ * `attach`, so the server can replay exactly what was missed while it was
+ * looking at another conversation. Static config and queue snapshots carry no
+ * `seq`: they describe state, not a step in the stream.
+ */
+export type AgentServerEvent = AgentServerPayload & { readonly seq?: number };
+
+/** The event union itself; the envelope adds the sequence number. */
+export type AgentServerPayload =
 	| {
 		readonly type: 'system';
 		readonly sessionId: string;
@@ -48,8 +59,22 @@ export type AgentServerEvent =
 		/** All registered backends. */
 		readonly agents?: readonly AgentInfo[];
 	}
-	/** Answer to `attach`: whether a live CLI process backs this session. */
-	| { readonly type: 'session_state'; readonly live: boolean; readonly sessionId?: string; readonly busy?: boolean }
+	/**
+	 * Answer to `attach`: whether a live CLI process backs this session.
+	 *
+	 * `lastSeq` is the highest sequence number handed out so far, and
+	 * `oldestSeq` is the oldest event still buffered. When `oldestSeq` is
+	 * greater than the client's own position the buffer was truncated, so the
+	 * client has to reload the transcript instead of replaying.
+	 */
+	| {
+		readonly type: 'session_state';
+		readonly live: boolean;
+		readonly sessionId?: string;
+		readonly busy?: boolean;
+		readonly lastSeq?: number;
+		readonly oldestSeq?: number;
+	}
 	/** Messages waiting for the running turn to finish, in order. */
 	| { readonly type: 'queue'; readonly items: readonly string[] }
 	/** Coarse turn state reported by the CLI: `requesting`, `idle`, `compacting`, … */
@@ -122,8 +147,24 @@ export type AgentServerEvent =
 
 /** Commands sent from the browser. */
 export type AgentClientCommand =
-	/** Handshake on connect: adopt the running process for this session, if any. */
-	| { readonly type: 'attach'; readonly sessionId?: string; readonly replay?: boolean }
+	/**
+	 * Handshake on connect: adopt the running process for this session, if any,
+	 * and start receiving its live events.
+	 *
+	 * `lastSeq` is the highest sequence number the client already applied. When
+	 * the turn is still running the server replays everything after it, which is
+	 * how switching to another conversation and back leaves no gap. A client
+	 * without a position (fresh page) sends nothing and relies on the jsonl.
+	 *
+	 * Attaching never takes the stream away from another socket: a session open
+	 * in two tabs stays live in both.
+	 */
+	| { readonly type: 'attach'; readonly sessionId?: string; readonly lastSeq?: number }
+	/**
+	 * Stop receiving this session's events without touching its process, used
+	 * when the tab moves to another conversation. The server keeps buffering.
+	 */
+	| { readonly type: 'detach' }
 	/**
 	 * `sessionId` continues an existing CLI session (`--resume`) instead of
 	 * starting a new one. `newSession` says "start one" even though this socket is
@@ -131,10 +172,13 @@ export type AgentClientCommand =
 	 * that older transcript and no session file would be created.
 	 */
 	| { readonly type: 'user'; readonly text: string; readonly sessionId?: string; readonly newSession?: boolean }
-	/** Graceful stop: asks the CLI to abort the current turn, keeps the process alive. */
-	| { readonly type: 'interrupt' }
+	/**
+	 * Graceful stop: asks the CLI to abort the current turn, keeps the process alive.
+	 * `sessionId` names the target when this socket is not the one that spawned it.
+	 */
+	| { readonly type: 'interrupt'; readonly sessionId?: string }
 	/** Hard stop: kills the process (used when a graceful stop does not land). */
-	| { readonly type: 'kill' }
+	| { readonly type: 'kill'; readonly sessionId?: string }
 	/** Answer to a `permission_request`. */
 	| { readonly type: 'permission_response'; readonly requestId: string; readonly behavior: 'allow' | 'deny'; readonly message?: string }
 	/** Runtime switch through the CLI control channel; no process restart needed. */

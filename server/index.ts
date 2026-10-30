@@ -6,7 +6,7 @@ import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { preloadAgentState } from './agent/agentState.js';
 import { requestPermissionFromBrowser } from './agent/permissionGateway.js';
-import { createAgentServer } from './agent/router.js';
+import { createAgentServer, listRunningSessions } from './agent/router.js';
 import { createAgentRuntime, disposeAgentRuntime } from './agent/runtime.js';
 import {
 	ACCESS_TOKEN,
@@ -287,6 +287,17 @@ app.patch('/api/terminals/:id', async (req, res) => {
 app.delete('/api/terminals/:id', async (req, res) => {
 	await closeTerminal(req.params.id);
 	res.json({ ok: true });
+});
+
+/**
+ * Conversations that still have a process behind them.
+ *
+ * The chat socket only knows the conversation it is attached to, so without
+ * this the sidebar cannot tell "still answering in a tab I am not looking at"
+ * from "finished an hour ago".
+ */
+app.get('/api/agents/running', async (_req, res) => {
+	res.json({ sessions: listRunningSessions() });
 });
 
 /** Projects are derived from the CLI's own session store, so nothing needs registering. */

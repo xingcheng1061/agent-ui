@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { DEBUG, INTERRUPT_GRACE_MS, INTERNAL_ORIGIN, INTERNAL_TOKEN, MODELS, PERMISSION_TIMEOUT_MS, PROMPTING_MODES, stamp } from '../config.js';
+import { DEBUG, INTERRUPT_GRACE_MS, INTERNAL_ORIGIN, INTERNAL_TOKEN, MODELS, PERMISSION_TIMEOUT_MS, stamp } from '../config.js';
 import type { AgentSession, AgentSessionOptions, PermissionDecision, PermissionPrompt } from './driver.js';
 import { bindPermissionHost } from './permissionGateway.js';
 import type { AgentServerEvent, AgentTaskUsage } from './protocol.js';
@@ -120,8 +120,6 @@ export class ClaudeCliSession implements AgentSession {
 	private readonly _pendingPermissions = new Map<string, (decision: PermissionDecision) => void>();
 	/** Mirrors the CLI's current mode; it changes without a restart. */
 	private _permissionMode: string;
-	/** Whether this process was started with the MCP approval bridge. */
-	private readonly _promptBridge: boolean;
 	private readonly _taskIdByToolUse = new Map<string, string>();
 	private readonly _tails = new Map<string, TailState>();
 	private readonly _unbindPermissions: () => void;
@@ -154,17 +152,20 @@ export class ClaudeCliSession implements AgentSession {
 		}
 
 		// Approval prompts: the CLI spawns this MCP server and calls it whenever a
-		// tool needs a decision. Only register it for modes that actually prompt —
-		// with the tool present the CLI asks for *everything*, including edits that
-		// `acceptEdits` is supposed to allow, and then blocks on our answer.
+		// tool needs a decision.
+		//
+		// Registered unconditionally, because the alternative loses calls:
+		// - `bypassPermissions` is not "never ask", it still consults permissions
+		//   for some tools, and those prompts used to fall on the floor;
+		// - the tool list is fixed at spawn time, so a process started without it
+		//   could never approve again after the user switched back to `default`;
+		// - the price is that the CLI also asks about edits `acceptEdits` should
+		//   wave through, which `requestPermission` answers on its own.
 		const script = fileURLToPath(new URL('./permissionPrompt.mjs', import.meta.url));
-		this._promptBridge = PROMPTING_MODES.has(_options.permissionMode);
-		if (this._promptBridge) {
-			args.push(
-				'--mcp-config', JSON.stringify({ mcpServers: { agentui: { command: process.execPath, args: [script] } } }),
-				'--permission-prompt-tool', 'mcp__agentui__approval',
-			);
-		}
+		args.push(
+			'--mcp-config', JSON.stringify({ mcpServers: { agentui: { command: process.execPath, args: [script] } } }),
+			'--permission-prompt-tool', 'mcp__agentui__approval',
+		);
 
 		this._child = spawn(process.env['AGENT_UI_CLAUDE_BIN'] ?? 'claude', args, {
 			cwd: _options.cwd,
@@ -242,14 +243,6 @@ export class ClaudeCliSession implements AgentSession {
 			}
 			this._permissionMode = mode;
 			this._emit({ type: 'config', permissionMode: mode });
-			if (PROMPTING_MODES.has(mode) && !this._promptBridge) {
-				// The CLI only routes approvals through our MCP tool when it was
-				// registered at spawn time, so a late switch cannot enable it.
-				this._emit({
-					type: 'error',
-					message: `已切到 ${mode}，但当前进程启动时没挂审批通道，工具调用会被直接拒绝。新开一个会话即可启用交互式审批。`,
-				});
-			}
 		});
 	}
 
@@ -268,6 +261,27 @@ export class ClaudeCliSession implements AgentSession {
 			return;
 		}
 		this._log(`kill (${reason})`);
+		this._killChild();
+	}
+
+	/**
+	 * Terminates the CLI *and* its children.
+	 *
+	 * On Windows `child.kill()` only signals the `claude.exe` we spawned; the MCP
+	 * approval child it started and any tool subprocess would be left running as
+	 * orphans, still holding the approval port and their own memory.
+	 */
+	private _killChild(): void {
+		const pid = this._child.pid;
+		if (pid === undefined) {
+			this._child.kill();
+			return;
+		}
+		if (process.platform === 'win32') {
+			const taskkill = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+			taskkill.on('error', () => this._child.kill());
+			return;
+		}
 		this._child.kill();
 	}
 
@@ -285,6 +299,11 @@ export class ClaudeCliSession implements AgentSession {
 	/** Whether the CLI is currently blocked waiting for an approval. */
 	hasPendingPermission(): boolean {
 		return this._pendingPermissions.size > 0;
+	}
+
+	/** The bridge is always registered, so every mode can reach the browser. */
+	canPrompt(): boolean {
+		return true;
 	}
 
 	/**
@@ -307,6 +326,7 @@ export class ClaudeCliSession implements AgentSession {
 		if (this._disposed) {
 			return { behavior: 'deny', message: 'agent 进程已结束。' };
 		}
+
 		const requestId = `perm_${++this._permissionSeq}`;
 		this._emit({
 			type: 'permission_request',
@@ -348,7 +368,7 @@ export class ClaudeCliSession implements AgentSession {
 		}
 		this._child.stdout.removeAllListeners();
 		this._child.stderr.removeAllListeners();
-		this._child.kill();
+		this._killChild();
 	}
 
 	private _log(message: string): void {

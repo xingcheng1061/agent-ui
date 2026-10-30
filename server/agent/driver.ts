@@ -47,6 +47,16 @@ export interface AgentSession {
 	setPermissionMode(mode: string): void;
 	resolvePermission(requestId: string, decision: PermissionDecision): boolean;
 	hasPendingPermission(): boolean;
+	/**
+	 * Whether approvals in `mode` can still reach the user on *this* process.
+	 *
+	 * Some backends only install their approval channel at spawn time (the CLI
+	 * needs `--permission-prompt-tool` up front, and adding it makes the CLI ask
+	 * about *everything*, which breaks `acceptEdits`). Returning false tells the
+	 * router to restart the process with `--resume` instead of leaving the user
+	 * with a mode that silently denies every tool call.
+	 */
+	canPrompt?(mode: string): boolean;
 	cancelPendingPermissions(reason: string): void;
 	dispose(): void;
 }

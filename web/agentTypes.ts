@@ -19,7 +19,14 @@ export interface AgentInfo {
 	readonly supportsResume: boolean;
 }
 
-export type AgentServerEvent =
+/**
+ * Per-session sequence number carried by every streamed event. A reattaching
+ * client sends the highest one it applied, and the server replays the rest.
+ */
+export type AgentServerEvent = AgentServerPayload & { readonly seq?: number };
+
+/** The event union itself; the envelope adds the sequence number. */
+export type AgentServerPayload =
 	| {
 		readonly type: 'system';
 		readonly sessionId: string;
@@ -42,7 +49,15 @@ export type AgentServerEvent =
 		readonly agent?: string;
 		readonly agents?: readonly AgentInfo[];
 	}
-	| { readonly type: 'session_state'; readonly live: boolean; readonly sessionId?: string; readonly busy?: boolean }
+	/** `lastSeq`/`oldestSeq` locate the stream and expose a truncated buffer. */
+	| {
+		readonly type: 'session_state';
+		readonly live: boolean;
+		readonly sessionId?: string;
+		readonly busy?: boolean;
+		readonly lastSeq?: number;
+		readonly oldestSeq?: number;
+	}
 	| { readonly type: 'queue'; readonly items: readonly string[] }
 	| { readonly type: 'status'; readonly status: string }
 	| { readonly type: 'thinking_tokens'; readonly estimated: number; readonly delta: number }
@@ -100,11 +115,13 @@ export type AgentServerEvent =
 	| { readonly type: 'exit'; readonly code: number | null; readonly stderr?: string };
 
 export type AgentClientCommand =
-	| { readonly type: 'attach'; readonly sessionId?: string; readonly replay?: boolean }
+	| { readonly type: 'attach'; readonly sessionId?: string; readonly lastSeq?: number }
+	/** Stops watching a session without touching its process. */
+	| { readonly type: 'detach' }
 	/** `newSession` starts a fresh conversation instead of continuing the attached one. */
 	| { readonly type: 'user'; readonly text: string; readonly sessionId?: string; readonly newSession?: boolean }
-	| { readonly type: 'interrupt' }
-	| { readonly type: 'kill' }
+	| { readonly type: 'interrupt'; readonly sessionId?: string }
+	| { readonly type: 'kill'; readonly sessionId?: string }
 	| { readonly type: 'permission_response'; readonly requestId: string; readonly behavior: 'allow' | 'deny'; readonly message?: string }
 	| { readonly type: 'set_model'; readonly model: string }
 	| { readonly type: 'set_permission_mode'; readonly mode: string }

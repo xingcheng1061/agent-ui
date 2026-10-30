@@ -7,6 +7,12 @@ interface SessionSidebarProps {
 	readonly activeSessionId: string | undefined;
 	readonly onSelectSession: (session: SessionEntry) => void;
 	readonly onNewSession: () => void;
+	/**
+	 * Sessions with a process still running, mapped to whether a turn is being
+	 * answered right now. The chat socket only knows the conversation it is
+	 * attached to, so this comes from the server's run registry.
+	 */
+	readonly running?: ReadonlyMap<string, boolean>;
 }
 
 const ALL = 'all';
@@ -18,6 +24,7 @@ export function SessionSidebar({
 	activeSessionId,
 	onSelectSession,
 	onNewSession,
+	running,
 }: SessionSidebarProps) {
 	const [filter, setFilter] = useState<string>(ALL);
 
@@ -58,21 +65,27 @@ export function SessionSidebar({
 			{bucketize(visible).map(bucket => (
 				<div key={bucket.label}>
 					<div className="bucket-title">{bucket.label}</div>
-					{bucket.sessions.map(session => (
-						<button
-							type="button"
-							key={session.id}
-							className={`session-row${session.id === activeSessionId ? ' active' : ''}`}
-							onClick={() => onSelectSession(session)}
-							title={`${session.title}\n${session.cwd}`}
-						>
-							<span className="session-title">{session.title}</span>
-							<span className="session-meta">
-								<span className="session-project">{projectName(session.projectId)}</span>
-								<span className="session-time">{formatTime(session.updatedAt)}</span>
-							</span>
-						</button>
-					))}
+					{bucket.sessions.map(session => {
+						const live = running?.get(session.id);
+						return (
+							<button
+								type="button"
+								key={session.id}
+								className={`session-row${session.id === activeSessionId ? ' active' : ''}`}
+								onClick={() => onSelectSession(session)}
+								title={`${session.title}\n${session.cwd}${live === true ? '\n正在回答' : live === false ? '\n进程在运行，空闲' : ''}`}
+							>
+								<span className="session-title">
+									{live !== undefined && <i className={`session-run${live ? ' busy' : ''}`} />}
+									<span className="session-text">{session.title}</span>
+								</span>
+								<span className="session-meta">
+									<span className="session-project">{projectName(session.projectId)}</span>
+									<span className="session-time">{formatTime(session.updatedAt)}</span>
+								</span>
+							</button>
+						);
+					})}
 				</div>
 			))}
 		</div>

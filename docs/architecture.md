@@ -70,23 +70,28 @@
   → ClaudeCliSession.sendUserMessage() 写一行 JSON 到 claude 的 stdin
   → claude 流式吐出事件（stdout，一行一个 JSON）
   → _handleLine() 翻译成 AgentServerEvent
-  → emit()  → WS 推给浏览器
+  → emit()  → 打上 seq、进在途缓冲、广播给所有观众 socket
+  → agentConnections 连接池 → 写 IndexedDB 镜像 + 分发给 ChatPanel
   → ChatPanel.handleEvent()  → setItems / setTasks / setPermission …
-  → 同时 recordLiveEvent()  → IndexedDB
 ```
 
-### 2. 刷新恢复
+### 2. 刷新 / 切会话恢复
 
 ```
 新页面加载
   ├─ getTranscript(sessionId)      ← jsonl：截至上一个已完成轮的全部内容
-  ├─ readLiveTurn(sessionId)       ← IndexedDB：被中断那一轮的事件
-  └─ WS attach{replay:true}
-        └─ session_state{live, busy}  ← 告诉前端后台还有没有进程
- 拼接顺序：jsonl 历史 → 本地镜像 → 之后到达的实时 delta
+  ├─ 连接池里这一轮的镜像（或 IndexedDB）
+  └─ attach{lastSeq}               ← 告诉服务端已经收到哪一条
+        ├─ session_state{live, busy, lastSeq, oldestSeq}
+        └─ 若仍在跑：补发 seq > lastSeq 的事件
+ 拼接顺序：jsonl 历史 → 镜像 → 之后到达的实时 delta（按 seq 去重）
 ```
 
-`result` 一到就删掉 IndexedDB 记录——那一轮已经写进 jsonl 了，留着会重复。
+`result` 一到就删掉镜像——那一轮已经写进 jsonl 了，留着会重复。
+
+会话之间**不共享连接**：连接池按会话各开一条，切走时只是没人渲染，事件继续进那一条的镜像，所以「A 在跑、你去看 B」不会打断 A，切回来也不需要重新加载历史。细节见 [agent-protocol.md](./agent-protocol.md#多会话并行seq缓冲与观众)。
+
+侧栏的「正在回答」标记来自 `GET /api/agents/running`（3 秒轮询）：聊天 socket 只认识自己连着的那一个会话，没打开的会话在干什么只能问服务端。接口返回 `{sessionId, root, agent, busy, permissionMode, lastSeq}`，`busy` 决定圆点是脉冲还是静态。
 
 ### 3. 工具审批
 
@@ -127,24 +132,49 @@ WS /agent?root=…&agent=echo ───┘        │
 
 `claude` CLI 自带：登录态、会话持久化（jsonl）、`--resume`、技能与子 agent、权限模式。自己拼 SDK 要把这些全部重造一遍。代价是必须处理「进程生命周期」和「协议翻译」，见下。
 
-### 2. 为什么审批桥只在 `default`/`plan` 模式挂
+### 2. 为什么审批桥所有模式都挂
 
-`--permission-prompt-tool` 一旦注册，CLI 会把**所有**权限判定交给这个 MCP 工具——包括 `acceptEdits` 本该自动放行的编辑。表现是每一轮都卡在审批上，5 分钟超时后拒绝，然后模型再试，无限循环。
+`--permission-prompt-tool` 现在**无条件注册**。早先只给 `default`/`plan` 挂，理由是：一旦注册，CLI 会把**所有**权限判定交给这个 MCP 工具——包括 `acceptEdits` 本该自动放行的编辑，于是每轮都卡在卡片上，5 分钟超时拒绝，模型再试，无限循环。
 
-所以：
+但条件注册带来三个更糟的问题：
+
+1. `bypassPermissions` 不是「永不询问」——它对某些工具仍会走权限判定，而这些请求当时直接掉在地上；
+2. 工具列表是**启动时**固定的，运行中从 `acceptEdits`/`bypassPermissions` 切回 `default`，进程根本没有审批通道，卡片再也不会出现（只能新开会话）；
+3. 没有通道意味着「拒绝」是静默发生的，用户完全不知道发生了什么。
+
+所以改成**无条件注册**：
 
 ```ts
-const PROMPTING_MODES = new Set(['default', 'plan']);
-if (PROMPTING_MODES.has(permissionMode)) {
-	args.push('--mcp-config', …, '--permission-prompt-tool', 'mcp__agentui__approval');
-}
+// claudeCliSession.ts
+args.push('--mcp-config', …, '--permission-prompt-tool', 'mcp__agentui__approval');
 ```
 
-副作用：运行时从 `acceptEdits` 切到 `default` 时审批桥不存在（它是启动时决定的），此时服务端会明确提示「需要新开会话」而不是静默失效。
+服务端**不判断、不放行、不改写**任何决定，收到什么就转给浏览器：模式该放行的由 CLI 自己放行，该问的才走到卡片。实测（同一进程依次切模式，每次让模型 Write 一个文件）：
+
+| 模式 | 卡片 | 文件 |
+|---|---|---|
+| `default` | 1（Write） | 允许后创建 |
+| `acceptEdits` | 0 | 创建 |
+| `bypassPermissions` | 0 | 创建 |
+| 切回 `default` | 1（Write） | 允许后创建 |
+
+即：`acceptEdits` 并不会因为挂了审批工具就变成「每个编辑都问」——早先那条「会把所有判定都交出来」的结论在当前 CLI 上不成立，问题其实出在条件注册把审批通道整个关掉了。
 
 ### 3. 为什么中断走 control_request 而不是 kill 进程
 
 `kill()` 会连会话上下文一起毁掉。`control_request{subtype:'interrupt'}` 让 CLI 自己中止本轮并回 `control_response`，进程与历史都保留。5 秒没收到 ack 才降级为强杀（`AGENT_UI_INTERRUPT_GRACE_MS`）。
+
+两个按钮因此在语义上不同：
+
+| | 发什么 | 进程 | 上下文 | 之后 |
+|---|---|---|---|---|
+| 停止（`interrupt`） | `control_request{interrupt}` | 保留 | 保留 | 直接继续对话 |
+| 强制结束（`kill`） | 杀进程树 | 结束 | 保留在 jsonl | 下一条消息用 `--resume` 重开 |
+
+两个坑都在「强制结束」这一侧，已经修掉：
+
+- `_finalize()` 原先先把 `sockets` 清空再 dispose，于是唯一能把 UI 拉回空闲的 `exit` 事件根本发不出去——点了按钮看起来就是卡住。现在先 `_broadcast({type:'exit'})` 再清理。
+- Windows 上 `child.kill()` 只信号 `claude.exe` 本身，它拉起的 MCP 审批子进程和工具子进程会变成孤儿。改成 `taskkill /PID <pid> /T /F` 杀整棵树。
 
 ### 4. 为什么模型/模式切换也是 control_request
 
@@ -196,6 +226,8 @@ WS /terminal?id=xxx ──attach──┘   （无客户端 1 小时后回收）
 
 代价是多了一层注册表和一个回收计时器；收益是「多个终端」是真的多个并存的 shell，而不是「当前看得见的那个」。
 
+终端按**项目根目录**共享，不按会话：`Workspace` 只按 `root` 挂载，所以同一项目内切换会话连 WS 都不会断。同一个终端可以被多个客户端同时观看（`LiveTerminal.sockets` 是集合，`onData` 广播给全部），这在「同一个项目开两个浏览器标签」时是必需的——早先是单引用，后 attach 的会把前一个顶掉，前一个标签画面冻结却仍能往 shell 里敲字。唯一保留的竞争是 `resize`：两边窗口大小不同会互相覆盖，最后调用的赢。
+
 ## 鉴权：为什么用文件而不是数据库
 
 账号量级是「几个人」，读写频率是「登录时」。一个 JSON 文件 + 原子写足够，而且 `~/.agent-ui/users.json` 可以直接查看、可以直接备份、重置就是删文件。引入 SQLite 或 Postgres 只会多一个需要迁移和备份的组件。
@@ -209,5 +241,5 @@ WS /terminal?id=xxx ──attach──┘   （无客户端 1 小时后回收）
 | WS 不断但人走了，进程不回收 | 没有「用户还在看」的信号 | 内存持续占用，需重启服务 |
 | 服务被强杀会留孤儿 CLI 进程 | 信号处理器没机会跑；Ctrl+C 不传播给子进程 | 需手动结束，或重启后清扫 |
 | 换浏览器看不到进行中的轮次 | 镜像在浏览器侧 | 同浏览器刷新/重开没问题 |
-| 运行时切到 `default` 模式没有审批卡 | 审批桥是启动时注册的 | 需新开会话 |
+| 运行时切到 `default` 模式没有审批卡 | 审批桥曾按启动模式条件注册，切回来时通道不存在 | 改为无条件注册，服务端不介入判定 |
 | 单独终止某个后台任务 | CLI 的 `TaskStop` 只有模型能调 | 只能停整轮 |

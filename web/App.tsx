@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { fetchMe, listProjects, listSessions, logout, type ProjectInfo, type SessionEntry } from './api';
+import { fetchMe, listProjects, listSessions, logout, runningSessions, type ProjectInfo, type SessionEntry } from './api';
 import { AuthPage } from './components/AuthPage';
 import { ChatPanel } from './components/ChatPanel';
 import { NewSessionDialog } from './components/NewSessionDialog';
@@ -60,6 +60,12 @@ export function App() {
 	const [dialogOpen, setDialogOpen] = useState(false);
 	const [passwordOpen, setPasswordOpen] = useState(false);
 	const [revision, setRevision] = useState(0);
+	/**
+	 * Session id → a turn is being answered right now. Polled because a
+	 * conversation can keep running in a tab that is not open here; its socket
+	 * events never reach this page, so the server has to be asked.
+	 */
+	const [running, setRunning] = useState<ReadonlyMap<string, boolean>>(() => new Map());
 	// The label has to follow the theme, so it lives in state rather than being
 	// read once during render.
 	const [theme, setThemeState] = useState(getTheme);
@@ -111,6 +117,30 @@ export function App() {
 			return first ? { root: first.cwd } : undefined;
 		});
 	}, []);
+
+	/**
+	 * Polls which conversations still have a process.
+	 *
+	 * Deliberately not driven by socket events: the point is to show runs in tabs
+	 * this page is not attached to, and those events never arrive here.
+	 */
+	const refreshRunning = useCallback(async () => {
+		try {
+			const list = await runningSessions();
+			setRunning(new Map(list.map(session => [session.sessionId, session.busy])));
+		} catch {
+			// A failed poll keeps the previous answer; the next one corrects it.
+		}
+	}, []);
+
+	useEffect(() => {
+		if (auth.kind !== 'ready') {
+			return;
+		}
+		void refreshRunning();
+		const timer = window.setInterval(() => void refreshRunning(), 3000);
+		return () => window.clearInterval(timer);
+	}, [auth.kind, refreshRunning]);
 
 	// Resolve the session before anything else: every other call is 401 without it.
 	useEffect(() => {
@@ -231,6 +261,7 @@ export function App() {
 					activeSessionId={active?.sessionId}
 					onSelectSession={selectSession}
 					onNewSession={() => setDialogOpen(true)}
+					running={running}
 				/>
 				<Splitter axis="x" onResize={delta => setRailWidth(clamp(railWidth + delta, 160, 520))} />
 
@@ -251,7 +282,12 @@ export function App() {
 									setActive(current => current ? { ...current, sessionId } : current);
 									void refresh().catch(() => undefined);
 								}}
-								onTurnEnd={() => setRevision(value => value + 1)}
+								onTurnEnd={() => {
+									setRevision(value => value + 1);
+									// A finished turn flips the sidebar's marker at once
+									// instead of on the next poll tick.
+									void refreshRunning();
+								}}
 							/>
 							<Splitter axis="x" onResize={delta => setChatWidth(clamp(chatWidth + delta, 320, 1200))} />
 							<Workspace key={active.root} root={active.root} revision={revision} />

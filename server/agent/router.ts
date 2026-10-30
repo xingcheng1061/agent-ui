@@ -24,7 +24,9 @@ export interface AgentServerOptions {
 interface LiveSession {
 	/** Backend that owns this conversation; a session never switches in place. */
 	readonly agentId: string;
-	readonly session: AgentSession;
+	/** Project this conversation runs in; the sidebar groups runs by it. */
+	readonly root: string;
+	session: AgentSession;
 	/** Session id reported by the CLI, which is what `--resume` needs. */
 	cliSessionId?: string;
 	/** Current model the CLI is running, cached from `system/init` and config changes. */
@@ -35,19 +37,28 @@ interface LiveSession {
 	slashCommands?: readonly string[];
 	skills?: readonly string[];
 	agents?: readonly string[];
-	socket?: WebSocket;
+	/**
+	 * Sockets currently watching this session.
+	 *
+	 * A set, not a single socket: the same conversation may be open in two tabs,
+	 * or still watched by a tab the user switched away from, and neither may
+	 * steal the stream from the other. Sending is where dead sockets get pruned.
+	 */
+	readonly sockets: Set<WebSocket>;
 	reapTimer?: NodeJS.Timeout;
 	/** A turn is being answered; reaping now would silently kill the work. */
 	busy: boolean;
 	/**
-	 * Events of the turn currently in flight.
+	 * Buffered events of the turn in flight, each already carrying its `seq`.
 	 *
-	 * DISABLED: the same mirror now lives in the browser (IndexedDB, see
-	 * `web/components/liveTurnStore.ts`), which keeps the server stateless and
-	 * survives a server restart. The field and its writer are kept so the
-	 * server-side variant can be brought back by uncommenting `_logEvent`.
+	 * This is what makes "switch to another conversation and come back" lossless:
+	 * the process keeps emitting while nobody watches, and a client that returns
+	 * with its last `seq` is replayed exactly the tail it missed. Cleared when the
+	 * next turn starts — from then on the jsonl owns the finished one.
 	 */
 	readonly log: AgentServerEvent[];
+	/** Highest `seq` handed out for this session; never reset. */
+	lastSeq: number;
 	/** Messages sent while a turn is running; the CLI runs them in order. */
 	queued: string[];
 }
@@ -61,8 +72,54 @@ const KEEP_ALIVE_INTERVAL_MS = 30_000;
 /** Tracks liveness per socket without leaking a parallel map. */
 type TrackedSocket = WebSocket & { _agentAlive?: boolean };
 
+/** What the sidebar needs to know about a conversation that still has a process. */
+export interface RunningSessionInfo {
+	readonly sessionId: string;
+	readonly root: string;
+	readonly agent: string;
+	/** A turn is being answered right now. */
+	readonly busy: boolean;
+	readonly permissionMode?: string;
+	readonly lastSeq: number;
+}
+
+/**
+ * Snapshot hook for `GET /api/agents/running`.
+ *
+ * The runner map lives per server instance, but the process only ever creates
+ * one, and the HTTP side has no way to reach into it otherwise. Replaced on
+ * `createAgentServer`, so a second instance (tests) simply takes over.
+ */
+let snapshotRunning: () => readonly RunningSessionInfo[] = () => [];
+
+/** Conversations with a live process, including ones no tab is watching. */
+export function listRunningSessions(): readonly RunningSessionInfo[] {
+	return snapshotRunning();
+}
+
 export function createAgentServer(options: Omit<AgentServerOptions, 'cwd'>): WebSocketServer {
 	const live = new Map<string, LiveSession>();
+	snapshotRunning = () => {
+		// The map holds the same run under two keys until the CLI reports its id,
+		// so dedupe by identity or the sidebar would list a session twice.
+		const seen = new Set<LiveSession>();
+		const running: RunningSessionInfo[] = [];
+		for (const entry of live.values()) {
+			if (entry.cliSessionId === undefined || seen.has(entry)) {
+				continue;
+			}
+			seen.add(entry);
+			running.push({
+				sessionId: entry.cliSessionId,
+				root: entry.root,
+				agent: entry.agentId,
+				busy: entry.busy,
+				permissionMode: entry.permissionMode,
+				lastSeq: entry.lastSeq,
+			});
+		}
+		return running;
+	};
 	const server = new WebSocketServer({ noServer: true });
 	// Persisted model/mode choices; the spawn path reads it synchronously.
 	void preloadAgentState();
@@ -205,10 +262,22 @@ class AgentConnection {
 	}
 
 	private _sendQueue(entry: LiveSession): void {
-		if (entry.socket && entry.socket !== this._socket) {
-			return;
+		// Queue snapshots describe state rather than a step of the stream, so they
+		// go to every watcher but never into the replay buffer.
+		this._broadcast(entry, JSON.stringify({ type: 'queue', items: entry.queued } satisfies AgentServerEvent));
+	}
+
+	/** Sends one prepared payload to every socket watching the session. */
+	private _broadcast(entry: LiveSession, payload: string): void {
+		for (const socket of entry.sockets) {
+			if (socket.readyState === WebSocket.OPEN) {
+				socket.send(payload);
+			} else {
+				// A closed tab would otherwise keep a dead socket in the set for the
+				// whole life of the run.
+				entry.sockets.delete(socket);
+			}
 		}
-		this._send({ type: 'queue', items: entry.queued });
 	}
 
 	private _log(message: string): void {
@@ -264,19 +333,11 @@ class AgentConnection {
 				}
 				if (entry) {
 					this._attach(entry);
-					this._log(`attach adopted ${entry.cliSessionId?.slice(0, 8) ?? '(pending)'} busy=${entry.busy} replay=${command.replay === true}`);
-					if (command.replay === true) {
-						// The in-flight turn is replayed by the browser from its own
-						// IndexedDB copy, so the server only has to report the queue
-						// (which the browser cannot know about).
-						//
-						// Server-side replay, kept for reference:
-						// for (const event of entry.log) {
-						// 	this._send(event);
-						// }
-						if (entry.queued.length > 0) {
-							this._sendQueue(entry);
-						}
+					const lastSeq = typeof command.lastSeq === 'number' && command.lastSeq > 0 ? command.lastSeq : undefined;
+					this._log(`attach adopted ${entry.cliSessionId?.slice(0, 8) ?? '(pending)'} busy=${entry.busy} lastSeq=${lastSeq ?? '-'}`);
+					this._replayTail(entry, lastSeq);
+					if (entry.queued.length > 0) {
+						this._sendQueue(entry);
 					}
 					return;
 				}
@@ -313,15 +374,27 @@ class AgentConnection {
 					this._sendQueue(entry);
 					this._log(`queued (${entry.queued.length} waiting)`);
 				}
+				if (!entry.busy) {
+					// A fresh turn starts: the previous one is on disk by now, so its
+					// buffered tail is no longer needed for replay.
+					entry.log.length = 0;
+				}
 				entry.busy = true;
 				entry.session.sendUserMessage(text);
 				return;
 			}
-			case 'interrupt':
+			case 'interrupt': {
 				// Graceful: the CLI aborts the turn but keeps the session (and its
 				// conversation state) alive, so the next message just continues.
-				this._entry?.session.interrupt();
+				const target = this._entry ?? (typeof command.sessionId === 'string' ? this._findLive(command.sessionId) : undefined);
+				if (!target) {
+					// Silence here reads as "the button is broken"; say what happened.
+					this._send({ type: 'error', message: '没有正在运行的进程可以停止。' });
+					return;
+				}
+				target.session.interrupt();
 				return;
+			}
 			case 'set_model':
 				if (this._entry) {
 					this._entry.session.setModel(command.model);
@@ -359,16 +432,26 @@ class AgentConnection {
 				});
 				return;
 			case 'kill': {
-				const entry = this._entry;
-				this._entry = undefined;
-				if (entry) {
-					this._finalize(entry, 'kill');
+				// `_entry` can be unset while the browser still shows a running turn
+				// (a reattach raced, or the socket that spawned the process is gone),
+				// so fall back to the session id the client sends. Otherwise the click
+				// died silently and the UI looked frozen.
+				const entry = this._entry ?? (typeof command.sessionId === 'string' ? this._findLive(command.sessionId) : undefined);
+				if (this._entry === entry) {
+					this._entry = undefined;
 				}
+				if (!entry) {
+					this._send({ type: 'error', message: '没有正在运行的进程可以结束（可能已经退出）。' });
+					return;
+				}
+				this._finalize(entry, 'kill');
 				return;
 			}
+			case 'detach':
 			case 'reset':
 				// Keep the old process alive (it can still be resumed by id), just
-				// stop routing its events to this connection.
+				// stop routing its events to this connection. Other tabs watching the
+				// same session keep their stream.
 				this._detach();
 				return;
 		}
@@ -427,12 +510,6 @@ class AgentConnection {
 
 		let entry!: LiveSession;
 		const emit = (event: AgentServerEvent) => {
-			// Server-side mirror of the in-flight turn. Disabled in favour of the
-			// browser copy (IndexedDB); uncomment to restore it.
-			// entry.log.push(event);
-			// if (entry.log.length > MAX_LOG_EVENTS) {
-			// 	entry.log.shift();
-			// }
 			if (event.type === 'system') {
 				entry.cliSessionId = event.sessionId;
 				// Keep the alias the user picked (`sonnet`); init reports the
@@ -445,19 +522,27 @@ class AgentConnection {
 				this._live.set(event.sessionId, entry);
 				void rememberSessionChoice(event.sessionId, requested);
 				this._log(`system model=${event.model} mode=${event.permissionMode} session=${event.sessionId.slice(0, 8)}`);
+				// Handshake state rather than a step of the stream: no `seq`. The
+				// merged model keeps the alias the user picked.
+				this._broadcast(entry, JSON.stringify({
+					...event,
+					agent: entry.agentId,
+					...(entry.model ? { model: entry.model } : {}),
+				} satisfies AgentServerEvent));
+				return;
 			} else if (event.type === 'config') {
 				entry.model = event.model ?? entry.model;
 				entry.permissionMode = event.permissionMode ?? entry.permissionMode;
 			} else if (event.type === 'result') {
 				entry.busy = false;
-				// Server-side mirror disabled; see the comment on `LiveSession.log`.
-				// entry.log.length = 0;
+				// The tail is kept so a client that reattaches during the wrap-up still
+				// catches it; the next turn clears it (the jsonl owns it from then on).
 				if (entry.queued.length > 0) {
 					entry.queued = [];
 					this._sendQueue(entry);
 				}
 				this._log(`result ${event.subtype}${event.text ? '' : ' (no text)'}`);
-				if (!entry.socket) {
+				if (entry.sockets.size === 0) {
 					this._armReap(entry);
 				}
 			} else if (event.type === 'exit') {
@@ -469,17 +554,30 @@ class AgentConnection {
 			} else if (event.type === 'error') {
 				this._log(`error ${event.message}`);
 			}
-			const socket = entry.socket;
-			if (socket?.readyState === WebSocket.OPEN) {
-				const outbound = event.type === 'system'
-					? { ...event, agent: entry.agentId, ...(entry.model ? { model: entry.model } : {}) }
-					: event;
-				socket.send(JSON.stringify(outbound));
+
+			// Config snapshots describe state, not a step of the stream, so they are
+			// delivered without consuming a sequence number.
+			if (event.type === 'config' || event.type === 'queue' || event.type === 'session_state') {
+				this._broadcast(entry, JSON.stringify(event));
+				return;
 			}
+
+			entry.lastSeq += 1;
+			const outbound = { ...event, seq: entry.lastSeq } satisfies AgentServerEvent;
+			// Only the turn in flight is buffered; a finished one is replayed from
+			// the jsonl instead.
+			if (entry.busy || event.type === 'result' || event.type === 'exit') {
+				entry.log.push(outbound);
+				if (entry.log.length > MAX_LOG_EVENTS) {
+					entry.log.splice(0, entry.log.length - MAX_LOG_EVENTS);
+				}
+			}
+			this._broadcast(entry, JSON.stringify(outbound));
 		};
 
 		entry = {
 			agentId: driver.id,
+			root: this._options.cwd,
 			session: driver.createSession(
 				{
 					cwd: this._options.cwd,
@@ -489,8 +587,10 @@ class AgentConnection {
 				},
 				emit,
 			),
+			sockets: new Set(),
 			busy: false,
 			log: [],
+			lastSeq: 0,
 			queued: [],
 		};
 		entry.model = model;
@@ -518,11 +618,19 @@ class AgentConnection {
 			clearTimeout(entry.reapTimer);
 			entry.reapTimer = undefined;
 		}
-		entry.socket = this._socket;
+		entry.sockets.add(this._socket);
 		this._entry = entry;
-		// Say outright whether a process backs this session; the UI used to have
-		// no way to tell "still running" from "never started".
-		this._send({ type: 'session_state', live: true, sessionId: entry.cliSessionId, busy: entry.busy });
+		// Say outright whether a process backs this session, where its stream
+		// currently is, and how far back the buffer still reaches — the UI used to
+		// have no way to tell "still running" from "never started".
+		this._send({
+			type: 'session_state',
+			live: true,
+			sessionId: entry.cliSessionId,
+			busy: entry.busy,
+			lastSeq: entry.lastSeq,
+			oldestSeq: entry.log[0]?.seq,
+		});
 		// Let a reconnecting client learn the id it should keep using, plus the
 		// model/mode the running backend is actually in.
 		if (entry.cliSessionId) {
@@ -561,13 +669,40 @@ class AgentConnection {
 		return applied;
 	}
 
+	/**
+	 * Replays the part of the running turn a returning client has not seen.
+	 *
+	 * `lastSeq` is the client's own high-water mark, so replay is exact rather
+	 * than "everything we have": a tab that was open in the background while
+	 * another one watched gets only the tail it missed. A client with no mark
+	 * (fresh page) gets nothing — the jsonl is authoritative for it, and
+	 * replaying on top of that history would duplicate the turn.
+	 */
+	private _replayTail(entry: LiveSession, lastSeq: number | undefined): void {
+		if (lastSeq === undefined || !entry.busy) {
+			return;
+		}
+		const tail = entry.log.filter(event => (event.seq ?? 0) > lastSeq);
+		if (tail.length === 0) {
+			return;
+		}
+		this._log(`replaying ${tail.length} buffered events after seq ${lastSeq}`);
+		for (const event of tail) {
+			this._send(event);
+		}
+	}
+
 	private _detach(): void {
 		const entry = this._entry;
 		this._entry = undefined;
-		if (!entry || entry.socket !== this._socket) {
+		if (!entry) {
 			return;
 		}
-		entry.socket = undefined;
+		entry.sockets.delete(this._socket);
+		if (entry.sockets.size > 0) {
+			// Another tab is still watching; its stream must not be interrupted.
+			return;
+		}
 		if (entry.busy) {
 			// Never kill a process that is still answering; reap when it finishes.
 			this._log('socket closed mid-turn, deferring reap');
@@ -590,7 +725,18 @@ class AgentConnection {
 			clearTimeout(entry.reapTimer);
 			entry.reapTimer = undefined;
 		}
-		entry.socket = undefined;
+		// Tell the watchers *before* dropping them. `kill` used to clear the socket
+		// set first, so the only event that flips the UI back to idle never
+		// arrived — pressing 强制结束 looked like a hang. `exit` needs no second
+		// copy here: the process' own close handler already broadcast one.
+		if (reason !== 'exit') {
+			this._broadcast(entry, JSON.stringify({
+				type: 'exit',
+				code: null,
+				...(reason === 'kill' ? { stderr: '已被用户强制结束。' } : {}),
+			} satisfies AgentServerEvent));
+		}
+		entry.sockets.clear();
 		this._log(`finalize (${reason})`);
 		entry.session.dispose();
 		for (const [key, value] of this._live) {

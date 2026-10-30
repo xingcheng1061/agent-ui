@@ -26,7 +26,8 @@ claude --print --verbose \
 
 | 命令 | 字段 | 说明 |
 |---|---|---|
-| `attach` | `sessionId?`、`replay?` | 连接握手。认领该会话的活进程；`replay:true` 表示这是新页面（`sessionStorage` 判定），需要补发进行中的轮次 |
+| `attach` | `sessionId?`、`lastSeq?` | 连接握手：认领该会话的活进程并加入它的观众集合。带 `lastSeq` 时，若这一轮还在跑，服务端补发 `seq > lastSeq` 的事件；不带表示新页面，历史由 jsonl 负责，不补发 |
+| `detach` | — | 退出该会话的观众集合，**不碰进程**。切到别的会话时用它；再次 `attach` 带 `lastSeq` 即可无缝接上 |
 | `user` | `text`、`sessionId?` | 发消息。`busy` 时进入排队（CLI 按 stdin 顺序执行），服务端回 `queue` 事件；若此时有未处理的审批，会先取消审批再发 |
 | `interrupt` | — | 优雅中断：`control_request{subtype:'interrupt'}` |
 | `kill` | — | 强杀进程 |
@@ -41,7 +42,7 @@ claude --print --verbose \
 |---|---|---|
 | `system` | `sessionId`、`model`、`cwd`、`permissionMode`、`slashCommands`、`skills`、`agents`、`models`、`toolCount` | CLI 的 `system/init`，**每一轮都会重发** |
 | `config` | `model?`、`permissionMode?`、`models?` | 控制通道成功后的即时反馈；连接建立时也会推一次静态配置 |
-| `session_state` | `live`、`sessionId?`、`busy?` | `attach` 的答复：后台有没有进程、是否在跑 |
+| `session_state` | `live`、`sessionId?`、`busy?`、`lastSeq?`、`oldestSeq?` | `attach` 的答复：后台有没有进程、是否在跑、流现在到哪（`lastSeq`）、缓冲还追得到哪（`oldestSeq`） |
 | `queue` | `items: string[]` | 排队中的消息 |
 | `status` | `status` | `requesting` / `idle` / `compacting` / `compacted` |
 | `thinking_tokens` | `estimated`、`delta` | 思考预算，一轮几十条 |
@@ -59,6 +60,24 @@ claude --print --verbose \
 | `result` | `subtype`、`isError`、`text`、`costUsd`、`durationMs`、`numTurns` | 一轮结束 |
 | `error` | `message` | CLI 报错或服务端主动提示 |
 | `exit` | `code`、`stderr?` | 进程退出 |
+
+## 多会话并行：seq、缓冲与观众
+
+一条 WS 只承载一条会话的事件，但一次对话可以有多条 WS（多标签、多用户），服务端也同时挂着多个会话的进程。三条规则：
+
+1. **`seq` 每条会话单调递增，永不重置**。流式事件带 `seq`；`session_state` / `config` / `queue` / `system` 描述状态，不带 `seq`。
+2. **观众是集合，不是独占**。`attach` 把 socket 加进 `entry.sockets`，`detach` 移出；`emit` 广播给集合里所有活着的 socket。两个标签看同一会话互不顶掉。
+3. **在途一轮有缓冲，已完成的没有**。`LiveSession.log` 保存当前一轮的事件（上限 `MAX_LOG_EVENTS = 4000`，环形丢弃最旧）；`result` 之后仍保留到下一轮开始，但补发只发生在 `busy` 时（历史以 jsonl 为准，对已完成的轮次补发会和历史重复）。
+
+由此得到的行为：
+
+```
+A 正在跑 → 切到 B：A 的连接不关（只是没人渲染），事件继续进 A 的镜像
+        → 切回 A：attach{lastSeq} → 补发 seq > lastSeq 的事件，无缝接上
+刷新页面：lastSeq 丢失 → 不补发，靠 jsonl + IndexedDB 镜像
+```
+
+前端由 `web/components/agentConnections.ts` 的连接池负责：每个会话一条连接，面板借用再归还，切走不关；没人看时若这一轮还在跑就继续收，跑完 15 秒后关闭（最多保留 4 条后台连接）。
 
 ## 控制通道
 

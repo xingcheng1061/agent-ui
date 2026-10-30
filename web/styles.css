@@ -321,11 +321,31 @@ button {
 }
 
 .session-title {
-	display: block;
+	display: flex;
+	align-items: center;
+	gap: 6px;
 	font-size: 12.5px;
+}
+
+.session-text {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+/* A conversation can be answering in a tab nobody is looking at; the rail says so
+   instead of pretending it is idle. Busy pulses, a quiet process stays a dot. */
+.session-run {
+	flex: none;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--fg-dim);
+}
+
+.session-run.busy {
+	background: var(--accent);
+	animation: agent-pulse 1.2s ease-in-out infinite;
 }
 
 .session-meta {
@@ -1756,10 +1776,8 @@ button {
 }
 
 .md table {
-	display: block;
-	max-width: 100%;
-	margin: 0 0 8px;
-	overflow: auto;
+	width: 100%;
+	margin: 0;
 	border-collapse: collapse;
 	font-size: 11.5px;
 }
@@ -1768,11 +1786,151 @@ button {
 .md td {
 	padding: 3px 8px;
 	border: 1px solid var(--border);
+	line-height: 1.5;
+	vertical-align: top;
+	text-align: left;
+	/* Cells keep their own breaking rules; the surrounding `anywhere` made
+	   narrow columns collapse on top of each other. */
+	overflow-wrap: break-word;
 }
 
 .md th {
 	background: var(--bg-hover);
+}
+
+/*
+ * streamdown ships tailwind utilities, which this app does not build, so its
+ * table chrome has no layout at all: the copy / download / fullscreen icons sat
+ * in block wrappers and stacked vertically. These rules rebuild that chrome
+ * against streamdown's `data-streamdown` hooks instead.
+ */
+.md [data-streamdown='table-wrapper'] {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin: 0 0 8px;
+	padding: 4px 6px;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	background: var(--surface-sunken);
+}
+
+/* The icon row: one line, right-aligned above the table (fullscreen too). */
+[data-streamdown='table-wrapper'] > div:first-child {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 2px;
+}
+
+/* Copy and download are dropdowns; their menus anchor to the icon. */
+[data-streamdown='table-wrapper'] > div:first-child > div {
+	position: relative;
+	flex: none;
+}
+
+[data-streamdown='table-wrapper'] > div:first-child > button,
+[data-streamdown='table-wrapper'] > div:first-child > div > button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border: none;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--fg-dim);
+	cursor: pointer;
+	line-height: 1;
+}
+
+[data-streamdown='table-wrapper'] > div:first-child > button:hover,
+[data-streamdown='table-wrapper'] > div:first-child > div > button:hover {
+	background: var(--bg-hover);
+	color: var(--fg);
+}
+
+/* The format menu (Markdown / CSV / TSV) floats under its icon. */
+[data-streamdown='table-wrapper'] > div:first-child > div > div {
+	position: absolute;
+	top: 100%;
+	right: 0;
+	z-index: 20;
+	display: flex;
+	flex-direction: column;
+	min-width: 120px;
+	margin-top: 2px;
+	padding: 2px;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	background: var(--surface-raised);
+	box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+
+[data-streamdown='table-wrapper'] > div:first-child > div > div > button {
+	display: block;
+	width: 100%;
+	padding: 5px 8px;
+	border: none;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--fg);
+	font: inherit;
+	font-size: 12px;
 	text-align: left;
+	cursor: pointer;
+}
+
+[data-streamdown='table-wrapper'] > div:first-child > div > div > button:hover {
+	background: var(--bg-hover);
+}
+
+/* Wide tables scroll inside their card instead of bursting the bubble. */
+[data-streamdown='table-wrapper'] > div:last-child {
+	overflow-x: auto;
+}
+
+/* streamdown portals the table into a fixed overlay for the fullscreen view. */
+[data-streamdown='table-fullscreen'] {
+	position: fixed;
+	inset: 0;
+	z-index: 100;
+	padding: 16px;
+	background: var(--bg);
+}
+
+[data-streamdown='table-fullscreen'] [data-streamdown='table-wrapper'] {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	height: 100%;
+	min-height: 0;
+}
+
+[data-streamdown='table-fullscreen'] [data-streamdown='table-wrapper'] > div:last-child {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: auto;
+}
+
+[data-streamdown='table-fullscreen'] table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 11.5px;
+}
+
+[data-streamdown='table-fullscreen'] th,
+[data-streamdown='table-fullscreen'] td {
+	padding: 4px 8px;
+	border: 1px solid var(--border);
+	line-height: 1.5;
+	vertical-align: top;
+	text-align: left;
+}
+
+[data-streamdown='table-fullscreen'] th {
+	background: var(--bg-hover);
 }
 
 .md a {

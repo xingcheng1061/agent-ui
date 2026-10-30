@@ -27,14 +27,6 @@ export const MODELS = (process.env['AGENT_UI_MODELS'] ?? 'sonnet,opus,haiku')
 /** Permission modes the CLI accepts for `set_permission_mode`. */
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'] as const;
 
-/**
- * Modes where the CLI still asks a human before running a tool. Only these get
- * the MCP approval bridge: registering `--permission-prompt-tool` makes the CLI
- * route *every* decision through it, which silently breaks `acceptEdits` —
- * edits stop being auto-approved and the turn blocks forever.
- */
-export const PROMPTING_MODES: ReadonlySet<string> = new Set(['default', 'plan']);
-
 /** Where the MCP approval child should call back. Loopback even when HOST is a wildcard. */
 export const INTERNAL_ORIGIN = `http://${HOST === '0.0.0.0' || HOST === '::' ? '127.0.0.1' : HOST}:${PORT}`;
 

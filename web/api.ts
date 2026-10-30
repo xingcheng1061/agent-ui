@@ -236,6 +236,22 @@ export async function changePassword(current: string, next: string): Promise<voi
 	await authRequest('/api/auth/password', { current, next });
 }
 
+// ------------------------------------------------------------ agent sessions
+
+/** One conversation that still has a process, even if no tab is showing it. */
+export interface RunningSession {
+	readonly sessionId: string;
+	readonly root: string;
+	readonly agent: string;
+	readonly busy: boolean;
+	readonly permissionMode?: string;
+}
+
+export async function runningSessions(): Promise<readonly RunningSession[]> {
+	const result = await requestJson<{ sessions: RunningSession[] }>('/api/agents/running');
+	return result.sessions;
+}
+
 // --------------------------------------------------------------- terminals
 
 export interface TerminalInfo {

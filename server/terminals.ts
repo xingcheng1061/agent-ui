@@ -35,7 +35,15 @@ interface LiveTerminal {
 	readonly pty: IPty;
 	/** Rolling tail of output, replayed to the next client that attaches. */
 	buffer: string;
-	socket?: WebSocket;
+	/**
+	 * Every client currently looking at this shell.
+	 *
+	 * A set, not one socket: the same terminal is shared by a whole project, so
+	 * opening that project in two browser tabs attached twice — and the second
+	 * attach used to steal the stream, leaving the first tab's screen frozen
+	 * while it could still type into the shell.
+	 */
+	readonly sockets: Set<WebSocket>;
 	reapTimer?: NodeJS.Timeout;
 }
 
@@ -80,6 +88,17 @@ function preferredShell(): string {
 function send(socket: WebSocket | undefined, message: unknown): void {
 	if (socket?.readyState === WebSocket.OPEN) {
 		socket.send(JSON.stringify(message));
+	}
+}
+
+/** Sends one message to every attached client, dropping the sockets that died. */
+function broadcast(entry: LiveTerminal, message: unknown): void {
+	for (const socket of entry.sockets) {
+		if (socket.readyState === WebSocket.OPEN) {
+			socket.send(JSON.stringify(message));
+		} else {
+			entry.sockets.delete(socket);
+		}
 	}
 }
 
@@ -184,28 +203,35 @@ function spawn(info: TerminalInfo): void {
 		return;
 	}
 
-	const entry: LiveTerminal = { info, pty, buffer: '' };
+	const entry: LiveTerminal = { info, pty, buffer: '', sockets: new Set() };
 	live.set(info.id, entry);
 
 	pty.onData(data => {
 		entry.buffer = (entry.buffer + data).slice(-MAX_BUFFER);
-		send(entry.socket, { type: 'output', data });
+		broadcast(entry, { type: 'output', data });
 	});
 	pty.onExit(({ exitCode }) => {
-		send(entry.socket, { type: 'exit', code: exitCode });
-		entry.socket?.close();
-		dispose(entry);
+		dispose(entry, exitCode);
 		void pruneDeadTerminals();
 	});
 }
 
-function dispose(entry: LiveTerminal): void {
+function dispose(entry: LiveTerminal, exitCode?: number): void {
 	if (entry.reapTimer) {
 		clearTimeout(entry.reapTimer);
 		entry.reapTimer = undefined;
 	}
-	entry.socket = undefined;
+	if (exitCode !== undefined) {
+		broadcast(entry, { type: 'exit', code: exitCode });
+	}
+	// Leave the registry first: the close handlers below check `live` before
+	// arming a reap timer, so a disposed terminal cannot be scheduled again.
 	live.delete(entry.info.id);
+	const sockets = [...entry.sockets];
+	entry.sockets.clear();
+	for (const socket of sockets) {
+		socket.close();
+	}
 	entry.pty.kill();
 }
 
@@ -231,8 +257,10 @@ export async function attachTerminal(id: string, socket: WebSocket): Promise<boo
 		clearTimeout(entry.reapTimer);
 		entry.reapTimer = undefined;
 	}
-	entry.socket = socket;
-	// The client clears its screen and then receives the missed output.
+	entry.sockets.add(socket);
+	// The client clears its screen and then receives the missed output. Each tab
+	// gets its own snapshot, so a second client joining does not disturb the
+	// first one's screen.
 	send(socket, { type: 'snapshot', data: entry.buffer });
 
 	socket.on('message', raw => {
@@ -250,8 +278,10 @@ export async function attachTerminal(id: string, socket: WebSocket): Promise<boo
 	});
 
 	socket.on('close', () => {
-		if (entry.socket === socket) {
-			entry.socket = undefined;
+		entry.sockets.delete(socket);
+		// Only a terminal that still exists and has lost its last viewer is a
+		// candidate for reaping.
+		if (entry.sockets.size === 0 && live.has(entry.info.id)) {
 			armReap(entry);
 		}
 	});
