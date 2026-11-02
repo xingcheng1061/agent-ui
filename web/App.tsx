@@ -198,6 +198,51 @@ export function App() {
 	const activeSession = active?.sessionId ? sessions.find(session => session.id === active.sessionId) : undefined;
 
 	/**
+	 * A brand-new conversation gets its id before its transcript file exists, so
+	 * the single refresh triggered by `onSessionStarted` can miss it. The rail
+	 * then never lists the conversation and the topbar keeps saying “新会话”
+	 * until the user presses 刷新 — which also made it impossible to switch back
+	 * to a conversation that was still running. Retry until it shows up, then
+	 * stop: a session that is really gone must not poll forever.
+	 */
+	const missingActiveSession = active?.sessionId !== undefined && activeSession === undefined;
+	useEffect(() => {
+		if (auth.kind !== 'ready' || !missingActiveSession) {
+			return;
+		}
+		let attempts = 0;
+		const timer = window.setInterval(() => {
+			attempts += 1;
+			void refresh().catch(() => undefined);
+			if (attempts >= 15) {
+				window.clearInterval(timer);
+			}
+		}, 2000);
+		return () => window.clearInterval(timer);
+	}, [auth.kind, missingActiveSession, refresh]);
+
+	/**
+	 * Escape closes whichever dialog is open.
+	 *
+	 * Both are rendered here, so one listener covers them and neither dialog has
+	 * to install a global key handler. Clicking the backdrop already works; this
+	 * is the keyboard half of the same expectation.
+	 */
+	useEffect(() => {
+		if (!dialogOpen && !passwordOpen) {
+			return;
+		}
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key === 'Escape') {
+				setDialogOpen(false);
+				setPasswordOpen(false);
+			}
+		};
+		window.addEventListener('keydown', onKeyDown);
+		return () => window.removeEventListener('keydown', onKeyDown);
+	}, [dialogOpen, passwordOpen]);
+
+	/**
 	 * Bumped on every explicit navigation. The chat panel is keyed by it so that
 	 * picking a session always rebuilds the transcript from the jsonl on disk,
 	 * even when that session is already the open one — otherwise a panel holding

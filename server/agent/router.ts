@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
 import { DEBUG, PROJECT_ROOT, REAP_DELAY_MS, requestUrl, stamp } from '../config.js';
 import { resolveRoot } from '../paths.js';
+import { JsonStore } from '../store.js';
 import {
 	choiceForSession,
 	preloadAgentState,
@@ -10,7 +12,7 @@ import {
 	sessionChoice,
 } from './agentState.js';
 import { AgentRegistry, type AgentDriver, type AgentSession } from './driver.js';
-import type { AgentClientCommand, AgentInfo, AgentServerEvent } from './protocol.js';
+import type { AgentClientCommand, AgentInfo, AgentServerEvent, QueuedMessage } from './protocol.js';
 
 export interface AgentServerOptions {
 	/** Working directory the agent runs in. */
@@ -66,8 +68,14 @@ interface LiveSession {
 	readonly log: AgentServerEvent[];
 	/** Highest `seq` handed out for this session; never reset. */
 	lastSeq: number;
-	/** Messages sent while a turn is running; the CLI runs them in order. */
-	queued: string[];
+	/**
+	 * Messages waiting for the running turn to end.
+	 *
+	 * They are deliberately *not* written to stdin while the turn runs: the CLI
+	 * would absorb them into that turn, and they would never become user entries
+	 * of their own in the transcript. See {@link QueuedMessage}.
+	 */
+	queued: QueuedMessage[];
 }
 
 // /** Upper bound on the in-flight event log; deltas are numerous. */
@@ -100,6 +108,16 @@ export interface RunningSessionInfo {
  * `createAgentServer`, so a second instance (tests) simply takes over.
  */
 let snapshotRunning: () => readonly RunningSessionInfo[] = () => [];
+
+/**
+ * Deferred messages, by CLI session id.
+ *
+ * A message the user typed and queued must not evaporate when the server
+ * restarts: the CLI has not seen it yet, so nothing in the jsonl knows about it.
+ * This file is the only copy until it is finally written to stdin.
+ */
+const queuedStore = new JsonStore<Record<string, QueuedMessage[]>>('agent-queues.json', {});
+const queuedReady = queuedStore.load();
 
 /** Conversations with a live process, including ones no tab is watching. */
 export function listRunningSessions(): readonly RunningSessionInfo[] {
@@ -277,6 +295,48 @@ class AgentConnection {
 		this._broadcast(entry, JSON.stringify({ type: 'queue', items: entry.queued } satisfies AgentServerEvent));
 	}
 
+	/** Mirrors the deferred queue to disk; the CLI has not seen these yet. */
+	private _persistQueue(entry: LiveSession): void {
+		const sessionId = entry.cliSessionId;
+		if (!sessionId) {
+			// Nothing to key on until `system/init` names the session; the snapshot
+			// is written again when the queue changes or the id arrives.
+			return;
+		}
+		const items = [...entry.queued];
+		void queuedReady.then(() => queuedStore.update(draft => {
+			if (items.length === 0) {
+				delete draft[sessionId];
+			} else {
+				draft[sessionId] = items;
+			}
+		}));
+	}
+
+	/**
+	 * Writes the next deferred message into stdin, which makes it a turn of its
+	 * own — exactly what a message sent while the agent was idle does.
+	 */
+	private _startNextQueued(entry: LiveSession): void {
+		if (entry.busy || entry.queued.length === 0) {
+			return;
+		}
+		const next = entry.queued.shift();
+		if (!next) {
+			return;
+		}
+		this._sendQueue(entry);
+		this._persistQueue(entry);
+		this._log(`starting queued message ${next.id.slice(0, 8)} (${entry.queued.length} left)`);
+		entry.busy = true;
+		try {
+			entry.session.sendUserMessage(next.text);
+		} catch (error) {
+			entry.busy = false;
+			this._log(`queued message failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
 	/** Sends one prepared payload to every socket watching the session. */
 	private _broadcast(entry: LiveSession, payload: string): void {
 		for (const socket of entry.sockets) {
@@ -354,6 +414,16 @@ class AgentConnection {
 					return;
 				}
 				this._send({ type: 'session_state', live: false, sessionId: requested });
+				if (requested) {
+					// No process here, but a restart may have left messages this session
+					// never got to send; show them so they can be started or cancelled.
+					void queuedReady.then(() => {
+						const waiting = queuedStore.snapshot[requested];
+						if (waiting?.length && this._socket.readyState === WebSocket.OPEN) {
+							this._send({ type: 'queue', items: waiting });
+						}
+					});
+				}
 				return;
 			}
 			case 'user': {
@@ -372,6 +442,7 @@ class AgentConnection {
 					? command.sessionId
 					: this._entry?.cliSessionId;
 				const entry = this._ensureEntry(resumeId);
+				const immediate = command.immediate === true;
 				// A new message must not queue behind an approval nobody answered:
 				// release the blocked MCP call, abort the stale turn, then send.
 				if (entry.session.hasPendingPermission()) {
@@ -379,20 +450,37 @@ class AgentConnection {
 					entry.session.cancelPendingPermissions('用户直接发送了新消息，已取消这次审批。');
 					entry.session.interrupt();
 					this._send({ type: 'permission_cancelled' });
-				} else if (entry.busy) {
-					// The CLI runs stdin messages in order, so this is a real queue
-					// rather than a dropped message; track it for the UI.
-					entry.queued.push(text);
+				} else if (entry.busy && !immediate) {
+					// Default: wait for this turn to end. Writing it into stdin now would
+					// make the CLI absorb it into the current turn, where it never becomes
+					// a user entry of its own in the transcript — the message would be
+					// invisible in the history afterwards.
+					entry.queued.push({ id: randomUUID(), text, mode: 'defer' });
 					this._sendQueue(entry);
-					this._log(`queued (${entry.queued.length} waiting)`);
+					this._persistQueue(entry);
+					this._log(`queued for the next turn (${entry.queued.length} waiting)`);
+					return;
 				}
-				// if (!entry.busy) {
-				// 	// A fresh turn starts: the previous one is on disk by now, so its
-				// 	// buffered tail is no longer needed for replay.
-				// 	entry.log.length = 0;
-				// }
 				entry.busy = true;
 				entry.session.sendUserMessage(text);
+				return;
+			}
+			case 'promote': {
+				// "Send now" on a queued message: steering it into the turn in progress
+				// is the one thing that keeps it out of the transcript's user entries,
+				// so it is never the default.
+				const target = this._entry ?? (typeof command.sessionId === 'string' ? this._findLive(command.sessionId) : undefined);
+				const index = target?.queued.findIndex(item => item.id === command.id) ?? -1;
+				if (!target || index < 0) {
+					this._send({ type: 'error', message: '排队消息已经不在了（可能已经开始执行）。' });
+					return;
+				}
+				const [item] = target.queued.splice(index, 1);
+				this._sendQueue(target);
+				this._persistQueue(target);
+				this._log(`promoted ${item.id.slice(0, 8)} into the running turn`);
+				target.busy = true;
+				target.session.sendUserMessage(item.text);
 				return;
 			}
 			case 'interrupt': {
@@ -534,6 +622,17 @@ class AgentConnection {
 				this._live.set(event.sessionId, entry);
 				void rememberSessionChoice(event.sessionId, requested);
 				this._log(`system model=${event.model} mode=${event.permissionMode} session=${event.sessionId.slice(0, 8)}`);
+				// A restarted server brings its queue back from disk here: the process
+				// did not exist while it was down, so those messages were never sent.
+				void queuedReady.then(() => {
+					const restored = queuedStore.snapshot[event.sessionId];
+					if (entry.queued.length === 0 && restored?.length) {
+						entry.queued = restored.map(item => ({ ...item, mode: 'defer' as const }));
+						this._log(`restored ${entry.queued.length} queued message(s)`);
+						this._sendQueue(entry);
+					}
+					this._startNextQueued(entry);
+				});
 				// Handshake state rather than a step of the stream: no `seq`. The
 				// merged model keeps the alias the user picked.
 				this._broadcast(entry, JSON.stringify({
@@ -547,13 +646,11 @@ class AgentConnection {
 				entry.permissionMode = event.permissionMode ?? entry.permissionMode;
 			} else if (event.type === 'result') {
 				entry.busy = false;
-				// The tail is kept so a client that reattaches during the wrap-up still
-				// catches it; the next turn clears it (the jsonl owns it from then on).
-				if (entry.queued.length > 0) {
-					entry.queued = [];
-					this._sendQueue(entry);
-				}
 				this._log(`result ${event.subtype}${event.text ? '' : ' (no text)'}`);
+				// The turn is over, so the next queued message can start one of its
+				// own; it must go out before the reap check, or an unwatched session
+				// would be killed with messages still waiting.
+				this._startNextQueued(entry);
 				if (entry.sockets.size === 0) {
 					this._armReap(entry);
 				}

@@ -5,6 +5,21 @@ export interface AgentTaskUsage {
 	readonly durationMs?: number;
 }
 
+/**
+ * A message waiting for the running turn.
+ *
+ * `defer` (the default) waits on the server and is written to stdin only once the
+ * turn ends, so it becomes a turn of its own and the CLI records a normal user
+ * message for it. `now` was pushed into stdin while the turn was running: the CLI
+ * absorbs it into that turn and only records a `queued_command` attachment, which
+ * is why it never shows up as a user entry of its own.
+ */
+export interface QueuedMessage {
+	readonly id: string;
+	readonly text: string;
+	readonly mode: 'defer' | 'now';
+}
+
 /** One installed agent backend, advertised so the UI can build its pickers. */
 export interface AgentInfo {
 	readonly id: string;
@@ -76,7 +91,7 @@ export type AgentServerPayload =
 		readonly oldestSeq?: number;
 	}
 	/** Messages waiting for the running turn to finish, in order. */
-	| { readonly type: 'queue'; readonly items: readonly string[] }
+	| { readonly type: 'queue'; readonly items: readonly QueuedMessage[] }
 	/** Coarse turn state reported by the CLI: `requesting`, `idle`, `compacting`, … */
 	| { readonly type: 'status'; readonly status: string }
 	/** Live thinking budget, so the UI can show progress before any text arrives. */
@@ -171,7 +186,23 @@ export type AgentClientCommand =
 	 * still attached to an older process; without it the message would land in
 	 * that older transcript and no session file would be created.
 	 */
-	| { readonly type: 'user'; readonly text: string; readonly sessionId?: string; readonly newSession?: boolean }
+	| {
+		readonly type: 'user';
+		readonly text: string;
+		readonly sessionId?: string;
+		readonly newSession?: boolean;
+		/**
+		 * Steering: push into the running turn instead of waiting for it to end.
+		 * The CLI absorbs it mid-turn, so it will not become a user entry of its
+		 * own in the transcript — only a `queued_command` attachment.
+		 */
+		readonly immediate?: boolean;
+	}
+	/**
+	 * "Send now" on a queued message: takes it out of the defer queue and writes
+	 * it into the running turn (steering), the same as sending it immediately.
+	 */
+	| { readonly type: 'promote'; readonly id: string; readonly sessionId?: string }
 	/**
 	 * Graceful stop: asks the CLI to abort the current turn, keeps the process alive.
 	 * `sessionId` names the target when this socket is not the one that spawned it.

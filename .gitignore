@@ -2,3 +2,11 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# UI probe output (e2e/ui_probe.py)
+reports/
+__pycache__/
+
+# Selenium downloads / caches (e2e/*.py)
+chromedriver/
+se-metadata.json

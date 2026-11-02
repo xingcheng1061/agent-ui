@@ -23,6 +23,18 @@ const MAX_BUFFER = 100_000;
 /** How long a terminal with no client stays alive. */
 const REAP_DELAY_MS = 60 * 60 * 1000;
 
+/**
+ * How much output survives a server restart.
+ *
+ * The shell itself cannot survive one — the PTY dies with the process — so the
+ * terminal is respawned when a client attaches again. Persisting the tail is
+ * what keeps that respawn from looking like a wiped screen.
+ */
+const TAIL_LIMIT = 8_000;
+
+/** How often the persisted tail is refreshed while output flows. */
+const TAIL_FLUSH_MS = 2_000;
+
 export interface TerminalInfo {
 	readonly id: string;
 	readonly root: string;
@@ -51,9 +63,24 @@ type ClientMessage =
 	| { type: 'input'; data: string }
 	| { type: 'resize'; cols: number; rows: number };
 
-const store = new JsonStore<{ terminals: readonly TerminalInfo[] }>('terminals.json', { terminals: [] });
+const store = new JsonStore<{ terminals: readonly TerminalInfo[]; tails?: Record<string, string> }>('terminals.json', {
+	terminals: [],
+});
 
 const live = new Map<string, LiveTerminal>();
+
+/** Terminals whose persisted tail is out of date. */
+const dirtyTails = new Set<string>();
+let tailTimer: NodeJS.Timeout | undefined;
+
+/**
+ * Set while the process is going down.
+ *
+ * Killing the shells during shutdown makes every PTY exit on its own, and the
+ * exit handler prunes the terminal from the store — which erased exactly the
+ * records the next process needs in order to respawn them.
+ */
+let shuttingDown = false;
 
 const require = createRequire(import.meta.url);
 type NodePtyModule = typeof import('node-pty');
@@ -100,6 +127,43 @@ function broadcast(entry: LiveTerminal, message: unknown): void {
 			entry.sockets.delete(socket);
 		}
 	}
+}
+
+/**
+ * Marks a terminal's screen as worth persisting.
+ *
+ * Batched: one JSON rewrite per flush window instead of one per output chunk.
+ */
+function markTailDirty(entry: LiveTerminal): void {
+	dirtyTails.add(entry.info.id);
+	tailTimer ??= setTimeout(() => {
+		tailTimer = undefined;
+		void flushTails();
+	}, TAIL_FLUSH_MS);
+	tailTimer.unref?.();
+}
+
+/** Persists the tails of the dirty terminals, or of every live one. */
+async function flushTails(everything = false): Promise<void> {
+	const ids = everything ? [...live.keys()] : [...dirtyTails];
+	if (ids.length === 0) {
+		return;
+	}
+	dirtyTails.clear();
+	const tails: Record<string, string> = {};
+	for (const id of ids) {
+		const entry = live.get(id);
+		if (entry && entry.buffer.length > 0) {
+			tails[id] = entry.buffer.slice(-TAIL_LIMIT);
+		}
+	}
+	if (Object.keys(tails).length === 0) {
+		return;
+	}
+	await store.update(draft => {
+		const stored = (draft.tails ??= {});
+		Object.assign(stored, tails);
+	});
 }
 
 export async function preloadTerminals(): Promise<void> {
@@ -156,6 +220,9 @@ export async function closeTerminal(id: string): Promise<boolean> {
 		if (index >= 0) {
 			terminals.splice(index, 1);
 		}
+		if (draft.tails) {
+			delete draft.tails[id];
+		}
 	});
 	return true;
 }
@@ -173,6 +240,9 @@ export async function pruneDeadTerminals(): Promise<void> {
 			const index = terminals.findIndex(candidate => candidate.id === gone.id);
 			if (index >= 0) {
 				terminals.splice(index, 1);
+			}
+			if (draft.tails) {
+				delete draft.tails[gone.id];
 			}
 		}
 	});
@@ -203,16 +273,29 @@ function spawn(info: TerminalInfo): void {
 		return;
 	}
 
-	const entry: LiveTerminal = { info, pty, buffer: '', sockets: new Set() };
+	// Respawned after a restart: start from what the screen held, and say why the
+	// old prompt is not the live one any more.
+	const remembered = store.snapshot.tails?.[info.id] ?? '';
+	const entry: LiveTerminal = {
+		info,
+		pty,
+		buffer: remembered
+			? `${remembered}\r\n\x1b[2m[agent-ui] 后端已重启，以上为此前输出；此前的进程不再运行。\x1b[0m\r\n`
+			: '',
+		sockets: new Set(),
+	};
 	live.set(info.id, entry);
 
 	pty.onData(data => {
 		entry.buffer = (entry.buffer + data).slice(-MAX_BUFFER);
+		markTailDirty(entry);
 		broadcast(entry, { type: 'output', data });
 	});
 	pty.onExit(({ exitCode }) => {
 		dispose(entry, exitCode);
-		void pruneDeadTerminals();
+		if (!shuttingDown) {
+			void pruneDeadTerminals();
+		}
 	});
 }
 
@@ -293,7 +376,10 @@ export function isLive(id: string): boolean {
 	return live.has(id);
 }
 
-export function disposeAllTerminals(): void {
+export async function disposeAllTerminals(): Promise<void> {
+	shuttingDown = true;
+	// Flush first, and await it: the next process replays these tails.
+	await flushTails(true);
 	for (const entry of [...live.values()]) {
 		dispose(entry);
 	}

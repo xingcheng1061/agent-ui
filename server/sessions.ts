@@ -13,7 +13,12 @@ export interface TranscriptTask {
 
 /** Normalized view of a transcript, shaped like what the chat panel renders. */
 export type TranscriptItem =
-	| { readonly kind: 'user'; readonly text: string }
+	/**
+	 * `queued` marks a message the CLI absorbed into a turn that was already
+	 * running: it is in the transcript as a `queued_command` attachment rather
+	 * than a user entry, and the panel shows it as "sent mid-turn".
+	 */
+	| { readonly kind: 'user'; readonly text: string; readonly queued?: boolean }
 	/**
 	 * `messageId` is the API message the text came from. The browser mirrors the
 	 * in-flight turn by message id, so replaying it can skip whatever is already
@@ -57,6 +62,12 @@ interface ContentBlock {
 interface TranscriptLine {
 	readonly type?: string;
 	readonly message?: { readonly id?: string; readonly content?: string | readonly ContentBlock[] };
+	/**
+	 * Content the CLI stores outside the message stream. A message that arrived
+	 * mid-turn and was absorbed lands here as `queued_command`, which is the only
+	 * trace of it: it never becomes a user message of its own.
+	 */
+	readonly attachment?: { readonly type?: string; readonly prompt?: unknown };
 }
 
 const MAX_ITEMS = 400;
@@ -182,6 +193,34 @@ async function readTranscript(filePath: string): Promise<readonly TranscriptItem
 }
 
 /**
+ * Text of a `queued_command` attachment.
+ *
+ * A message typed while a turn was running is not a user entry in the jsonl: the
+ * CLI absorbed it into that turn and only kept the attachment behind. Without
+ * this the panel would lose it entirely and read as if the agent answered
+ * nothing.
+ */
+function queuedCommandText(attachment: TranscriptLine['attachment']): string {
+	if (attachment?.type !== 'queued_command') {
+		return '';
+	}
+	const prompt = attachment.prompt;
+	if (typeof prompt === 'string') {
+		return prompt.trim();
+	}
+	if (!Array.isArray(prompt)) {
+		return '';
+	}
+	const parts: string[] = [];
+	for (const block of prompt as readonly ContentBlock[]) {
+		if (block && block.type === 'text' && typeof block.text === 'string') {
+			parts.push(block.text);
+		}
+	}
+	return parts.join('\n').trim();
+}
+
+/**
  * Parses one jsonl file into renderable items.
  *
  * `parentToolUseId` is set for a subagent's own file: everything the subagent
@@ -194,6 +233,13 @@ function parseItems(raw: string, parentToolUseId?: string): TranscriptItem[] {
 
 	for (const line of raw.split('\n')) {
 		const entry = parseLine(line);
+		if (entry?.type === 'attachment') {
+			const queued = queuedCommandText(entry.attachment);
+			if (queued) {
+				items.push({ kind: 'user', text: queued, queued: true });
+			}
+			continue;
+		}
 		if (entry?.type !== 'user' && entry?.type !== 'assistant') {
 			continue;
 		}

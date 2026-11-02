@@ -48,7 +48,6 @@ import {
 	disposeAllTerminals,
 	listTerminals,
 	preloadTerminals,
-	pruneDeadTerminals,
 	renameTerminal,
 } from './terminals.js';
 
@@ -268,7 +267,13 @@ app.get('/api/terminals', async (_req, res) => {
 app.post('/api/terminals', async (req, res) => {
 	const body = req.body as { root?: unknown; title?: unknown } | undefined;
 	const requested = typeof body?.root === 'string' && body.root.trim() ? body.root.trim() : PROJECT_ROOT;
-	const root = await resolveRoot(requested).catch(() => PROJECT_ROOT);
+	// Falling back is right for a stale tab, but silently replacing the root hid a
+	// real bug for weeks: a request without `Content-Type` arrived bodyless, so
+	// every terminal was created in PROJECT_ROOT. Say something when it happens.
+	const root = await resolveRoot(requested).catch(error => {
+		console.warn(`[agent-ui] terminal root rejected (${requested}), using ${PROJECT_ROOT}:`, error instanceof Error ? error.message : error);
+		return PROJECT_ROOT;
+	});
 	const title = typeof body?.title === 'string' ? body.title : undefined;
 	res.json({ terminal: await createTerminal(root, title) });
 });
@@ -431,7 +436,10 @@ const agentServer = createAgentServer({ registry: agents.registry });
 
 // Auth and terminal state are read from disk before the first request lands.
 await Promise.all([preloadAuth(), preloadTerminals()]);
-await pruneDeadTerminals();
+// No prune here: on boot every recorded terminal has no shell yet, and those
+// are exactly the ones that get respawned (with their persisted output) when a
+// client attaches again. Pruning at startup is what made a dev-server restart
+// look like "all my terminals disappeared".
 
 // Scripted setup: `AGENT_UI_ADMIN_USER` + `AGENT_UI_ADMIN_PASSWORD` create (or
 // reset) an admin account on boot, so an instance can be provisioned headlessly.
@@ -470,12 +478,17 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 const shutdown = () => {
-	disposeAllTerminals();
-	terminalServer.close();
-	agentServer.close();
-	void disposeAgentRuntime(agents)
-		.catch(error => console.error('[agent-ui] agent runtime shutdown failed:', error))
-		.finally(() => server.close(() => process.exit(0)));
+	// Terminals flush their last screen before their shells are killed, so the
+	// next process can respawn them with their output intact.
+	void disposeAllTerminals()
+		.catch(error => console.error('[agent-ui] terminal shutdown failed:', error))
+		.finally(() => {
+			terminalServer.close();
+			agentServer.close();
+			void disposeAgentRuntime(agents)
+				.catch(error => console.error('[agent-ui] agent runtime shutdown failed:', error))
+				.finally(() => server.close(() => process.exit(0)));
+		});
 	setTimeout(() => process.exit(0), 2000).unref();
 };
 

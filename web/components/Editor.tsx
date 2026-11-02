@@ -1,24 +1,40 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { readFile, writeFile } from '../api';
 import { languageForPath, modelUri, monaco } from '../monacoSetup';
+import { Markdown } from './Markdown';
 
 interface EditorProps {
 	readonly root: string;
 	readonly filePath: string | undefined;
+	/** Show the buffer rendered as markdown instead of the source text. */
+	readonly preview?: boolean;
 	readonly onDirtyChange: (dirty: boolean) => void;
 	readonly onStatus: (message: string) => void;
 }
 
-export function Editor({ root, filePath, onDirtyChange, onStatus }: EditorProps) {
+export function Editor({ root, filePath, preview = false, onDirtyChange, onStatus }: EditorProps) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 	const dirtySubscriptionRef = useRef<monaco.IDisposable | undefined>(undefined);
 	const currentFileRef = useRef<string | undefined>(undefined);
 	const onDirtyChangeRef = useRef(onDirtyChange);
 	const onStatusRef = useRef(onStatus);
+	const previewRef = useRef(preview);
+	const previewTimerRef = useRef<number | undefined>(undefined);
+	const [previewText, setPreviewText] = useState('');
 
 	onDirtyChangeRef.current = onDirtyChange;
 	onStatusRef.current = onStatus;
+	previewRef.current = preview;
+
+	/**
+	 * Diagrams are expensive to lay out, so the preview follows typing on a
+	 * short delay rather than re-parsing markdown on every keystroke.
+	 */
+	const syncPreview = (model: monaco.editor.ITextModel) => {
+		window.clearTimeout(previewTimerRef.current);
+		previewTimerRef.current = window.setTimeout(() => setPreviewText(model.getValue()), 200);
+	};
 
 	const save = async () => {
 		const editor = editorRef.current;
@@ -57,6 +73,7 @@ export function Editor({ root, filePath, onDirtyChange, onStatus }: EditorProps)
 		});
 
 		return () => {
+			window.clearTimeout(previewTimerRef.current);
 			dirtySubscriptionRef.current?.dispose();
 			editor.getModel()?.dispose();
 			editor.dispose();
@@ -89,14 +106,50 @@ export function Editor({ root, filePath, onDirtyChange, onStatus }: EditorProps)
 			editor.setModel(model);
 			editor.focus();
 			dirtySubscriptionRef.current?.dispose();
-			dirtySubscriptionRef.current = model.onDidChangeContent(() => onDirtyChangeRef.current(true));
+			dirtySubscriptionRef.current = model.onDidChangeContent(() => {
+				onDirtyChangeRef.current(true);
+				if (previewRef.current) {
+					syncPreview(model);
+				}
+			});
 			onDirtyChangeRef.current(false);
+			if (previewRef.current) {
+				setPreviewText(model.getValue());
+			}
 		})().catch(error => onStatusRef.current(String(error)));
 
 		return () => {
 			cancelled = true;
 		};
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [filePath, root]);
 
-	return <div className="editor-host" ref={containerRef} />;
+	// Entering the preview renders the buffer as it stands, unsaved edits included.
+	useEffect(() => {
+		if (!preview) {
+			return;
+		}
+		const model = editorRef.current?.getModel();
+		if (model) {
+			setPreviewText(model.getValue());
+		}
+	}, [preview, filePath]);
+
+	// Monaco measures its container, so it has to re-measure once the box is back.
+	useEffect(() => {
+		if (!preview) {
+			editorRef.current?.layout();
+		}
+	}, [preview]);
+
+	return (
+		<>
+			<div className={`editor-host${preview ? ' is-hidden' : ''}`} ref={containerRef} />
+			{preview && (
+				<div className="markdown-preview">
+					<Markdown text={previewText} mermaid controls={false} />
+				</div>
+			)}
+		</>
+	);
 }

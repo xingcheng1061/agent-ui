@@ -34,6 +34,8 @@ export interface TranscriptItem {
 	readonly result?: { readonly content: string; readonly isError: boolean };
 	/** Badge state of a subagent, replayed so its card keeps its identity. */
 	readonly task?: { readonly taskId: string; readonly status: string; readonly description?: string; readonly subagentType?: string; readonly taskType?: string };
+	/** A user message the CLI absorbed into a turn that was already running. */
+	readonly queued?: boolean;
 }
 
 const TOKEN = new URLSearchParams(window.location.search).get('token') ?? '';
@@ -46,8 +48,18 @@ function withToken(url: string): string {
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+	/**
+	 * A string body with no content type goes out as `text/plain`, which
+	 * `express.json()` ignores: the route then sees an empty body and silently
+	 * uses its default. That is how every terminal ended up created in
+	 * PROJECT_ROOT instead of the project actually on screen.
+	 */
+	const headers =
+		typeof init?.body === 'string'
+			? { 'Content-Type': 'application/json', ...(init.headers as Record<string, string> | undefined) }
+			: init?.headers;
 	// `same-origin` sends the session cookie; without it every call would 401.
-	const response = await fetch(withToken(url), { credentials: 'same-origin', ...init });
+	const response = await fetch(withToken(url), { credentials: 'same-origin', ...init, headers });
 	if (!response.ok) {
 		const text = await response.text();
 		const error = new Error(text || `${response.status} ${response.statusText}`) as Error & {

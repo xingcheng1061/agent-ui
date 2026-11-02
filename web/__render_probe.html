@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>render probe</title>
+		<script>
+			// theme.ts reads this at import time; the probe always checks dark.
+			try {
+				localStorage.setItem('agentui.theme', 'dark');
+			} catch {
+				// Storage blocked: the probe just runs in the OS theme.
+			}
+		</script>
+	</head>
+	<body>
+		<div id="probe-root"></div>
+		<script type="module" src="./__render_probe.tsx"></script>
+	</body>
+</html>

@@ -17,6 +17,26 @@ interface WorkspaceProps {
 const PREFERRED_TERMINAL_KEY = 'agentui.terminal.active';
 
 /**
+ * Terminal records are keyed by the root the server resolved, while the
+ * workspace root arrives from a session cwd or the project picker: same folder,
+ * different separator, trailing slash or drive-letter case.
+ *
+ * Comparing them with `===` made every reload look like "all my terminals
+ * vanished" — the filter matched nothing, a fresh shell was created, and each
+ * reload leaked one more orphaned terminal on the server.
+ */
+function sameRoot(left: string, right: string): boolean {
+	const normalize = (value: string) => value.replace(/[\\/]+/g, '/').replace(/\/+$/, '');
+	const a = normalize(left);
+	const b = normalize(right);
+	if (a === b) {
+		return true;
+	}
+	// Windows drive letters vary in case; POSIX paths are case-sensitive.
+	return /^[a-zA-Z]:\//.test(a) && a.toLowerCase() === b.toLowerCase();
+}
+
+/**
  * Code side of a session: everything here is scoped to the session's project root.
  * Mount it with `key={root}` so switching project resets selection and terminal.
  */
@@ -28,6 +48,8 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 	const [dirty, setDirty] = useState(false);
 	const [status, setStatus] = useState('');
 	const [terminalOpen, setTerminalOpen] = useState(true);
+	/** Rendered view of the open markdown file, as opposed to its source. */
+	const [preview, setPreview] = useState(false);
 
 	// Terminals are server-side objects, so this list survives a reload and the
 	// shells keep running while their tab is closed.
@@ -38,7 +60,8 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 	const [terminalHeight, setTerminalHeight] = usePersistedSize('agentui.size.terminal', 240);
 
 	const reloadTerminals = useCallback(async () => {
-		const list = await listTerminals();
+		// Scoped to this project: the server remembers terminals of every root.
+		const list = (await listTerminals()).filter(candidate => sameRoot(candidate.root, root));
 		setTerminals(list);
 		setActiveTerminal(current => {
 			if (current && list.some(candidate => candidate.id === current)) {
@@ -46,7 +69,7 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 			}
 			return list[0]?.id;
 		});
-	}, []);
+	}, [root]);
 
 	// First terminal for a project is created on demand; after that the list is
 	// whatever the server holds.
@@ -58,7 +81,7 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 			if (cancelled) {
 				return;
 			}
-			const usable = existing.filter(candidate => candidate.root === root);
+			const usable = existing.filter(candidate => sameRoot(candidate.root, root));
 			if (usable.length > 0) {
 				setTerminals(usable);
 				setActiveTerminal(usable.some(candidate => candidate.id === remembered) ? remembered : usable[0]!.id);
@@ -94,6 +117,7 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 	};
 
 	const active = terminals.find(candidate => candidate.id === activeTerminal);
+	const previewable = selectedFile !== undefined && /\.(md|markdown)$/i.test(selectedFile);
 
 	return (
 		<div className="workspace" style={{ gridTemplateColumns: `${treeWidth}px 5px 1fr` }}>
@@ -119,6 +143,8 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 							onOpenFile={filePath => {
 								setSelectedFile(filePath);
 								setDiffPath(undefined);
+								// Another file starts as source; the toggle is per file.
+								setPreview(false);
 							}}
 						/>
 					)
@@ -148,6 +174,16 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 					<span className="spacer" />
 					<span className={`status${status.startsWith('saved') ? ' ok' : ''}`}>{status}</span>
 					{diffPath && <button type="button" className="toggle" onClick={() => setDiffPath(undefined)}>关闭 diff</button>}
+					{previewable && (
+						<button
+							type="button"
+							className={`toggle${preview ? ' active' : ''}`}
+							title="渲染 Markdown，mermaid 代码块会画成图"
+							onClick={() => setPreview(value => !value)}
+						>
+							{preview ? '源码' : '预览'}
+						</button>
+					)}
 					<button type="button" className="toggle" onClick={() => setTerminalOpen(open => !open)}>
 						{terminalOpen ? '隐藏终端' : '显示终端'}
 					</button>
@@ -156,7 +192,15 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 				{diffPath
 					? <DiffView root={root} filePath={diffPath} revision={revision} />
 					: selectedFile
-						? <Editor root={root} filePath={selectedFile} onDirtyChange={setDirty} onStatus={setStatus} />
+						? (
+							<Editor
+								root={root}
+								filePath={selectedFile}
+								preview={preview && previewable}
+								onDirtyChange={setDirty}
+								onStatus={setStatus}
+							/>
+						)
 						: <div className="placeholder">Ctrl+S 保存 · 终端在该项目根目录启动</div>}
 
 				{terminalOpen && (

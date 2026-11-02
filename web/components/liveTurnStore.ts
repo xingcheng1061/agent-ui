@@ -1,4 +1,4 @@
-import type { AgentServerEvent } from '../agentTypes';
+import type { AgentServerEvent, QueuedMessage } from '../agentTypes';
 
 /**
  * Browser-side mirror of the turn currently in flight.
@@ -24,7 +24,7 @@ export interface LiveTurnRecord {
 	/** Server events of the in-flight turn, in order. */
 	readonly events: readonly AgentServerEvent[];
 	/** Messages waiting for the running turn. */
-	readonly queued: readonly string[];
+	readonly queued: readonly QueuedMessage[];
 	/** Whether the turn was still running when this was written. */
 	readonly busy: boolean;
 	readonly updatedAt: number;

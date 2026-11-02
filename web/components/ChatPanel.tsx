@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { AgentClientCommand, AgentInfo, AgentServerEvent, AgentTaskUsage } from '../agentTypes';
+import type { AgentClientCommand, AgentInfo, AgentServerEvent, AgentTaskUsage, QueuedMessage } from '../agentTypes';
 import { getTranscript, reportClientLog, searchFiles, type TranscriptItem } from '../api';
 import { clearAttention, requestAttention } from '../attention';
 import { acquireAgentConnection, type AgentConnectionHandle } from './agentConnections';
@@ -32,7 +32,8 @@ interface PendingPermission {
 }
 
 type Item =
-	| { readonly kind: 'user'; readonly id: string; readonly text: string }
+	/** `queued` marks a message that was steered into a turn already running. */
+	| { readonly kind: 'user'; readonly id: string; readonly text: string; readonly queued?: boolean }
 	/** `messageId` is the API message the text belongs to, mirroring the jsonl. */
 	| { readonly kind: 'assistant'; readonly id: string; readonly text: string; readonly parentToolUseId?: string; readonly messageId?: string }
 	| { readonly kind: 'thinking'; readonly id: string; readonly text: string; readonly parentToolUseId?: string; readonly messageId?: string }
@@ -129,6 +130,7 @@ function toChatItems(items: readonly TranscriptItem[]): Item[] {
 				text: item.text,
 				messageId: item.messageId,
 				parentToolUseId: item.parentToolUseId,
+				...(item.kind === 'user' && item.queued ? { queued: true } : {}),
 			});
 		}
 	}
@@ -237,7 +239,26 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	const [stopRequested, setStopRequested] = useState(false);
 	const streamingRef = useRef(false);
 	/** Messages waiting for the running turn, mirrored from the server. */
-	const [queued, setQueued] = useState<readonly string[]>([]);
+	const [queued, setQueued] = useState<readonly QueuedMessage[]>([]);
+	/** Last queue snapshot, so a shrinking queue can tell what started running. */
+	const queuedRef = useRef<readonly QueuedMessage[]>([]);
+	/**
+	 * Queue entries that already have a user bubble — everything this page sent
+	 * itself. Consumed one by one when the queue shrinks, so a reload (where the
+	 * bubbles were never created here) prints them and a normal send does not
+	 * print them twice.
+	 */
+	const queueShownRef = useRef<string[]>([]);
+
+	/** Takes one matching entry off the "already on screen" list. */
+	const consumeQueueShown = (text: string): boolean => {
+		const index = queueShownRef.current.indexOf(text);
+		if (index < 0) {
+			return false;
+		}
+		queueShownRef.current.splice(index, 1);
+		return true;
+	};
 	const onSessionStartedRef = useRef(onSessionStarted);
 	const onTurnEndRef = useRef(onTurnEnd);
 
@@ -285,6 +306,8 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		setStreaming(false);
 		setBackendLive(undefined);
 		setQueued([]);
+		queuedRef.current = [];
+		queueShownRef.current = [];
 		setThinkingTokens(0);
 	};
 
@@ -380,6 +403,9 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				}
 				if (local.queued.length > 0) {
 					setQueued(local.queued);
+					// The mirror is the baseline the next snapshot is compared with;
+					// without it the first shrink would replay nothing.
+					queuedRef.current = local.queued;
 				}
 				if (local.busy) {
 					setStreaming(true);
@@ -462,9 +488,23 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						setStatus('后台没有运行中的会话，发送消息即开始');
 					}
 					return;
-				case 'queue':
+				case 'queue': {
+					const previous = queuedRef.current;
+					queuedRef.current = event.items;
 					setQueued(event.items);
+					// A message leaves the queue because its turn started. When this page
+					// did not send it itself — a reload while the queue was already
+					// there — no other event would ever show it as a user bubble, so the
+					// transcript would read as if the agent answered nothing.
+					const waiting = event.items.map(item => item.text);
+					for (const item of previous) {
+						if (waiting.includes(item.text) || consumeQueueShown(item.text)) {
+							continue;
+						}
+						setItems(items => [...items, { kind: 'user', id: nextId(), text: item.text }]);
+					}
 					return;
+				}
 				case 'status':
 					setStatus(STATUS_LABEL[event.status] ?? event.status);
 					return;
@@ -814,15 +854,21 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		connectionRef.current?.follow(sessionId);
 	}, [sessionId]);
 
-	const submitText = (text: string) => {
-		// Sending while a turn runs is a queue, not an error: the CLI runs stdin
-		// messages in order, and the server mirrors the queue back to the UI.
-		// The one exception is a pending approval, which the server drops first.
+	const submitText = (text: string, immediate = false) => {
+		// Sending while a turn runs is a queue, not an error: the server holds it
+		// and writes it to stdin once the turn ends, so it becomes a turn of its
+		// own and the transcript keeps a user entry for it. `immediate` steers it
+		// into the running turn instead, which the CLI only records as an
+		// attachment — hence the default.
 		if (!text) {
 			return;
 		}
 		streamRef.current.clear();
 		setItems(previous => [...previous, { kind: 'user', id: nextId(), text }]);
+		if (streamingRef.current && !immediate) {
+			// This one joins the queue and already has its bubble.
+			queueShownRef.current.push(text);
+		}
 		// Sending a message drops a pending approval on the server side.
 		setPermission(undefined);
 		clearAttention();
@@ -842,9 +888,16 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		// still be attached to the previous session, and without the flag the
 		// backend continues that one instead of creating a session of its own.
 		createdHereRef.current = resumeIdRef.current === undefined;
-		send(resumeIdRef.current
-			? { type: 'user', text, sessionId: resumeIdRef.current }
-			: { type: 'user', text, newSession: true });
+		const target = resumeIdRef.current;
+		send(target
+			? { type: 'user', text, sessionId: target, ...(immediate ? { immediate: true } : {}) }
+			: { type: 'user', text, newSession: true, ...(immediate ? { immediate: true } : {}) });
+	};
+
+	/** "Send now" on a queued message: steer it into the running turn. */
+	const promoteQueued = (id: string) => {
+		const target = stopTargetId();
+		send(target ? { type: 'promote', id, sessionId: target } : { type: 'promote', id });
 	};
 
 	const submit = () => submitText(draft.trim());
@@ -1116,10 +1169,18 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			{queued.length > 0 && (
 				<div className="queue-strip">
 					<span className="queue-title">排队中 · {queued.length}</span>
-					{queued.map((text, index) => (
-						<span key={`${index}-${text}`} className="queue-item" title={text}>
+					{queued.map((item, index) => (
+						<span key={item.id} className="queue-item" title={item.text}>
 							<span className="queue-index">{index + 1}</span>
-							{truncateLine(text, 90)}
+							{truncateLine(item.text, 90)}
+							<button
+								type="button"
+								className="queue-now"
+								title="不等这一轮结束，直接插进当前执行过程"
+								onClick={() => promoteQueued(item.id)}
+							>
+								立即发送
+							</button>
 						</span>
 					))}
 					<span className="queue-hint">当前轮次结束后按顺序执行</span>
@@ -1206,6 +1267,11 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 											: '/ 命令 · @ 文件 · Enter 发送'}
 					</span>
 					{streaming && <button type="button" className="chip danger" onClick={() => requestStop('kill')}>强制结束</button>}
+					{streaming && canSend && (
+						<button type="button" className="chip" onClick={() => submitText(draft.trim(), true)}>
+							立即发送
+						</button>
+					)}
 					<button
 						type="button"
 						className={stopping ? 'primary stop' : 'primary'}
@@ -1277,7 +1343,14 @@ function ChatItemView({ item, childrenOf, outputOf, live = false }: {
 }) {
 	switch (item.kind) {
 		case 'user':
-			return <div className="msg user">{item.text}</div>;
+			// A message steered into a running turn is worth marking: it was never a
+			// turn of its own, so it explains an answer that arrived all at once.
+			return (
+				<div className={`msg user${item.queued ? ' queued' : ''}`}>
+					{item.queued && <span className="msg-tag" title="本轮执行中插入，未单独成轮">插话</span>}
+					{item.text}
+				</div>
+			);
 		case 'assistant':
 			return (
 				<div className="msg assistant rich">

@@ -17,6 +17,7 @@
 	},
 	"dependencies": {
 		"@streamdown/math": "^1.0.3",
+		"@streamdown/mermaid": "^1.0.3",
 		"@xterm/addon-fit": "^0.10.0",
 		"@xterm/xterm": "^5.5.0",
 		"cordis": "^3.18.1",

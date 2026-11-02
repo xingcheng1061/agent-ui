@@ -1,4 +1,4 @@
-import type { AgentClientCommand, AgentServerEvent } from '../agentTypes';
+import type { AgentClientCommand, AgentServerEvent, QueuedMessage } from '../agentTypes';
 import { agentUrl, reportClientLog } from '../api';
 import { deleteLiveTurn, writeLiveTurn } from './liveTurnStore';
 
@@ -58,7 +58,7 @@ export interface AgentConnectionHandle {
 	 * Slightly newer than the IndexedDB copy (which is written in batches), so a
 	 * panel opening mid-turn replays from here and cannot miss the last window.
 	 */
-	snapshot(): { readonly events: readonly AgentServerEvent[]; readonly queued: readonly string[]; readonly busy: boolean };
+	snapshot(): { readonly events: readonly AgentServerEvent[]; readonly queued: readonly QueuedMessage[]; readonly busy: boolean };
 	/** Points this connection at another session (a new conversation got its id). */
 	follow(sessionId: string | undefined): void;
 	/**
@@ -90,7 +90,7 @@ class AgentConnection implements AgentConnectionHandle {
 	private _busy = false;
 	private _lastSeq = 0;
 	private readonly _events: AgentServerEvent[] = [];
-	private _queued: readonly string[] = [];
+	private _queued: readonly QueuedMessage[] = [];
 	private _dirty = false;
 	private readonly _listeners = new Set<EventListener>();
 	private readonly _stateListeners = new Set<StateListener>();
@@ -128,7 +128,7 @@ class AgentConnection implements AgentConnectionHandle {
 		}
 	}
 
-	snapshot(): { readonly events: readonly AgentServerEvent[]; readonly queued: readonly string[]; readonly busy: boolean } {
+	snapshot(): { readonly events: readonly AgentServerEvent[]; readonly queued: readonly QueuedMessage[]; readonly busy: boolean } {
 		return { events: [...this._events], queued: this._queued, busy: this._busy };
 	}
 

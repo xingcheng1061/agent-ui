@@ -1,0 +1,5 @@
+# Runtime dependency of e2e/ui_probe.py.
+# pip install -r e2e/requirements.txt
+# Selenium 4.6+ ships Selenium Manager, which fetches the matching driver on
+# first run; no separate chromedriver download is needed.
+selenium>=4.10

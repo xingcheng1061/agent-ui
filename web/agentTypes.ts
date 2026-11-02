@@ -1,5 +1,18 @@
 /** Mirror of `server/agent/protocol.ts` for the browser side. */
 
+/**
+ * A message waiting for the running turn (mirror of the server's `QueuedMessage`).
+ *
+ * `defer` waits on the server and becomes a turn of its own; `now` was steered
+ * into the running turn, where the CLI only records a `queued_command`
+ * attachment instead of a user entry.
+ */
+export interface QueuedMessage {
+	readonly id: string;
+	readonly text: string;
+	readonly mode: 'defer' | 'now';
+}
+
 /** Token/tool accounting the CLI reports when a subagent or background task ends. */
 export interface AgentTaskUsage {
 	readonly totalTokens?: number;
@@ -58,7 +71,7 @@ export type AgentServerPayload =
 		readonly lastSeq?: number;
 		readonly oldestSeq?: number;
 	}
-	| { readonly type: 'queue'; readonly items: readonly string[] }
+	| { readonly type: 'queue'; readonly items: readonly QueuedMessage[] }
 	| { readonly type: 'status'; readonly status: string }
 	| { readonly type: 'thinking_tokens'; readonly estimated: number; readonly delta: number }
 	/** `messageId` matches the id the CLI stored the finished message under. */
@@ -119,7 +132,19 @@ export type AgentClientCommand =
 	/** Stops watching a session without touching its process. */
 	| { readonly type: 'detach' }
 	/** `newSession` starts a fresh conversation instead of continuing the attached one. */
-	| { readonly type: 'user'; readonly text: string; readonly sessionId?: string; readonly newSession?: boolean }
+	/**
+	 * `immediate` steers the text into the running turn instead of waiting for it
+	 * to end; the CLI then records it as an attachment rather than a user message.
+	 */
+	| {
+		readonly type: 'user';
+		readonly text: string;
+		readonly sessionId?: string;
+		readonly newSession?: boolean;
+		readonly immediate?: boolean;
+	}
+	/** "Send now" for a queued message: steer it into the running turn. */
+	| { readonly type: 'promote'; readonly id: string; readonly sessionId?: string }
 	| { readonly type: 'interrupt'; readonly sessionId?: string }
 	| { readonly type: 'kill'; readonly sessionId?: string }
 	| { readonly type: 'permission_response'; readonly requestId: string; readonly behavior: 'allow' | 'deny'; readonly message?: string }

@@ -227,6 +227,12 @@ button {
 	background: var(--bg-hover);
 }
 
+.toggle.active {
+	background: var(--bg-active);
+	border-color: var(--bg-active);
+	color: var(--bg-active-fg);
+}
+
 .body {
 	display: grid;
 	grid-template-columns: 280px 1fr;
@@ -243,22 +249,21 @@ button {
 .session-rail {
 	background: var(--bg-elevated);
 	border-right: 1px solid var(--border);
-	overflow: auto;
+	overflow: hidden;
 	display: flex;
 	flex-direction: column;
 	min-height: 0;
 }
 
+/* The list is the scroller, not the rail — see `.rail-list`. */
 .rail-toolbar {
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
 	padding: 8px;
 	border-bottom: 1px solid var(--border);
-	position: sticky;
-	top: 0;
+	flex: none;
 	background: var(--bg-elevated);
-	z-index: 1;
 }
 
 .rail-new {
@@ -288,6 +293,12 @@ button {
 
 .rail-select:focus {
 	border-color: var(--accent);
+}
+
+.rail-list {
+	flex: 1;
+	min-height: 0;
+	overflow: auto;
 }
 
 .bucket-title {
@@ -704,6 +715,19 @@ button {
 	color: var(--user-bubble-fg);
 	align-self: flex-end;
 	max-width: 85%;
+}
+
+/* "插话": this message was steered into a turn that was already running. */
+.msg-tag {
+	display: inline-block;
+	margin-right: 6px;
+	padding: 0 5px;
+	border: 1px solid currentColor;
+	border-radius: 6px;
+	font-size: 10px;
+	line-height: 15px;
+	vertical-align: 1px;
+	opacity: 0.7;
 }
 
 .msg.assistant {
@@ -1166,6 +1190,27 @@ button {
 .editor-host {
 	flex: 1;
 	min-height: 0;
+}
+
+/* Kept mounted while previewing so the model, undo stack and scroll stay put. */
+.editor-host.is-hidden {
+	display: none;
+}
+
+/* Rendered `.md` file: the chat typography, on a page instead of in a bubble. */
+.markdown-preview {
+	flex: 1;
+	min-height: 0;
+	overflow: auto;
+	padding: 20px 28px 40px;
+}
+
+.markdown-preview .md {
+	max-width: 920px;
+	margin: 0 auto;
+	/* Same scale the chat bubbles use; `.md` itself carries no font sizing. */
+	font-size: 13px;
+	line-height: 1.6;
 }
 
 .file-tree {
@@ -1757,6 +1802,15 @@ button {
 	margin: 0;
 }
 
+/*
+ * streamdown marks bold with `<span data-streamdown="strong" class="font-semibold">`
+ * — a Tailwind class, and this app ships no Tailwind, so `**bold**` used to come
+ * out as plain text.
+ */
+.md [data-streamdown='strong'] {
+	font-weight: 600;
+}
+
 .md code {
 	padding: 1px 4px;
 	background: var(--surface-inset);
@@ -1969,6 +2023,46 @@ button {
 	margin-right: 5px;
 }
 
+/*
+ * mermaid diagrams. streamdown styles them with Tailwind classes, which this
+ * app does not ship, so the wrapper is rebuilt against its `data-streamdown`
+ * hooks — same approach as the table chrome above.
+ */
+.md [data-streamdown='mermaid-block'] {
+	margin: 0 0 10px;
+	padding: 8px 10px;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	background: var(--surface-sunken);
+}
+
+/* The "mermaid" caption streamdown puts above every diagram. */
+.md [data-streamdown='mermaid-block'] > div:first-child {
+	display: none;
+}
+
+.md [data-streamdown='mermaid'] {
+	overflow-x: auto;
+}
+
+/* Mermaid sizes the SVG to the diagram; narrow panes must not overflow. */
+.md [data-streamdown='mermaid'] svg {
+	max-width: 100%;
+	height: auto;
+}
+
+/* A diagram that failed to parse degrades to its source, plus the reason. */
+.md .mermaid-error {
+	font-size: 12px;
+}
+
+.md .mermaid-error-note {
+	margin: 0 0 6px;
+	color: var(--danger);
+	font-family: var(--font-mono);
+	font-size: 11.5px;
+}
+
 /* ---------- message queue ---------- */
 
 .queue-strip {
@@ -2016,6 +2110,25 @@ button {
 	flex: none;
 	font-size: 10px;
 	color: var(--warn-dim);
+}
+
+/* "Send now": steer a queued message into the turn that is still running. */
+.queue-now {
+	flex: none;
+	margin-left: 2px;
+	padding: 0 4px;
+	border: 1px solid var(--warn-border);
+	border-radius: 6px;
+	background: transparent;
+	color: var(--warn-text);
+	font-size: 10px;
+	line-height: 15px;
+	cursor: pointer;
+}
+
+.queue-now:hover {
+	border-color: var(--warn);
+	color: var(--warn);
 }
 
 /* ---------- auth page ---------- */
@@ -2562,4 +2675,17 @@ button {
 
 .md .katex-error {
 	color: var(--danger);
+}
+
+/* ---------- keyboard focus ---------- */
+
+/*
+ * Several controls opt out of the browser ring (`outline: none` plus a border
+ * colour change), which leaves keyboard users with no visible focus — the ui
+ * probe flagged exactly that. `:focus-visible` only fires for keyboard
+ * navigation, so mouse clicks stay unchanged.
+ */
+:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 1px;
 }

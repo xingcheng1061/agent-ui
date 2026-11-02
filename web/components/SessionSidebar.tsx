@@ -69,35 +69,42 @@ export function SessionSidebar({
 				</select>
 			</div>
 
-			{visible.length === 0 && <div className="rail-empty">这个项目还没有会话</div>}
-			{bucketize(visible).map(bucket => (
-				<div key={bucket.label}>
-					<div className="bucket-title">{bucket.label}</div>
-					{bucket.sessions.map(session => {
-						const live = running?.get(session.id);
-						const pendingTool = approvals?.get(session.id);
-						return (
-							<button
-								type="button"
-								key={session.id}
-								className={`session-row${session.id === activeSessionId ? ' active' : ''}`}
-								onClick={() => onSelectSession(session)}
-								title={`${session.title}\n${session.cwd}${pendingTool ? `\n等待审批：${pendingTool}` : ''}${live === true ? '\n正在回答' : live === false ? '\n进程在运行，空闲' : ''}`}
-							>
-								<span className="session-title">
-									{live !== undefined && <i className={`session-run${live ? ' busy' : ''}`} />}
-									<span className="session-text">{session.title}</span>
-									{pendingTool && <span className="session-badge">待审批</span>}
-								</span>
-								<span className="session-meta">
-									<span className="session-project">{projectName(session.projectId)}</span>
-									<span className="session-time">{formatTime(session.updatedAt)}</span>
-								</span>
-							</button>
-						);
-					})}
-				</div>
-			))}
+			{/*
+			 * The list scrolls on its own. A sticky toolbar overlapped the first
+			 * row — clicks landed on the toolbar instead of the conversation —
+			 * so the toolbar and the scroll area are siblings now.
+			 */}
+			<div className="rail-list">
+				{visible.length === 0 && <div className="rail-empty">这个项目还没有会话</div>}
+				{bucketize(visible).map(bucket => (
+					<div key={bucket.label}>
+						<div className="bucket-title">{bucket.label}</div>
+						{bucket.sessions.map(session => {
+							const live = running?.get(session.id);
+							const pendingTool = approvals?.get(session.id);
+							return (
+								<button
+									type="button"
+									key={session.id}
+									className={`session-row${session.id === activeSessionId ? ' active' : ''}`}
+									onClick={() => onSelectSession(session)}
+									title={`${session.title}\n${session.cwd}${pendingTool ? `\n等待审批：${pendingTool}` : ''}${live === true ? '\n正在回答' : live === false ? '\n进程在运行，空闲' : ''}`}
+								>
+									<span className="session-title">
+										{live !== undefined && <i className={`session-run${live ? ' busy' : ''}`} />}
+										<span className="session-text">{session.title}</span>
+										{pendingTool && <span className="session-badge">待审批</span>}
+									</span>
+									<span className="session-meta">
+										<span className="session-project">{projectName(session.projectId)}</span>
+										<span className="session-time">{formatTime(session.updatedAt)}</span>
+									</span>
+								</button>
+							);
+						})}
+					</div>
+				))}
+			</div>
 		</div>
 	);
 }

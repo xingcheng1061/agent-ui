@@ -1,18 +1,39 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type ProxyOptions } from 'vite';
 import react from '@vitejs/plugin-react';
 
 const SERVER_ORIGIN = process.env.AGENT_UI_ORIGIN ?? 'http://127.0.0.1:4711';
+
+/**
+ * A websocket proxy dies with the whole dev server when the browser drops the
+ * connection mid-handshake: http-proxy emits `error` on the proxy server and,
+ * with no listener, Node turns it into an uncaught exception (ECONNRESET on
+ * read). Swallow it — the client is gone, and nothing else can be done.
+ */
+function silenceProxyErrors(options: ProxyOptions): ProxyOptions {
+	return {
+		...options,
+		configure: proxy => {
+			proxy.on('error', () => undefined);
+		},
+	};
+}
 
 export default defineConfig({
 	root: 'web',
 	plugins: [react()],
 	server: {
+		// 127.0.0.1 rather than 'localhost': the latter binds ::1 only on this
+		// machine, so http://127.0.0.1:4712 looked like a dead port.
+		host: '127.0.0.1',
 		port: 4712,
 		strictPort: true,
 		proxy: {
-			'/api': { target: SERVER_ORIGIN, changeOrigin: true },
-			'/pty': { target: SERVER_ORIGIN.replace(/^http/, 'ws'), ws: true },
-			'/agent': { target: SERVER_ORIGIN.replace(/^http/, 'ws'), ws: true },
+			// Anchored on purpose. A bare '/api' prefix also matches the frontend
+			// module '/api.ts', so Vite proxied it to the server, which answered
+			// 404 — the app then failed to mount and the dev page went blank.
+			'^/api/': { target: SERVER_ORIGIN, changeOrigin: true },
+			'^/pty(\\?|/|$)': silenceProxyErrors({ target: SERVER_ORIGIN.replace(/^http/, 'ws'), ws: true }),
+			'^/agent(\\?|/|$)': silenceProxyErrors({ target: SERVER_ORIGIN.replace(/^http/, 'ws'), ws: true }),
 		},
 	},
 	worker: { format: 'es' },

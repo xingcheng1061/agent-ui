@@ -1,12 +1,31 @@
 import { math } from '@streamdown/math';
-import { Streamdown, type Components } from 'streamdown';
+import { useEffect, useMemo, useState } from 'react';
+import { Streamdown, type Components, type DiagramPlugin, type MermaidErrorComponentProps } from 'streamdown';
 import 'katex/dist/katex.min.css';
 import 'streamdown/styles.css';
+import { getTheme, onThemeChange, type ThemeName } from '../theme';
 
 interface MarkdownProps {
 	readonly text: string;
 	/** While deltas are still arriving, let streamdown repair unfinished syntax. */
 	readonly streaming?: boolean;
+	/** Render ` ```mermaid ` fences as diagrams. Loads mermaid on demand. */
+	readonly mermaid?: boolean;
+	/** Off for document previews, where streamdown's per-block chrome is noise. */
+	readonly controls?: boolean;
+}
+
+/**
+ * mermaid paints its own palette into the SVG instead of inheriting CSS,
+ * so the app theme has to be handed over explicitly.
+ */
+function mermaidConfig(theme: ThemeName) {
+	return {
+		startOnLoad: false,
+		theme: theme === 'light' ? 'default' : 'dark',
+		securityLevel: 'strict',
+		fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+	} as const;
 }
 
 /**
@@ -17,15 +36,51 @@ interface MarkdownProps {
  * unterminated constructs on every render, so a half-received ` ```ts ` fence or
  * `**bold` does not flash as raw text before closing.
  *
- * Math goes through `@streamdown/math` (KaTeX). Only `$$…$$` / `\[…\]` are
- * treated as math; single `$…$` stays off on purpose — agent output is full of
- * shell snippets like `$HOME` and prices such as `$5`, which would otherwise be
- * swallowed as formulas.
+ * Math goes through `@streamdown/math` (KaTeX). Only `$$…$$` is treated as math,
+ * block or inline; `$…$` stays off on purpose — agent output is full of shell
+ * snippets like `$HOME` and prices such as `$5`, which would otherwise be
+ * swallowed as formulas. LaTeX's `\(…\)` / `\[…\]` are not delimiters here and
+ * come out as literal text.
  *
  * streamdown's `styles.css` only ships animations, so all typography comes from
  * the `.md` rules in `styles.css` to match the app theme.
  */
-export function Markdown({ text, streaming = false }: MarkdownProps) {
+export function Markdown({ text, streaming = false, mermaid = false, controls }: MarkdownProps) {
+	const [diagram, setDiagram] = useState<DiagramPlugin | undefined>(undefined);
+	const [theme, setTheme] = useState(getTheme);
+
+	useEffect(() => {
+		if (!mermaid) {
+			return;
+		}
+		return onThemeChange(setTheme);
+	}, [mermaid]);
+
+	// mermaid is a megabyte of parser. Only the `.md` preview asks for it, and
+	// only once such a file is open; until the chunk lands, fences stay code
+	// blocks, which is also the fallback when loading fails.
+	useEffect(() => {
+		if (!mermaid) {
+			return;
+		}
+		let cancelled = false;
+		void import('@streamdown/mermaid')
+			.then(({ createMermaidPlugin }) => {
+				if (!cancelled) {
+					// A new instance on theme change makes streamdown re-render
+					// every diagram with the other palette.
+					setDiagram(() => createMermaidPlugin({ config: mermaidConfig(theme) }));
+				}
+			})
+			.catch(() => undefined);
+		return () => {
+			cancelled = true;
+		};
+	}, [mermaid, theme]);
+
+	const plugins = useMemo(() => (diagram ? { math, mermaid: diagram } : { math }), [diagram]);
+	const diagramOptions = useMemo(() => ({ errorComponent: MermaidFallback }), []);
+
 	return (
 		<div className="md">
 			<Streamdown
@@ -33,7 +88,9 @@ export function Markdown({ text, streaming = false }: MarkdownProps) {
 				parseIncompleteMarkdown
 				className="md-body"
 				components={markdownComponents}
-				plugins={{ math }}
+				plugins={plugins}
+				controls={controls}
+				mermaid={diagram ? diagramOptions : undefined}
 			>
 				{text}
 			</Streamdown>
@@ -47,3 +104,13 @@ const markdownComponents: Components = {
 	// DOM element would emit a React warning.
 	a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener" />,
 };
+
+/** A broken diagram must not blank the preview: show why, plus the source. */
+function MermaidFallback({ chart, error }: MermaidErrorComponentProps) {
+	return (
+		<div className="mermaid-error">
+			<p className="mermaid-error-note">{error}</p>
+			<pre><code>{chart}</code></pre>
+		</div>
+	);
+}
