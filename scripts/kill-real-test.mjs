@@ -1,8 +1,30 @@
+/**
+ * Manual check that `kill` really ends a running turn, over the real agent
+ * WebSocket rather than through the UI.
+ *
+ * What it asserts: the `exit` event arrives quickly after `kill` (with the
+ * CLI's own exit code and stderr), and the conversation can still be resumed
+ * afterwards — the two regressions behind "silent stop/kill".
+ *
+ * Needs a server already running. Root and token default to the environment
+ * the server was started with:
+ *
+ *	node scripts/kill-real-test.mjs --port 4711 [--root <dir>] [--token <t>] [--agent claude]
+ */
 import { once } from 'node:events';
+import { parseArgs } from 'node:util';
 import WebSocket from 'ws';
 
-const token = 'parity';
-const url = `ws://127.0.0.1:4799/agent?token=${token}&root=${encodeURIComponent('e:/Codes_new/agent-ui')}&agent=claude`;
+const { values } = parseArgs({
+	options: {
+		port: { type: 'string', default: process.env.AGENT_UI_PORT ?? '4711' },
+		root: { type: 'string', default: process.env.AGENT_UI_ROOT ?? process.cwd() },
+		token: { type: 'string', default: process.env.AGENT_UI_TOKEN ?? '' },
+		agent: { type: 'string', default: 'claude' },
+	},
+});
+
+const url = `ws://127.0.0.1:${values.port}/agent?${values.token ? `token=${encodeURIComponent(values.token)}&` : ''}root=${encodeURIComponent(values.root)}&agent=${values.agent}`;
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const socket = new WebSocket(url);

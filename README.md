@@ -33,14 +33,31 @@
 
 ## 安装
 
+### 全局安装（发行版）
+
 ```powershell
-# PowerShell
-git clone <repo> agent-ui
-cd agent-ui
-npm install
+npm install -g agent-ui
+agent-ui
 ```
 
-`npm install` 会编译 `node-pty`（原生模块）。如果本机缺少编译工具链，先装 VS Build Tools（Windows）或 Xcode CLT（macOS）。
+在任意项目目录里执行 `agent-ui`，它会以当前目录为项目根启动，打开 `http://127.0.0.1:4711`。不想全局安装就用 `npx agent-ui`。
+
+离线 / 内网环境可以直接用仓库 Releases 里附的 tarball：
+
+```powershell
+npm install -g ./agent-ui-0.1.0.tgz
+```
+
+`node-pty` 是原生模块，但包内自带 win32 / darwin 的 x64 与 arm64 预编译产物：常规平台 `npm install` 不需要编译工具链。npm ≥ 11.16 会默认跳过依赖的 install script 并打印 `allow-scripts` 警告，此时 `node-pty` 会直接加载 `prebuilds/`，终端照常可用。只有既无预编译产物、又不许跑脚本的平台才需要 VS Build Tools（Windows）或 Xcode CLT（macOS）。
+
+### 从源码运行
+
+```powershell
+git clone https://github.com/xingcheng1061/agent-ui.git
+cd agent-ui
+npm install
+npm run dev
+```
 
 ## 运行
 
@@ -62,6 +79,18 @@ npm start
 
 打开 `http://127.0.0.1:4711`。`dist/web` 由 Express 直接托管，不需要额外静态服务器。
 
+### 命令行参数
+
+全局安装后 `agent-ui` 就是启动命令，参数等价于同名环境变量：
+
+```powershell
+agent-ui -p 8080 -r D:\work\my-project   # 等价于 AGENT_UI_PORT=8080 AGENT_UI_ROOT=...
+agent-ui -h                              # 帮助
+agent-ui -v                              # 版本
+```
+
+`-H/--host` 改监听地址（默认只监听 `127.0.0.1`），其余配置项见 [docs/operations.md](./docs/operations.md)。
+
 ### 常用命令
 
 | 命令 | 作用 |
@@ -69,9 +98,13 @@ npm start
 | `npm run dev` | 后端 + 前端并行开发 |
 | `npm run dev:server` | 只跑后端（watch） |
 | `npm run dev:web` | 只跑前端（Vite） |
-| `npm run build` | 类型检查 + 构建到 `dist/web` |
-| `npm start` | 跑生产构建（需先 build） |
+| `npm run build` | 类型检查 + 构建到 `dist/server` 与 `dist/web` |
+| `npm start` | 跑构建产物（需先 build，等价于 `agent-ui`） |
+| `npm run start:source` | 直接跑 TypeScript 源码（tsx） |
 | `npm run typecheck` | 分别检查 `server` 与 `web` 两个 tsconfig |
+| `npm pack` | 打出发行 tarball（`prepack` 会先完整构建） |
+| `node scripts/restart.mjs` | 开发用：延迟重启本机服务（Windows） |
+| `node scripts/kill-real-test.mjs` | 手工验证 `kill` 是否真的结束轮次且可续聊 |
 
 ## 配置
 
@@ -136,6 +169,7 @@ agent-ui/
 │       ├── Markdown.tsx       # streamdown 封装
 │       ├── CodeHighlight.tsx  # shiki 封装
 │       └── liveTurnStore.ts   # 进行中轮次的 IndexedDB 镜像
+├── scripts/                   # 构建与开发辅助（build-server / restart / kill-real-test）
 └── docs/                      # 技术方案（本文档群）
 ```
 
@@ -169,8 +203,10 @@ npm start
 
 1. 创建强密码账号（或用 `AGENT_UI_ADMIN_*` 预置）
 2. 设 `AGENT_UI_TOKEN`（额外共享密钥，给脚本/curl 用）
-2. 置于反向代理之后，并启用 TLS
-3. 理解 `AGENT_UI_ROOTS` / 项目注册机制决定了 agent 能碰哪些目录——不要图方便把 `/` 加进去
+3. 置于反向代理之后，并启用 TLS
+4. 理解 `AGENT_UI_ROOTS` / 项目注册机制决定了 agent 能碰哪些目录——不要图方便把 `/` 加进去
+
+凭据（`users.json` / `sessions.json`）只落在 `~/.agent-ui/`，不进仓库、不进发行包。
 
 ## 路线图
 
@@ -180,3 +216,7 @@ npm start
 - [ ] Monaco 跨文件跳转（TS worker 已就绪，差「为未打开的 import 建 model」）
 - [ ] 会话重命名 / 删除 / 项目过滤
 - [ ] 多用户与多端（需要先做账号体系；届时 IndexedDB 镜像的策略要重新评估）
+
+## 许可证
+
+[MIT](./LICENSE)。问题与建议请开 [issue](https://github.com/xingcheng1061/agent-ui/issues)。

@@ -10,3 +10,6 @@ __pycache__/
 # Selenium downloads / caches (e2e/*.py)
 chromedriver/
 se-metadata.json
+
+# Release artifacts (npm pack)
+*.tgz

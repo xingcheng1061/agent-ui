@@ -35,6 +35,18 @@
 |---|---|---|
 | `AGENT_UI_ORIGIN` | `http://127.0.0.1:4711` | Vite dev server 的代理目标 |
 
+### 命令行参数
+
+发布版入口是 `dist/server/cli.js`（`bin: agent-ui`），只负责把参数翻译成上面几个环境变量，然后加载服务本体——`config.ts` 在模块加载时读环境变量，所以顺序不能反：
+
+| 参数 | 等价环境变量 |
+|---|---|
+| `-p, --port <端口>` | `AGENT_UI_PORT` |
+| `-H, --host <地址>` | `AGENT_UI_HOST` |
+| `-r, --root <目录>` | `AGENT_UI_ROOT` |
+
+`--help` / `--version` 只读元信息，不启动服务。
+
 ### 内部使用（不要手动设）
 
 `AGENT_UI_PERMISSION_URL` / `_TOKEN` / `_SESSION` —— 由服务端在 spawn CLI 时注入，给 MCP 审批子进程回连用。`INTERNAL_TOKEN` 每次启动随机生成。

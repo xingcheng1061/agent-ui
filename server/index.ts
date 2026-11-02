@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { preloadAgentState } from './agent/agentState.js';
 import { requestPermissionFromBrowser } from './agent/permissionGateway.js';
@@ -395,7 +396,17 @@ app.get('/api/sessions/:id', async (req, res) => {
 
 app.use('/api/fs', fsRouter);
 
-const webDist = path.join(process.cwd(), 'dist', 'web');
+/**
+ * Built frontend, resolved from this file rather than from `process.cwd()`: a
+ * globally installed CLI is always started inside the user's project, where no
+ * `dist/web` exists. Two layouts are supported — running from source
+ * (`server/index.ts` → `<repo>/dist/web`) and running the published package
+ * (`dist/server/index.js` → `<pkg>/dist/web`).
+ */
+const here = path.dirname(fileURLToPath(import.meta.url));
+const webDist = path.basename(path.dirname(here)) === 'dist'
+	? path.join(here, '..', 'web')
+	: path.join(here, '..', 'dist', 'web');
 if (existsSync(path.join(webDist, 'index.html'))) {
 	app.use(express.static(webDist));
 	app.use((req, res, next) => {
