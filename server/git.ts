@@ -7,9 +7,26 @@ const execFileAsync = promisify(execFile);
 const MAX_BUFFER = 8 * 1024 * 1024;
 const MAX_LINE_COUNT_BYTES = 1024 * 1024;
 
-/** Argument-array form only: no shell, so paths cannot smuggle commands. */
+/**
+ * Argument-array form only: no shell, so paths cannot smuggle commands.
+ *
+ * `core.quotePath=false` is passed per invocation rather than written to the
+ * repository's config: without it git renders non-ASCII paths as `"\344\270\255…"`,
+ * which then failed every downstream step at once — the tree showed the escape
+ * sequence, `fs.readFile` and `git show HEAD:<path>` both missed, so Monaco got
+ * `original: ''` and painted the whole file as one green addition, and the
+ * numstat keys never matched the status rows, leaving the +/- counts at zero.
+ *
+ * Quoting is not fully gone: a path containing a quote, a backslash or a newline
+ * still gets C-style escaped, and this wrapper does not unquote it. Such paths
+ * are rare enough to leave alone; add an unquote step here if one shows up.
+ */
 async function git(root: string, args: readonly string[]): Promise<string> {
-	const { stdout } = await execFileAsync('git', ['-C', root, ...args], { maxBuffer: MAX_BUFFER, windowsHide: true });
+	const { stdout } = await execFileAsync(
+		'git',
+		['-C', root, '-c', 'core.quotePath=false', ...args],
+		{ maxBuffer: MAX_BUFFER, windowsHide: true },
+	);
 	return stdout;
 }
 
@@ -75,6 +92,9 @@ export async function gitStatus(root: string): Promise<GitStatusResult> {
 		if (renamedAt >= 0) {
 			filePath = filePath.slice(renamedAt + 4);
 		}
+		// `core.quotePath=false` unescapes non-ASCII names at the source; only a
+		// path containing a quote / backslash / newline still arrives quoted, and
+		// the quotes are all this strips (see the `git()` note on unquoting).
 		filePath = filePath.replace(/^"(.*)"$/, '$1');
 		const count = counts.get(filePath);
 		if (count) {

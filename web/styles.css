@@ -2222,6 +2222,15 @@ button {
 	flex-direction: column;
 }
 
+/* The slot the pooled screen is plugged into; it fills `.terminal-host`, which
+   also carries the overlays. */
+.terminal-host-slot {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	flex-direction: column;
+}
+
 .terminal-host-xterm {
 	flex: 1;
 	min-height: 0;

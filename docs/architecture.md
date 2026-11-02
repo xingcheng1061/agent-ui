@@ -221,7 +221,7 @@ CLI 只在一条消息**写完后**才把它追加进 jsonl。所以流式进行
 
 ## 终端：为什么 PTY 活在服务端
 
-`POST /api/terminals` 创建时就 spawn shell，WS 只是**视图**。切标签、刷新页面、断网重连都不会杀掉 shell——重连时服务端先把期间产生的输出（滚动缓冲，100KB）以 `snapshot` 推给前端，前端 `terminal.reset()` 后重放，然后才接实时流。
+`POST /api/terminals` 创建时就 spawn shell，WS 只是**视图**：
 
 ```
 POST /api/terminals ──► spawn pty ──► terminals.json 记录
@@ -231,7 +231,17 @@ WS /terminal?id=xxx ──attach──┘   （无客户端 1 小时后回收）
 
 代价是多了一层注册表和一个回收计时器；收益是「多个终端」是真的多个并存的 shell，而不是「当前看得见的那个」。
 
-终端按**项目根目录**共享，不按会话：`Workspace` 只按 `root` 挂载，所以同一项目内切换会话连 WS 都不会断。同一个终端可以被多个客户端同时观看（`LiveTerminal.sockets` 是集合，`onData` 广播给全部），这在「同一个项目开两个浏览器标签」时是必需的——早先是单引用，后 attach 的会把前一个顶掉，前一个标签画面冻结却仍能往 shell 里敲字。唯一保留的竞争是 `resize`：两边窗口大小不同会互相覆盖，最后调用的赢。
+**socket 也不再属于组件**。这一条是后来补的：`TerminalView` 早先自己开 socket、unmount 时关掉，等于把「视图的生命周期」当成了「连接的生命周期」。而视图挂在 `Workspace` 上、`Workspace` 按 root 作 key，切到另一个项目的会话会连整棵树一起卸载重建——画面没了、socket 关了，下一次 attach 只能靠 `snapshot` 重画，看起来就像 shell 重启过。
+
+现在 xterm 实例和 socket 一起放在 `web/components/terminalSessions.ts` 的池里，和 `agentConnections.ts` 是同一个思路（连接的寿命由池决定，不由组件决定）。`TerminalView` 退化成一根槽：`attach` 把屏幕的 host 节点塞进 DOM，`detach` 把它取出来。切换项目因此只是**移动一个 DOM 节点**，不重新握手——同一项目内切会话不重连，跨项目切会话也不重连，屏幕和 scrollback 都原样保留。
+
+池子的边界：没人看的屏幕最多留 8 个（`MAX_IDLE_SESSIONS`，LRU）；显式关闭终端调 `forgetTerminalSession` 立即销毁；被淘汰的屏幕断开 socket 后，服务端照旧启动 1 小时回收计时。分离期间**不做 reflow**：PTY 保持屏幕最后一次可见时的 cols/rows，后台跑的 `build` 不会被重排成别的宽度。
+
+`snapshot` 于是只服务于**真正的重连**（首次 attach、断网重连）。服务端内存缓冲 100KB（断线期间的长输出不会丢），但只推最后 8KB 且从一个整行开始（`SNAPSHOT_LIMIT`）——早先是无条件全量重放 100KB、约一千行，刷新一次就像「把之前敲过的命令又跑了一遍」。
+
+**回放期间必须吞掉终端的应答。** 快照里的字节不全是「画面」，还有程序当初问终端的话（`ESC]11;?` 背景色、`ESC[6n` 光标位置、`ESC[12$p` 光标闪烁模式、DA…）。把这些重新喂给 xterm，它会再答一遍；而此时已经没有任何程序在读，shell 就把应答当成用户键入的字符回显出来——屏上那串 `10;rgb:d4d4/…`、`12;2$y` 就是这么来的，而且回显又进了缓冲，下次重连答得更多。所以 `terminalSessions.ts` 在 `write(snapshot)` 的整个解析期间置 `_replaying`，丢弃 `onData` 产出（期间的按键先攒着，回放结束再发）。同一个原因下，重连时也不再发一次内容相同的 `resize`：多余的 SIGWINCH 会让 shell 白重绘一次提示符，有些程序还会因此重新查询终端。
+
+终端按**项目根目录**共享，不按会话：一个项目里开了几个终端，切走再切回来还是那几个（`listTerminals()` 按 root 过滤）。同一个终端可以被多个客户端同时观看（`LiveTerminal.sockets` 是集合，`onData` 广播给全部），这在「同一个项目开两个浏览器标签」时是必需的——早先是单引用，后 attach 的会把前一个顶掉，前一个标签画面冻结却仍能往 shell 里敲字。唯一保留的竞争是 `resize`：两边窗口大小不同会互相覆盖，最后调用的赢。
 
 ## 鉴权：为什么用文件而不是数据库
 

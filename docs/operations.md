@@ -15,7 +15,10 @@
 | `AGENT_UI_CLAUDE_BIN` | `claude` | CLI 可执行名/路径 |
 | `AGENT_UI_PERMISSION_MODE` | `acceptEdits` | 初始权限模式 |
 | `AGENT_UI_MODEL` | 空 | 初始模型（`--model`） |
-| `AGENT_UI_MODELS` | `sonnet,opus,haiku` | 模型下拉候选，逗号分隔 |
+| `AGENT_UI_MODELS` | 空（自动发现） | 模型下拉候选，逗号分隔。设了就**跳过发现**，列表完全由它决定 |
+| `AGENT_UI_MODELS_URL` | 空 | 模型清单来源，base URL（`http://host:port`、`…/v1`）或完整 endpoint 均可 |
+| `AGENT_UI_MODELS_TOKEN` | 空 | 访问上面那个地址时带的 `Authorization: Bearer` |
+| `AGENT_UI_MODELS_TIMEOUT_MS` | `3000` | 启动时模型发现的整体超时（候选是并发探测的） |
 | `AGENT_UI_SHELL` | Windows `powershell.exe` / *nix `$SHELL` | 终端 shell |
 
 ### 生命周期与超时
@@ -38,6 +41,23 @@
 ### 内部使用（不要手动设）
 
 `AGENT_UI_PERMISSION_URL` / `_TOKEN` / `_SESSION` —— 由服务端在 spawn CLI 时注入，给 MCP 审批子进程回连用。`INTERNAL_TOKEN` 每次启动随机生成。
+
+### 模型清单从哪来
+
+`claude` CLI 自己只认 `sonnet` / `opus` / `haiku` 三个别名，真实型号在它前面的网关里（tclaude 本地网关有 `GET /v1/models`）。所以启动时按顺序找一次，第一个给出非空列表的就用：
+
+```
+AGENT_UI_MODELS_URL → ANTHROPIC_BASE_URL → ~/.tclaude/daemon.json 里的地址
+   └─ 都没结果 → ~/.tclaude/cache/gateway-models.json（可能是旧的）
+        └─ 还是没有 → sonnet,opus,haiku（与旧行为一致）
+```
+
+- 网关候选是**并发**探测的，整体受 `AGENT_UI_MODELS_TIMEOUT_MS` 限制，不会因为一个不可达的地址串行等 4 个超时
+- 缓存文件单独放最后：它读得太快，放进并发里会永远赢过真网关，而它恰恰是要被替代的那份旧数据
+- 两种响应格式都认：`{ data: [{ id, display_name }] }`（OpenAI 风格）与 `{ models: [{ id }] }`（tclaude 缓存）
+- 下拉显示 `display_name`，但选中的值永远是 `id`（`claude-opus-4-7[1m]` 这类原样传给 `--model`）
+- 发现的型号排在前面，再并上三个别名去重；`AGENT_UI_MODELS` 一旦设置就完全不探测
+- 启动横幅里的 `models: N (来源)` 就是结果，排查时先看它
 
 ## 进程模型
 
@@ -169,6 +189,12 @@ Get-NetTCPConnection -LocalPort 4711 -State Listen | Select-Object OwningProcess
 ### 变更列表里只有目录
 
 `git status` 默认折叠未跟踪目录，代码里已用 `-uall` 展开。如果还是只有目录，检查该目录是不是真的 git 仓库（非仓库会显示「不是 git 仓库」）。
+
+### 中文文件名显示成 `\344\270\255` / diff 整篇全绿
+
+git 默认 `core.quotePath=true`，非 ASCII 路径会被转成八进制转义并加引号；后端拿到的路径因此既读不到工作区文件，也 `git show` 不出 HEAD 版本，Monaco 只能把 `original: ''` 渲染成「整份新增」，`numstat` 的 key 也对不上。
+
+`server/git.ts` 里唯一的 git 包装统一加了 `-c core.quotePath=false`（命令行参数，不写进用户仓库的 `.git/config`）。已知残留：路径里含引号、反斜杠或换行时 git 仍会做 C 风格转义，这种路径目前不解析；真遇到了再在包装层加 unquote。
 
 ### 终端打不开
 

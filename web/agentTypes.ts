@@ -20,12 +20,21 @@ export interface AgentTaskUsage {
 	readonly durationMs?: number;
 }
 
+/**
+ * One entry of the model picker (mirror of the server's `ModelOption`).
+ * `id` is what the backend takes; `label` is what the user reads.
+ */
+export interface ModelOption {
+	readonly id: string;
+	readonly label?: string;
+}
+
 /** One installed agent backend (mirror of the server's `AgentInfo`). */
 export interface AgentInfo {
 	readonly id: string;
 	readonly name: string;
 	readonly description?: string;
-	readonly models: readonly string[];
+	readonly models: readonly ModelOption[];
 	readonly permissionModes: readonly string[];
 	readonly defaultModel?: string;
 	readonly defaultPermissionMode: string;
@@ -51,13 +60,13 @@ export type AgentServerPayload =
 		readonly slashCommands?: readonly string[];
 		readonly skills?: readonly string[];
 		readonly agents?: readonly string[];
-		readonly models?: readonly string[];
+		readonly models?: readonly ModelOption[];
 	}
 	| {
 		readonly type: 'config';
 		readonly model?: string;
 		readonly permissionMode?: string;
-		readonly models?: readonly string[];
+		readonly models?: readonly ModelOption[];
 		readonly permissionModes?: readonly string[];
 		readonly agent?: string;
 		readonly agents?: readonly AgentInfo[];

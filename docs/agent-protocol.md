@@ -40,9 +40,9 @@ claude --print --verbose \
 
 | 事件 | 关键字段 | 来源 |
 |---|---|---|
-| `system` | `sessionId`、`model`、`cwd`、`permissionMode`、`slashCommands`、`skills`、`agents`、`models`、`toolCount` | CLI 的 `system/init`，**每一轮都会重发** |
-| `config` | `model?`、`permissionMode?`、`models?` | 控制通道成功后的即时反馈；连接建立时也会推一次静态配置 |
-| `session_state` | `live`、`sessionId?`、`busy?`、`lastSeq?` | `attach` 的答复：后台有没有进程、是否在跑、流现在到哪（`lastSeq`）。`oldestSeq` 字段仍保留在类型里但**不再发送**——服务端没有缓冲可报 |
+| `system` | `sessionId`、`model`、`cwd`、`permissionMode`、`slashCommands`、`skills`、`agents`、`models`、`toolCount` | CLI 的 `system/init`，**每一轮都会重发**。其中的 `models` 由 router 用 driver 的清单覆盖（`{ id, label? }[]`）：CLI 只认三个别名，不知道网关的目录 |
+| `config` | `model?`、`permissionMode?`、`models?` | 控制通道成功后的即时反馈；连接建立时也会推一次静态配置。`models` 同样是 `{ id, label? }[]` |
+| `session_state` | `live`、`sessionId?`、`busy?`、`lastSeq?` | `attach` 的答复：后台有没有进程、是否在跑、流现在到哪（`lastSeq`）。**一轮真正开始时服务端会再广播一次 `busy: true`**（`attach` 时 `busy` 还是旧的 `false`，客户端以服务端为准，补发才让按钮切到「停止」；多标签一起收到）。`oldestSeq` 字段仍保留在类型里但**不再发送**——服务端没有缓冲可报 |
 | `queue` | `items: string[]` | 排队中的消息 |
 | `status` | `status` | `requesting` / `idle` / `compacting` / `compacted` |
 | `thinking_tokens` | `estimated`、`delta` | 思考预算，一轮几十条 |

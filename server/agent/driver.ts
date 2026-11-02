@@ -1,5 +1,5 @@
 import type { Context } from 'cordis';
-import type { AgentInfo, AgentServerEvent } from './protocol.js';
+import type { AgentInfo, AgentServerEvent, ModelOption } from './protocol.js';
 
 /**
  * The seam every backend agent implements. Everything above this layer (the
@@ -83,7 +83,8 @@ export interface AgentDriver {
 	readonly id: string;
 	readonly name: string;
 	readonly description?: string;
-	readonly models: readonly string[];
+	/** Picker entries: `id` is passed to the backend, `label` is display only. */
+	readonly models: readonly ModelOption[];
 	readonly permissionModes: readonly string[];
 	readonly defaultModel?: string;
 	readonly defaultPermissionMode: string;

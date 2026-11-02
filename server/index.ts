@@ -13,7 +13,6 @@ import {
 	DEBUG,
 	HOST,
 	INTERNAL_TOKEN,
-	MODELS,
 	PORT,
 	PROJECT_ROOT,
 	isAuthorized,
@@ -37,6 +36,7 @@ import {
 } from './auth.js';
 import { fsRouter } from './fsApi.js';
 import { gitFileVersions, gitStatus } from './git.js';
+import { resolveModels } from './models.js';
 import { BadRequestError, PathOutsideRootError, readStringQuery, resolveRoot, shouldIgnore } from './paths.js';
 import { addPersistedRoot } from './projectStore.js';
 import { invalidateProjectsCache, listProjects, slugFor } from './projects.js';
@@ -424,10 +424,14 @@ const terminalServer = createTerminalServer();
 // Boot the cordis host first: agent backends are plugins and must be installed
 // before a socket can name one.
 const persisted = await preloadAgentState();
+// `claude` only knows three aliases; the gateway in front of it knows the real
+// list. Resolved once here (bounded by AGENT_UI_MODELS_TIMEOUT_MS) so every
+// connection and every spawned process sees the same models.
+const models = await resolveModels();
 const agents = await createAgentRuntime({
 	defaultAgent: persisted.default.agent,
 	claude: {
-		models: MODELS,
+		models: models.models,
 		defaultModel: process.env['AGENT_UI_MODEL'],
 		defaultPermissionMode: process.env['AGENT_UI_PERMISSION_MODE'] ?? 'acceptEdits',
 	},
@@ -500,6 +504,7 @@ server.listen(PORT, HOST, () => {
 	console.log(`\n  agent-ui server: http://${HOST}:${PORT}`);
 	console.log(`  root:           ${PROJECT_ROOT}`);
 	console.log(`  auth:           ${ACCESS_TOKEN ? 'token required (?token=…)' : accounts > 0 ? `${accounts} account(s)` : 'uninitialized — open the UI to create an admin'}`);
+	console.log(`  models:         ${models.models.length} (${models.source})`);
 	if (!existsSync(path.join(webDist, 'index.html'))) {
 		console.log(`  web:            dev mode → run "npm run dev:web" and open http://127.0.0.1:4712\n`);
 	}

@@ -35,7 +35,8 @@ interface AgentDriver {
 	readonly id: string;
 	readonly name: string;
 	readonly description?: string;
-	readonly models: readonly string[];
+	/** `id` 交给后端，`label` 只用于显示（见下方 `ModelOption`） */
+	readonly models: readonly ModelOption[];
 	readonly permissionModes: readonly string[];
 	readonly defaultModel?: string;
 	readonly defaultPermissionMode: string;
@@ -49,17 +50,24 @@ interface AgentDriver {
 元数据在线上有一份等价类型 `AgentInfo`（`protocol.ts`），随 `system` 事件下发——**前端的模型下拉、权限模式下拉、后端选择器全部读它，没有一处硬编码**：
 
 ```ts
+interface ModelOption {
+	readonly id: string;
+	readonly label?: string;
+}
+
 interface AgentInfo {
 	readonly id: string;
 	readonly name: string;
 	readonly description?: string;
-	readonly models: readonly string[];
+	readonly models: readonly ModelOption[];
 	readonly permissionModes: readonly string[];
 	readonly defaultModel?: string;
 	readonly defaultPermissionMode: string;
 	readonly supportsResume: boolean;
 }
 ```
+
+`models` 是对象而不是字符串，因为网关给的型号（`claude-opus-4-7[1m]`）要原样作为 `--model` 传回去，而它旁边那个 `display_name` 才是给人看的。`label` 缺省即取 `id`。`system` 事件里的 `models` 由 router 用 driver 的列表覆盖，后端自己不必也不该填。
 
 ## 多个后端如何同时接入同一套 UI
 
@@ -157,7 +165,7 @@ const myDriver: AgentDriver = {
 	id: 'my-agent',
 	name: 'My Agent',
 	description: '通过 HTTP 调用某个 agent 服务',
-	models: ['small', 'large'],
+	models: [{ id: 'small', label: 'Small' }, { id: 'large' }],
 	permissionModes: ['default', 'auto'],
 	defaultPermissionMode: 'auto',
 	supportsResume: false,
