@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { preloadAgentState } from './agent/agentState.js';
 import { requestPermissionFromBrowser } from './agent/permissionGateway.js';
-import { createAgentServer, listRunningSessions } from './agent/router.js';
+import { createAgentServer, killRunningSession, listRunningSessions } from './agent/router.js';
 import { createAgentRuntime, disposeAgentRuntime } from './agent/runtime.js';
 import {
 	ACCESS_TOKEN,
@@ -41,7 +41,7 @@ import { resolveModels } from './models.js';
 import { BadRequestError, PathOutsideRootError, readStringQuery, resolveRoot, shouldIgnore } from './paths.js';
 import { addPersistedRoot } from './projectStore.js';
 import { invalidateProjectsCache, listProjects, slugFor } from './projects.js';
-import { listAllSessions, readTranscriptById } from './sessions.js';
+import { deleteSession, listAllSessions, readTranscriptById, renameSession, setSessionArchived } from './sessions.js';
 import {
 	closeTerminal,
 	createTerminal,
@@ -386,12 +386,56 @@ async function systemRoots(): Promise<readonly string[]> {
 }
 
 /** Sessions are the primary axis of the UI; each one carries the cwd it belongs to. */
-app.get('/api/sessions', async (_req, res) => {
-	res.json({ sessions: await listAllSessions() });
+app.get('/api/sessions', async (req, res) => {
+	const includeArchived = req.query['includeArchived'] === '1';
+	res.json({ sessions: await listAllSessions({ includeArchived }) });
 });
 
 app.get('/api/sessions/:id', async (req, res) => {
 	res.json({ items: await readTranscriptById(req.params.id) });
+});
+
+/**
+ * Renames or archives a session.
+ *
+ * Both are agent-ui's own properties, not the CLI's: the transcript is left
+ * untouched so the CLI can still resume it.
+ */
+app.patch('/api/sessions/:id', async (req, res) => {
+	const body = req.body as { title?: unknown; archived?: unknown } | undefined;
+	const hasTitle = typeof body?.title === 'string';
+	const hasArchived = typeof body?.archived === 'boolean';
+	if (!hasTitle && !hasArchived) {
+		throw new BadRequestError('`title` or `archived` is required.');
+	}
+	if (hasTitle) {
+		if (!await renameSession(req.params.id, body.title as string)) {
+			res.status(404).json({ error: '会话不存在。' });
+			return;
+		}
+	}
+	if (hasArchived) {
+		if (!await setSessionArchived(req.params.id, body.archived === true)) {
+			res.status(404).json({ error: '会话不存在。' });
+			return;
+		}
+	}
+	res.json({ ok: true });
+});
+
+/**
+ * Deletes a session.
+ *
+ * The process goes first: on Windows a live CLI keeps the jsonl open, so the
+ * unlink would fail with EBUSY and leave a half-deleted conversation behind.
+ */
+app.delete('/api/sessions/:id', async (req, res) => {
+	killRunningSession(req.params.id);
+	if (!await deleteSession(req.params.id)) {
+		res.status(404).json({ error: '会话不存在。' });
+		return;
+	}
+	res.json({ ok: true });
 });
 
 app.use('/api/fs', fsRouter);

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { listProjects, projectsDir } from './projects.js';
+import { invalidateProjectsCache, listProjects, projectsDir } from './projects.js';
+import { JsonStore } from './store.js';
 
 /** Badge state of a subagent, replayed so its card keeps its identity. */
 export interface TranscriptTask {
@@ -45,6 +46,8 @@ export interface SessionEntry {
 	readonly title: string;
 	readonly updatedAt: number;
 	readonly size: number;
+	/** Archived sessions keep their transcript but stay out of the default list. */
+	readonly archived: boolean;
 }
 
 interface ContentBlock {
@@ -68,11 +71,39 @@ interface TranscriptLine {
 	 * trace of it: it never becomes a user message of its own.
 	 */
 	readonly attachment?: { readonly type?: string; readonly prompt?: unknown };
+	/**
+	 * The CLI's own generated name, written as a `{"type":"ai-title"}` line. It
+	 * is appended again whenever the model retitles the conversation, so the
+	 * last one wins.
+	 */
+	readonly aiTitle?: string;
 }
 
 const MAX_ITEMS = 400;
 const MAX_TOOL_TEXT = 4000;
 const TITLE_BUDGET = 60;
+/** Title discovery reads the head of the jsonl, plus the tail of a long one. */
+const TITLE_HEAD_BYTES = 64 * 1024;
+const TITLE_TAIL_BYTES = 16 * 1024;
+
+/**
+ * User-owned session properties, keyed by `<projectId>/<sessionId>`.
+ *
+ * The transcript is the CLI's file, so a rename cannot be written into it
+ * without confusing the CLI on its next resume. It lives here instead, next to
+ * the archive flag, and shadows the auto-generated title when present.
+ */
+interface SessionMeta {
+	readonly title?: string;
+	readonly archivedAt?: number;
+}
+
+const metaStore = new JsonStore<Record<string, SessionMeta>>('session-meta.json', {});
+const metaReady = metaStore.load();
+
+function metaKey(projectId: string, sessionId: string): string {
+	return `${projectId}/${sessionId}`;
+}
 
 function parseLine(line: string): TranscriptLine | undefined {
 	if (!line.startsWith('{')) {
@@ -98,15 +129,54 @@ function isMetaText(text: string): boolean {
 	return text.startsWith('<command-') || text.startsWith('<local-command') || text.startsWith('Caveat:');
 }
 
+/** Last `ai-title` line in a chunk; the model retitles, so the newest wins. */
+function aiTitleOf(chunk: string): string | undefined {
+	let found: string | undefined;
+	for (const line of chunk.split('\n')) {
+		// Cheap filter first: a 64KB head is mostly other records.
+		if (!line.includes('ai-title')) {
+			continue;
+		}
+		const entry = parseLine(line);
+		if (entry?.type === 'ai-title' && typeof entry.aiTitle === 'string') {
+			const title = entry.aiTitle.trim();
+			if (title) {
+				found = title;
+			}
+		}
+	}
+	return found;
+}
+
+/**
+ * Display title: the CLI's own AI title when it wrote one, otherwise the first
+ * real user message.
+ *
+ * The name the model picks is what `claude --resume` shows, so preferring it
+ * keeps the rail and the CLI in agreement. It lives at the end of the file once
+ * the conversation has been retitled, hence the tail read for long transcripts.
+ */
 async function readTitle(filePath: string): Promise<string> {
 	const handle = await fs.open(filePath, 'r').catch(() => undefined);
 	if (!handle) {
 		return '(untitled)';
 	}
 	try {
-		const buffer = Buffer.alloc(64 * 1024);
-		const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-		for (const line of buffer.subarray(0, bytesRead).toString('utf8').split('\n')) {
+		const head = Buffer.alloc(TITLE_HEAD_BYTES);
+		const { bytesRead } = await handle.read(head, 0, head.length, 0);
+		const headText = head.subarray(0, bytesRead).toString('utf8');
+		let title = aiTitleOf(headText);
+		if (!title && bytesRead === TITLE_HEAD_BYTES) {
+			const { size } = await handle.stat();
+			const from = Math.max(0, size - TITLE_TAIL_BYTES);
+			const tail = Buffer.alloc(size - from);
+			const read = await handle.read(tail, 0, tail.length, from);
+			title = aiTitleOf(tail.subarray(0, read.bytesRead).toString('utf8'));
+		}
+		if (title) {
+			return title;
+		}
+		for (const line of headText.split('\n')) {
 			const entry = parseLine(line);
 			if (entry?.type !== 'user') {
 				continue;
@@ -127,7 +197,10 @@ async function readTitle(filePath: string): Promise<string> {
 }
 
 /** Every session across every project, newest first. */
-export async function listAllSessions(limit = 200): Promise<readonly SessionEntry[]> {
+export async function listAllSessions(options: { readonly includeArchived?: boolean; readonly limit?: number } = {}): Promise<readonly SessionEntry[]> {
+	const limit = options.limit ?? 200;
+	await metaReady;
+	const meta = metaStore.snapshot;
 	const projects = await listProjects();
 	const entries: { id: string; projectId: string; cwd: string; filePath: string; updatedAt: number; size: number }[] = [];
 
@@ -147,27 +220,41 @@ export async function listAllSessions(limit = 200): Promise<readonly SessionEntr
 	}
 
 	entries.sort((a, b) => b.updatedAt - a.updatedAt);
-	const page = entries.slice(0, limit);
-	return Promise.all(page.map(async entry => ({
-		id: entry.id,
-		projectId: entry.projectId,
-		cwd: entry.cwd,
-		title: await readTitle(entry.filePath),
-		updatedAt: entry.updatedAt,
-		size: entry.size,
-	})));
+	const visible = options.includeArchived === true
+		? entries
+		: entries.filter(entry => meta[metaKey(entry.projectId, entry.id)]?.archivedAt === undefined);
+	const page = visible.slice(0, limit);
+	return Promise.all(page.map(async entry => {
+		const custom = meta[metaKey(entry.projectId, entry.id)];
+		return {
+			id: entry.id,
+			projectId: entry.projectId,
+			cwd: entry.cwd,
+			// Reading the first prompt is the expensive part; a rename skips it.
+			title: custom?.title ?? await readTitle(entry.filePath),
+			updatedAt: entry.updatedAt,
+			size: entry.size,
+			archived: custom?.archivedAt !== undefined,
+		};
+	}));
 }
 
-async function findSessionFile(sessionId: string): Promise<string | undefined> {
+interface FoundSession {
+	readonly projectId: string;
+	readonly filePath: string;
+}
+
+async function findSession(sessionId: string): Promise<FoundSession | undefined> {
+	// Ids are CLI-generated uuids; anything else is a path traversal attempt.
 	if (!/^[A-Za-z0-9-]+$/.test(sessionId)) {
 		return undefined;
 	}
 	const projects = await listProjects();
 	for (const project of projects) {
-		const candidate = path.join(projectsDir(), project.id, `${sessionId}.jsonl`);
+		const filePath = path.join(projectsDir(), project.id, `${sessionId}.jsonl`);
 		try {
-			await fs.access(candidate);
-			return candidate;
+			await fs.access(filePath);
+			return { projectId: project.id, filePath };
 		} catch {
 			// keep looking
 		}
@@ -176,11 +263,96 @@ async function findSessionFile(sessionId: string): Promise<string | undefined> {
 }
 
 export async function readTranscriptById(sessionId: string): Promise<readonly TranscriptItem[]> {
-	const filePath = await findSessionFile(sessionId);
-	if (!filePath) {
+	const found = await findSession(sessionId);
+	if (!found) {
 		return [];
 	}
-	return readTranscript(filePath);
+	return readTranscript(found.filePath);
+}
+
+/** Renames a session; an empty title restores the generated one. */
+export async function renameSession(sessionId: string, title: string): Promise<boolean> {
+	const found = await findSession(sessionId);
+	if (!found) {
+		return false;
+	}
+	const trimmed = title.trim().slice(0, 200);
+	await metaStore.update(draft => {
+		const key = metaKey(found.projectId, sessionId);
+		const { title: _current, ...rest } = draft[key] ?? {};
+		if (trimmed) {
+			draft[key] = { ...rest, title: trimmed };
+		} else if (Object.keys(rest).length > 0) {
+			draft[key] = rest;
+		} else {
+			delete draft[key];
+		}
+	});
+	return true;
+}
+
+/** Hides a session from the default list without touching its transcript. */
+export async function setSessionArchived(sessionId: string, archived: boolean): Promise<boolean> {
+	const found = await findSession(sessionId);
+	if (!found) {
+		return false;
+	}
+	await metaStore.update(draft => {
+		const key = metaKey(found.projectId, sessionId);
+		const { archivedAt: _current, ...rest } = draft[key] ?? {};
+		if (archived) {
+			draft[key] = { ...rest, archivedAt: Date.now() };
+		} else if (Object.keys(rest).length > 0) {
+			draft[key] = rest;
+		} else {
+			delete draft[key];
+		}
+	});
+	return true;
+}
+
+/**
+ * Removes a path, waiting out the moment a just-killed process still holds it.
+ *
+ * On Windows a CLI that was stopped a millisecond ago can still own the file
+ * and answer EBUSY; the handle is released right after, so a short retry turns
+ * a spurious 500 into a successful delete.
+ */
+async function rmWithRetry(target: string, recursive: boolean): Promise<void> {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			await fs.rm(target, { force: true, recursive });
+			return;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			const transient = code === 'EBUSY' || code === 'EPERM' || code === 'ENOTEMPTY';
+			if (!transient || attempt >= 5) {
+				throw error;
+			}
+			await new Promise(resolve => setTimeout(resolve, 150));
+		}
+	}
+}
+
+/**
+ * Removes a session and everything the CLI wrote beside it.
+ *
+ * The caller stops a live process first: on Windows a running CLI holds the
+ * jsonl open, and deleting it underneath would only fail with EBUSY.
+ */
+export async function deleteSession(sessionId: string): Promise<boolean> {
+	const found = await findSession(sessionId);
+	if (!found) {
+		return false;
+	}
+	await rmWithRetry(found.filePath, false);
+	// `<session>/subagents/` holds the steps of every subagent it spawned.
+	await rmWithRetry(path.join(path.dirname(found.filePath), sessionId), true).catch(() => undefined);
+	await metaStore.update(draft => {
+		delete draft[metaKey(found.projectId, sessionId)];
+	});
+	invalidateProjectsCache();
+	return true;
 }
 
 async function readTranscript(filePath: string): Promise<readonly TranscriptItem[]> {

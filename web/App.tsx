@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
-import { fetchMe, listProjects, listSessions, logout, runningSessions, type ProjectInfo, type SessionEntry } from './api';
+import {
+	archiveSession,
+	deleteSession,
+	fetchMe,
+	listProjects,
+	listSessions,
+	logout,
+	renameSession,
+	runningSessions,
+	type ProjectInfo,
+	type SessionEntry,
+} from './api';
 import { AuthPage } from './components/AuthPage';
 import { ChatPanel } from './components/ChatPanel';
 import { NewSessionDialog } from './components/NewSessionDialog';
@@ -122,7 +133,9 @@ export function App() {
 				// project rather than a dead reference.
 				return alive ? remembered : { root: remembered.root, agent: remembered.agent };
 			}
-			const newest = nextSessions[0];
+			// Archived conversations are still listed here; opening one by
+			// default would look like the archive did nothing.
+			const newest = nextSessions.find(session => !session.archived);
 			if (newest) {
 				return { root: newest.cwd, sessionId: newest.id, agent: HISTORY_AGENT };
 			}
@@ -256,6 +269,39 @@ export function App() {
 		setViewToken(value => value + 1);
 	};
 
+	/**
+	 * Rename, archive and delete all rewrite agent-ui's own metadata (or, for a
+	 * delete, the transcript) rather than the CLI's view of the session, so the
+	 * only thing to do afterwards is re-read the list.
+	 */
+	const renameSessionEntry = (session: SessionEntry, title: string) => {
+		void renameSession(session.id, title)
+			.then(() => refresh())
+			.catch(reason => window.alert(`重命名失败：${String(reason)}`));
+	};
+
+	const archiveSessionEntry = (session: SessionEntry, archived: boolean) => {
+		void archiveSession(session.id, archived)
+			.then(() => refresh())
+			.catch(reason => window.alert(`${archived ? '归档' : '取消归档'}失败：${String(reason)}`));
+	};
+
+	const deleteSessionEntry = (session: SessionEntry) => {
+		// Deleting a transcript cannot be undone, and the CLI will not regenerate it.
+		const confirmed = window.confirm(`删除会话「${session.title}」？\n\n记录文件会一并删除，无法恢复。`);
+		if (!confirmed) {
+			return;
+		}
+		void deleteSession(session.id)
+			.then(async () => {
+				// The deleted conversation may be the one on screen; fall back to a
+				// fresh conversation in the same project instead of a dead id.
+				setActive(current => current?.sessionId === session.id ? { root: current.root, agent: current.agent } : current);
+				await refresh();
+			})
+			.catch(reason => window.alert(`删除失败：${String(reason)}`));
+	};
+
 	const startSession = async (root: string) => {
 		// A new session keeps the backend the user is currently working with.
 		setActive(current => ({ root, agent: current?.agent }));
@@ -335,6 +381,9 @@ export function App() {
 					activeSessionId={active?.sessionId}
 					onSelectSession={selectSession}
 					onNewSession={() => setDialogOpen(true)}
+					onRenameSession={renameSessionEntry}
+					onArchiveSession={archiveSessionEntry}
+					onDeleteSession={deleteSessionEntry}
 					running={running}
 					approvals={approvals}
 				/>

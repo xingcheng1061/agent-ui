@@ -310,15 +310,13 @@ button {
 }
 
 .session-row {
-	display: block;
-	width: 100%;
-	text-align: left;
+	display: flex;
+	align-items: flex-start;
+	gap: 4px;
 	background: transparent;
-	border: none;
 	border-left: 2px solid transparent;
 	color: var(--fg);
-	padding: 6px 12px 6px 14px;
-	cursor: pointer;
+	padding: 6px 8px 6px 12px;
 }
 
 .session-row:hover {
@@ -331,14 +329,99 @@ button {
 	color: var(--bg-active-fg);
 }
 
+/* The row itself is not the button: the action buttons must not nest inside
+   one, and a click on a row still has to select the conversation. */
+.session-pick {
+	flex: 1;
+	min-width: 0;
+	display: block;
+	text-align: left;
+	background: transparent;
+	border: none;
+	color: inherit;
+	padding: 0;
+	font: inherit;
+	cursor: pointer;
+}
+
+.session-actions {
+	display: none;
+	flex: none;
+	gap: 2px;
+}
+
+.session-row:hover .session-actions,
+.session-row:focus-within .session-actions {
+	display: flex;
+}
+
+.session-action {
+	display: grid;
+	place-items: center;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 3px;
+	color: var(--fg-dim);
+	cursor: pointer;
+}
+
+.session-action:hover {
+	background: var(--bg);
+	border-color: var(--border);
+	color: var(--fg);
+}
+
+.session-action.danger:hover {
+	color: var(--danger, #e05252);
+	border-color: var(--danger, #e05252);
+}
+
+.session-row.archived .session-pick {
+	opacity: 0.65;
+}
+
+.session-rename {
+	flex: 1;
+	min-width: 0;
+	background: var(--bg);
+	color: var(--fg);
+	border: 1px solid var(--accent);
+	border-radius: 3px;
+	padding: 2px 4px;
+	font: inherit;
+	font-size: 12.5px;
+	outline: none;
+}
+
+.rail-check {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 11.5px;
+	color: var(--fg-dim);
+	cursor: pointer;
+	padding: 2px 2px 0;
+}
+
+.rail-check input {
+	margin: 0;
+	accent-color: var(--accent);
+}
+
 .session-title {
 	display: flex;
 	align-items: center;
 	gap: 6px;
 	font-size: 12.5px;
+	min-width: 0;
 }
 
 .session-text {
+	flex: 1;
+	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;

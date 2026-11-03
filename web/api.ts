@@ -19,6 +19,8 @@ export interface SessionEntry {
 	readonly title: string;
 	readonly updatedAt: number;
 	readonly size: number;
+	/** Archived sessions keep their transcript but stay out of the default list. */
+	readonly archived: boolean;
 }
 
 export interface TranscriptItem {
@@ -106,14 +108,35 @@ export async function addProject(root: string): Promise<ProjectInfo> {
 	return result.project;
 }
 
+/** Archived sessions come along so the rail can show and restore them. */
 export async function listSessions(): Promise<readonly SessionEntry[]> {
-	const result = await requestJson<{ sessions: SessionEntry[] }>('/api/sessions');
+	const result = await requestJson<{ sessions: SessionEntry[] }>('/api/sessions?includeArchived=1');
 	return result.sessions;
 }
 
 export async function getTranscript(sessionId: string): Promise<readonly TranscriptItem[]> {
 	const result = await requestJson<{ items: TranscriptItem[] }>(`/api/sessions/${encodeURIComponent(sessionId)}`);
 	return result.items;
+}
+
+/** An empty title restores the generated one. */
+export async function renameSession(sessionId: string, title: string): Promise<void> {
+	await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+		method: 'PATCH',
+		body: JSON.stringify({ title }),
+	});
+}
+
+export async function archiveSession(sessionId: string, archived: boolean): Promise<void> {
+	await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+		method: 'PATCH',
+		body: JSON.stringify({ archived }),
+	});
+}
+
+/** Stops a running process server-side, then removes the transcript. */
+export async function deleteSession(sessionId: string): Promise<void> {
+	await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
 }
 
 export async function listDirectory(root: string, directory: string): Promise<readonly FileEntry[]> {

@@ -46,7 +46,7 @@
 | `auth.ts` | 账号与会话 | scrypt 哈希、HttpOnly Cookie、30 天滑动有效期 |
 | `paths.ts` | `root` 解析、越界防护 | 所有 fs/git 接口都经过 `resolveRoot`，拒绝 `..` 逃逸 |
 | `projects.ts` | 项目发现 | 两个来源：CLI 会话库反推 + `~/.agent-ui/projects.json` |
-| `sessions.ts` | jsonl → transcript | 只认 `text` / `thinking` / `tool_use` / `tool_result` 四种块 |
+| `sessions.ts` | jsonl → transcript；重命名 / 归档 / 删除 | 只认 `text` / `thinking` / `tool_use` / `tool_result` 四种块；标题与归档标记存在 `~/.agent-ui/session-meta.json`，不动 CLI 的 jsonl；删除时先停进程再删文件与 `<session>/subagents/` |
 | `git.ts` | 变更列表与单文件 diff | `status --porcelain=v1 -uall`（展开未跟踪目录，否则只能看到 `server/` 这种目录行）；工作区路径以 `rev-parse --show-toplevel` 为基准，见下方决策 9 |
 | `terminals.ts` | 多终端注册表 | PTY 存活于服务端，断线保留，重连回放缓冲 |
 | `agent/router.ts` | 连接管理、会话认领、排队、回收 | 一个 `LiveSession` = 一个 CLI 进程 |

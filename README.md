@@ -14,7 +14,7 @@
 
 | 分类 | 能力 |
 |---|---|
-| 会话 | 自动从 `~/.claude/projects` 反推项目与会话；手动注册新目录；`--resume` 续接；刷新不丢进行中的轮次 |
+| 会话 | 自动从 `~/.claude/projects` 反推项目与会话；手动注册新目录；`--resume` 续接；刷新不丢进行中的轮次；行内重命名 / 归档 / 删除（hover 或双击） |
 | 对话 | 流式 Markdown（streamdown）+ KaTeX + shiki 高亮；思考块可折叠；工具卡片（Bash 有专用卡片） |
 | 工具可视化 | `tool_use`/`tool_result` 配对；子 agent（`Agent` 工具）嵌套展示；后台任务实时输出轮询 |
 | 控制 | 运行时切模型 / 切权限模式；优雅中断；强制结束；消息排队；工具审批（允许 / 总是允许 / 拒绝） |
@@ -218,7 +218,7 @@ npm start
 - [ ] `/clear` 与界面同步（CLI 清了上下文，前端消息不同步清）
 - [ ] LSP：`clangd` / `pyright` / `gopls` + WS 桥 + `monaco-languageclient`
 - [ ] Monaco 跨文件跳转（TS worker 已就绪，差「为未打开的 import 建 model」）
-- [ ] 会话重命名 / 删除 / 项目过滤
+- [ ] 会话批量操作（多选归档 / 清理）
 - [ ] 多用户与多端（需要先做账号体系；届时 IndexedDB 镜像的策略要重新评估）
 
 ## 许可证

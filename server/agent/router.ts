@@ -110,6 +110,20 @@ export interface RunningSessionInfo {
 let snapshotRunning: () => readonly RunningSessionInfo[] = () => [];
 
 /**
+ * Stop hook for `DELETE /api/sessions/:id`.
+ *
+ * Same reach problem as the snapshot: the HTTP side cannot see the runner map,
+ * and a deleted session must not keep a process that would recreate or hold its
+ * transcript open.
+ */
+let killLive: (sessionId: string) => boolean = () => false;
+
+/** Stops a conversation's process, if it still has one. */
+export function killRunningSession(sessionId: string): boolean {
+	return killLive(sessionId);
+}
+
+/**
  * Deferred messages, by CLI session id.
  *
  * A message the user typed and queued must not evaporate when the server
@@ -128,7 +142,7 @@ export function createAgentServer(options: Omit<AgentServerOptions, 'cwd'>): Web
 	const live = new Map<string, LiveSession>();
 	snapshotRunning = () => {
 		// The map holds the same run under two keys until the CLI reports its id,
-		// so dedupe by identity or the sidebar would list a session twice.
+		// so dedupe by identity or the sidebar would list the conversation twice.
 		const seen = new Set<LiveSession>();
 		const running: RunningSessionInfo[] = [];
 		for (const entry of live.values()) {
@@ -147,6 +161,32 @@ export function createAgentServer(options: Omit<AgentServerOptions, 'cwd'>): Web
 			});
 		}
 		return running;
+	};
+	killLive = sessionId => {
+		const entry = live.get(sessionId) ?? [...live.values()].find(item => item.cliSessionId === sessionId);
+		if (!entry) {
+			return false;
+		}
+		// Mirrors `AgentConnection._finalize('kill')`: watchers learn first, then
+		// the process goes away. Without the event a tab would keep showing a turn
+		// that no longer has anything behind it.
+		if (entry.reapTimer) {
+			clearTimeout(entry.reapTimer);
+			entry.reapTimer = undefined;
+		}
+		for (const socket of entry.sockets) {
+			if (socket.readyState === WebSocket.OPEN) {
+				socket.send(JSON.stringify({ type: 'exit', code: null, stderr: '会话已删除。' } satisfies AgentServerEvent));
+			}
+		}
+		entry.sockets.clear();
+		entry.session.dispose();
+		for (const [key, value] of live) {
+			if (value === entry) {
+				live.delete(key);
+			}
+		}
+		return true;
 	};
 	const server = new WebSocketServer({ noServer: true });
 	// Persisted model/mode choices; the spawn path reads it synchronously.
