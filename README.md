@@ -19,7 +19,7 @@
 | 工具可视化 | `tool_use`/`tool_result` 配对；子 agent（`Agent` 工具）嵌套展示；后台任务实时输出轮询 |
 | 控制 | 运行时切模型 / 切权限模式；优雅中断；强制结束；消息排队；工具审批（允许 / 总是允许 / 拒绝） |
 | 代码 | Monaco 编辑、文件树、git 变更按目录折叠、只读 diff、agent 每轮结束自动刷新变更 |
-| 终端 | `node-pty` 真终端，**多标签**，shell 存活于服务端（切标签/刷新/断线都不杀），重连回放错过的输出 |
+| 终端 | `node-pty` 真终端，**多标签**，shell 与连接都活在服务端池子里（切标签/切项目/刷新都不重连），真断线时回放最近几屏输出 |
 | 账户 | 登录鉴权，账号密码存 `~/.agent-ui/users.json`（scrypt 哈希），会话令牌走 HttpOnly Cookie |
 | 布局 | 会话列表 / 对话 / 代码 三栏，所有分隔线可拖拽，宽度持久化 |
 | 主题 | 暗色 / 明亮双主题，跟随系统，选择持久化 |
@@ -119,7 +119,10 @@ agent-ui -v                              # 版本
 | `AGENT_UI_TOKEN` | 空 | 设置后所有 API 与 WS 都要带 `?token=…` |
 | `AGENT_UI_ROOT` | `process.cwd()` | 默认项目根 |
 | `AGENT_UI_PERMISSION_MODE` | `acceptEdits` | `default`/`acceptEdits`/`plan`/`bypassPermissions` |
-| `AGENT_UI_MODELS` | `sonnet,opus,haiku` | 模型下拉候选 |
+| `AGENT_UI_MODELS` | 自动发现 | 模型下拉候选，逗号分隔。设置后**完全跳过自动发现** |
+| `AGENT_UI_MODELS_URL` | 空 | 模型清单来源（base URL 或完整 endpoint），优先级最高 |
+| `AGENT_UI_MODELS_TOKEN` | 空 | 上面那个地址需要的 Bearer token |
+| `AGENT_UI_MODELS_TIMEOUT_MS` | `3000` | 启动时发现模型的整体超时 |
 | `AGENT_UI_REAP_MS` | `3600000` | 会话断开且空闲多久后回收 CLI 进程 |
 | `AGENT_UI_DEBUG` | 空 | `=1` 打开服务端事件日志（排查卡住/中断必开） |
 | `AGENT_UI_ADMIN_USER` + `AGENT_UI_ADMIN_PASSWORD` | 空 | 启动时创建（或重置密码）管理员账号，用于无界面部署 |
@@ -161,7 +164,8 @@ agent-ui/
 │       ├── DiffView.tsx       # Monaco diff
 │       ├── Editor.tsx         # Monaco 编辑器
 │       ├── FileTree.tsx       # 文件树
-│       ├── Terminal.tsx       # xterm 封装（按终端 id 挂载）
+│       ├── Terminal.tsx       # 终端视图（一根槽，挂载/脱离）
+│       ├── terminalSessions.ts # 终端屏幕池：xterm 与 socket 都在这里
 │       ├── AuthPage.tsx       # 登录 / 首次创建管理员
 │       ├── SessionSidebar.tsx # 会话列表
 │       ├── NewSessionDialog.tsx

@@ -118,7 +118,7 @@ class EchoSession implements AgentSession {
 			slashCommands: ['help'],
 			skills: [],
 			agents: [],
-			models: ['echo-1'],
+			models: [{ id: 'echo-1' }],
 		});
 	}
 }
@@ -128,7 +128,7 @@ export function createEchoDriver(): AgentDriver {
 		id: 'echo',
 		name: 'Echo（演示）',
 		description: '不调用任何模型，逐字回显输入，用来验证插件协议',
-		models: ['echo-1'],
+		models: [{ id: 'echo-1' }],
 		permissionModes: ['default'],
 		defaultModel: 'echo-1',
 		defaultPermissionMode: 'default',

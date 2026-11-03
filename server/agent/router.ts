@@ -12,7 +12,7 @@ import {
 	sessionChoice,
 } from './agentState.js';
 import { AgentRegistry, type AgentDriver, type AgentSession } from './driver.js';
-import type { AgentClientCommand, AgentInfo, AgentServerEvent, QueuedMessage } from './protocol.js';
+import type { AgentClientCommand, AgentInfo, AgentServerEvent, ModelOption, QueuedMessage } from './protocol.js';
 
 export interface AgentServerOptions {
 	/** Working directory the agent runs in. */
@@ -275,7 +275,7 @@ class AgentConnection {
 	private _sendConfig(patch: {
 		model?: string;
 		permissionMode?: string;
-		models?: readonly string[];
+		models?: readonly ModelOption[];
 		permissionModes?: readonly string[];
 		agent?: string;
 		agents?: readonly AgentInfo[];
@@ -293,6 +293,28 @@ class AgentConnection {
 		// Queue snapshots describe state rather than a step of the stream, so they
 		// go to every watcher but never into the replay buffer.
 		this._broadcast(entry, JSON.stringify({ type: 'queue', items: entry.queued } satisfies AgentServerEvent));
+	}
+
+	/**
+	 * Announces that a turn started (or failed to start).
+	 *
+	 * `entry.busy` is what the send/stop button reads, and it used to change
+	 * silently. The order that broke it: `_ensureEntry` attaches, which sends a
+	 * `session_state` carrying the *old* `busy: false`, the client adopts it (it
+	 * is right to: the server owns this state), and only then does the turn
+	 * actually start. Nothing ever contradicted that snapshot, so the button
+	 * stayed on 发送 until a reload re-read `busy`. Mirrors `queue`: a state
+	 * snapshot, not a step of the stream, hence no `seq` — and a broadcast
+	 * rather than a send, so a second tab on the same session sees it too.
+	 */
+	private _announceBusy(entry: LiveSession): void {
+		this._broadcast(entry, JSON.stringify({
+			type: 'session_state',
+			live: true,
+			sessionId: entry.cliSessionId,
+			busy: entry.busy,
+			lastSeq: entry.lastSeq,
+		} satisfies AgentServerEvent));
 	}
 
 	/** Mirrors the deferred queue to disk; the CLI has not seen these yet. */
@@ -329,10 +351,14 @@ class AgentConnection {
 		this._persistQueue(entry);
 		this._log(`starting queued message ${next.id.slice(0, 8)} (${entry.queued.length} left)`);
 		entry.busy = true;
+		// The client just saw `result` (which ends a turn) and the queue shrink;
+		// without this it would think nothing is running while this one works.
+		this._announceBusy(entry);
 		try {
 			entry.session.sendUserMessage(next.text);
 		} catch (error) {
 			entry.busy = false;
+			this._announceBusy(entry);
 			this._log(`queued message failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
@@ -462,6 +488,9 @@ class AgentConnection {
 					return;
 				}
 				entry.busy = true;
+				// The attach above already told this client `busy: false`; correct it
+				// before the turn's first event, or the button stays on 发送.
+				this._announceBusy(entry);
 				entry.session.sendUserMessage(text);
 				return;
 			}
@@ -480,6 +509,7 @@ class AgentConnection {
 				this._persistQueue(target);
 				this._log(`promoted ${item.id.slice(0, 8)} into the running turn`);
 				target.busy = true;
+				this._announceBusy(target);
 				target.session.sendUserMessage(item.text);
 				return;
 			}
@@ -634,10 +664,14 @@ class AgentConnection {
 					this._startNextQueued(entry);
 				});
 				// Handshake state rather than a step of the stream: no `seq`. The
-				// merged model keeps the alias the user picked.
+				// merged model keeps the alias the user picked. `models` is the
+				// driver's list, not the CLI's: the backend knows nothing about the
+				// gateway's catalogue, and letting it overwrite this would shrink the
+				// picker back to three aliases as soon as a turn starts.
 				this._broadcast(entry, JSON.stringify({
 					...event,
 					agent: entry.agentId,
+					models: driver.models,
 					...(entry.model ? { model: entry.model } : {}),
 				} satisfies AgentServerEvent));
 				return;
@@ -872,7 +906,7 @@ class AgentConnection {
 
 /** Stored values can come from another backend; only use ones this one accepts. */
 function validModel(driver: AgentDriver, value: string | undefined): string | undefined {
-	return value && driver.models.includes(value) ? value : undefined;
+	return value && driver.models.some(option => option.id === value) ? value : undefined;
 }
 
 function validMode(driver: AgentDriver, value: string | undefined): string | undefined {

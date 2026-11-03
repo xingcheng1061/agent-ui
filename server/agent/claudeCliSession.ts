@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { DEBUG, INTERRUPT_GRACE_MS, INTERNAL_ORIGIN, INTERNAL_TOKEN, MODELS, PERMISSION_TIMEOUT_MS, stamp } from '../config.js';
+import { DEBUG, INTERRUPT_GRACE_MS, INTERNAL_ORIGIN, INTERNAL_TOKEN, PERMISSION_TIMEOUT_MS, stamp } from '../config.js';
 import type { AgentSession, AgentSessionOptions, PendingPermissionInfo, PermissionDecision, PermissionPrompt } from './driver.js';
 import { bindPermissionHost } from './permissionGateway.js';
 import type { AgentServerEvent, AgentTaskUsage } from './protocol.js';
@@ -554,7 +554,9 @@ export class ClaudeCliSession implements AgentSession {
 					slashCommands: message.slash_commands,
 					skills: message.skills,
 					agents: message.agents,
-					models: MODELS,
+					// `models` is deliberately absent: the picker's list belongs to the
+					// driver (discovered from the gateway), and the router attaches it
+					// to this event. The CLI has no idea which models the gateway has.
 				});
 				return;
 

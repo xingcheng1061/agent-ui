@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { AgentClientCommand, AgentInfo, AgentServerEvent, AgentTaskUsage, QueuedMessage } from '../agentTypes';
+import type { AgentClientCommand, AgentInfo, AgentServerEvent, AgentTaskUsage, ModelOption, QueuedMessage } from '../agentTypes';
 import { getTranscript, reportClientLog, searchFiles, type TranscriptItem } from '../api';
 import { clearAttention, requestAttention } from '../attention';
 import { acquireAgentConnection, type AgentConnectionHandle } from './agentConnections';
@@ -194,7 +194,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		slashCommands?: readonly string[];
 		skills?: readonly string[];
 		agents?: readonly string[];
-		models?: readonly string[];
+		models?: readonly ModelOption[];
 	}>({});
 	const [status, setStatus] = useState('未连接');
 	const [thinkingTokens, setThinkingTokens] = useState(0);
@@ -1000,9 +1000,13 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	}, [meta.slashCommands, meta.skills]);
 
 	const modelOptions = useMemo(() => {
-		const list = [meta.model, ...(meta.models ?? [])]
-			.filter((value): value is string => typeof value === 'string' && value.length > 0);
-		return [...new Set(list)];
+		const options = [...(meta.models ?? [])];
+		// A backend can run a model its own catalogue does not list (a resumed
+		// session, an env default); without an entry the select would render blank.
+		if (meta.model && !options.some(option => option.id === meta.model)) {
+			options.unshift({ id: meta.model });
+		}
+		return options;
 	}, [meta.model, meta.models]);
 
 	/** Advertised by the connected backend; the fallback keeps old servers usable. */
@@ -1026,12 +1030,14 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 
 	const menuEntries: readonly MenuEntry[] = (() => {
 		if (picker === 'model') {
-			return modelOptions.map(model => ({
-				key: `m:${model}`,
-				label: model,
-				hint: model === meta.model ? '当前' : '模型',
+			return modelOptions.map(option => ({
+				key: `m:${option.id}`,
+				label: option.label ?? option.id,
+				// A label that hides the id still leaves the id worth seeing: it is
+				// what gets sent to the backend.
+				hint: option.id === meta.model ? '当前' : option.label ? option.id : '模型',
 				run: () => {
-					send({ type: 'set_model', model });
+					send({ type: 'set_model', model: option.id });
 					setPicker(undefined);
 				},
 			}));
@@ -1302,7 +1308,9 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					}}
 				>
 					{!meta.model && <option value="">model…</option>}
-					{modelOptions.map(model => <option key={model} value={model}>{model}</option>)}
+					{modelOptions.map(option => (
+						<option key={option.id} value={option.id} title={option.id}>{option.label ?? option.id}</option>
+					))}
 				</select>
 				<select
 					className="selector"

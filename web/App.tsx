@@ -9,6 +9,7 @@ import { Splitter, clamp, usePersistedSize } from './components/Splitter';
 import { attentionEnabled, onAttentionChange, setAttentionEnabled } from './attention';
 import { getTheme, toggleTheme } from './theme';
 import { Workspace } from './components/Workspace';
+import { disposeAllTerminalSessions } from './components/terminalSessions';
 
 interface ActiveView {
 	readonly root: string;
@@ -296,7 +297,12 @@ export function App() {
 						type="button"
 						className="link-btn"
 						onClick={() => {
-							void logout().then(() => setAuth({ kind: 'anonymous', setupRequired: false }));
+							void logout().then(() => {
+								// The terminal screens live outside React (a pool), so
+								// unmounting the workspace is not enough to close them.
+								disposeAllTerminalSessions();
+								setAuth({ kind: 'anonymous', setupRequired: false });
+							});
 						}}
 					>
 						退出

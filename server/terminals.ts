@@ -12,13 +12,26 @@ import { JsonStore } from './store.js';
  *
  * A terminal is a long-lived PTY that outlives its WebSocket: switching tabs,
  * reloading the page or dropping the connection leaves the shell running, and
- * attaching again replays a rolling buffer of what was printed while nobody was
- * watching. Without that, "multiple terminals" would just mean "whichever one
- * you are looking at right now".
+ * attaching again replays the tail of a rolling buffer of what was printed
+ * while nobody was watching. Without that, "multiple terminals" would just mean
+ * "whichever one you are looking at right now".
  */
 
 /** How much recent output to keep for a detached terminal. */
 const MAX_BUFFER = 100_000;
+
+/**
+ * How much of that buffer a newly attached client is sent.
+ *
+ * A terminal restores a screen, not a session log. Replaying the whole buffer
+ * made every reload — and every tab switch, since the view is keyed by terminal
+ * id and therefore remounts — look like "all of my old commands, again": the
+ * client resets its screen and repaints up to 100 KB, which is roughly a
+ * thousand lines, so the shell seemed to replay its history instead of just
+ * being there. A few screens is what a terminal is expected to bring back; the
+ * rest stays in the buffer for the client's own scrollback.
+ */
+const SNAPSHOT_LIMIT = 8_000;
 
 /** How long a terminal with no client stays alive. */
 const REAP_DELAY_MS = 60 * 60 * 1000;
@@ -330,6 +343,22 @@ function armReap(entry: LiveTerminal): void {
 	entry.reapTimer.unref?.();
 }
 
+/**
+ * The part of the buffer worth replaying to a client that just attached.
+ *
+ * Cut at a line break: the tail is sliced by characters, and a fragment of a
+ * line repainted after `terminal.reset()` renders as garbage.
+ */
+function snapshotOf(entry: LiveTerminal): string {
+	const { buffer } = entry;
+	if (buffer.length <= SNAPSHOT_LIMIT) {
+		return buffer;
+	}
+	const tail = buffer.slice(-SNAPSHOT_LIMIT);
+	const firstBreak = tail.indexOf('\n');
+	return firstBreak < 0 ? tail : tail.slice(firstBreak + 1);
+}
+
 /** Attaches a socket to an existing terminal, replaying what it missed. */
 export async function attachTerminal(id: string, socket: WebSocket): Promise<boolean> {
 	const entry = live.get(id);
@@ -343,8 +372,8 @@ export async function attachTerminal(id: string, socket: WebSocket): Promise<boo
 	entry.sockets.add(socket);
 	// The client clears its screen and then receives the missed output. Each tab
 	// gets its own snapshot, so a second client joining does not disturb the
-	// first one's screen.
-	send(socket, { type: 'snapshot', data: entry.buffer });
+	// first one's screen. Trimmed to a few screens — see `SNAPSHOT_LIMIT`.
+	send(socket, { type: 'snapshot', data: snapshotOf(entry) });
 
 	socket.on('message', raw => {
 		let message: ClientMessage;

@@ -18,11 +18,28 @@ export const MAX_FILE_SIZE = 2 * 1024 * 1024;
 /** Per-run secret used by the MCP approval child to reach `/internal/permission`. */
 export const INTERNAL_TOKEN = randomUUID();
 
-/** Models offered in the picker. `claude` maps these aliases to provider models. */
-export const MODELS = (process.env['AGENT_UI_MODELS'] ?? 'sonnet,opus,haiku')
+/**
+ * Aliases the `claude` CLI maps to provider models on its own: the built-in
+ * fallback, and what the picker showed before the gateway list was discovered.
+ */
+export const DEFAULT_MODELS: readonly string[] = ['sonnet', 'opus', 'haiku'];
+
+/** `AGENT_UI_MODELS`, parsed. Empty when it is unset (discovery then decides). */
+export const EXPLICIT_MODELS: readonly string[] = (process.env['AGENT_UI_MODELS'] ?? '')
 	.split(',')
 	.map(model => model.trim())
 	.filter(model => model.length > 0);
+
+/**
+ * Model list handed to the picker.
+ *
+ * `AGENT_UI_MODELS` is a decision, not a hint: when it is set the list is used
+ * verbatim and nothing is discovered (`resolveModels()` in `server/models.ts`).
+ * Otherwise the boot-time discovery merges the gateway's list with
+ * `DEFAULT_MODELS`; this value is only the last resort for a driver that was
+ * registered without an explicit list.
+ */
+export const MODELS: readonly string[] = EXPLICIT_MODELS.length > 0 ? EXPLICIT_MODELS : DEFAULT_MODELS;
 
 /** Permission modes the CLI accepts for `set_permission_mode`. */
 export const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'] as const;
@@ -35,6 +52,25 @@ function durationFromEnv(name: string, fallback: number): number {
 	const parsed = raw === undefined ? Number.NaN : Number(raw);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
+
+/**
+ * Explicit model-list source. Accepts a base URL (`http://host:port`,
+ * `http://host:port/v1`) or the full endpoint; `server/models.ts` fills in the
+ * rest. Empty means "only the built-in candidates".
+ */
+export const MODELS_URL = process.env['AGENT_UI_MODELS_URL'] ?? '';
+
+/** Bearer token for `MODELS_URL`, for gateways that do require one. */
+export const MODELS_TOKEN = process.env['AGENT_UI_MODELS_TOKEN'] ?? '';
+
+/**
+ * Upper bound on boot-time model discovery.
+ *
+ * The candidates are probed concurrently, so this is the whole wait rather than
+ * a per-request budget: one dead `ANTHROPIC_BASE_URL` must not push the UI's
+ * start behind a 3s-per-candidate chain.
+ */
+export const MODELS_TIMEOUT_MS = durationFromEnv('AGENT_UI_MODELS_TIMEOUT_MS', 3000);
 
 /**
  * A disconnected client may still come back, so keep its process this long.

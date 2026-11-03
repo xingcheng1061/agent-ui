@@ -20,12 +20,24 @@ export interface QueuedMessage {
 	readonly mode: 'defer' | 'now';
 }
 
+/**
+ * One entry of the model picker.
+ *
+ * `id` is what `--model` / `set_model` takes; `label` is what the user reads
+ * (gateways advertise human names such as `claude-opus-4-7[1m]` alongside a
+ * `display_name`). Absent `label` means the id is readable on its own.
+ */
+export interface ModelOption {
+	readonly id: string;
+	readonly label?: string;
+}
+
 /** One installed agent backend, advertised so the UI can build its pickers. */
 export interface AgentInfo {
 	readonly id: string;
 	readonly name: string;
 	readonly description?: string;
-	readonly models: readonly string[];
+	readonly models: readonly ModelOption[];
 	readonly permissionModes: readonly string[];
 	readonly defaultModel?: string;
 	readonly defaultPermissionMode: string;
@@ -59,15 +71,19 @@ export type AgentServerPayload =
 		readonly skills?: readonly string[];
 		/** Subagent types available to the backend's agent tool. */
 		readonly agents?: readonly string[];
-		/** Models offered by the picker. */
-		readonly models?: readonly string[];
+		/**
+		 * Models offered by the picker. Always the driver's list, injected by the
+		 * router: the CLI's own `system/init` knows nothing about the gateway's
+		 * catalogue.
+		 */
+		readonly models?: readonly ModelOption[];
 	}
 	/** The backend confirmed a runtime config change, or the server pushed static config on connect. */
 	| {
 		readonly type: 'config';
 		readonly model?: string;
 		readonly permissionMode?: string;
-		readonly models?: readonly string[];
+		readonly models?: readonly ModelOption[];
 		readonly permissionModes?: readonly string[];
 		/** Backend the connection is routed to. */
 		readonly agent?: string;

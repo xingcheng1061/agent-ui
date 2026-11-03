@@ -6,6 +6,7 @@ import { Editor } from './Editor';
 import { FileTree } from './FileTree';
 import { Splitter, clamp, usePersistedSize } from './Splitter';
 import { TerminalView } from './Terminal';
+import { forgetTerminalSession } from './terminalSessions';
 
 interface WorkspaceProps {
 	readonly root: string;
@@ -113,6 +114,9 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 
 	const removeTerminal = async (id: string) => {
 		await closeTerminal(id);
+		// Closing a tab is the one case that really ends a screen: without this,
+		// the pool would keep reconnecting to a terminal the server no longer has.
+		forgetTerminalSession(id);
 		await reloadTerminals();
 	};
 
