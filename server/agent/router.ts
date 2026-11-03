@@ -256,6 +256,25 @@ class AgentConnection {
 		if (!this._requestedAgent && !this._entry && this._options.registry.has(stored.default.agent)) {
 			this._agentId = stored.default.agent!;
 		}
+		this._sendStaticConfig();
+		if (this._requestedAgent) {
+			// Picking a backend in the UI should stick across new sessions.
+			void rememberChoice(undefined, { agent: this._driver().id });
+		}
+	}
+
+	/**
+	 * The pickers' data: backends, their model/mode lists, current choices.
+	 *
+	 * Sent on connect *and* answered to every `attach`, because it used to go out
+	 * exactly once per socket. The browser pool keeps a socket open across panel
+	 * remounts and session switches and hands it to whoever comes next; a panel
+	 * that subscribes to such a socket has missed the event for good, and its
+	 * model picker stayed empty until the first turn's `system` event carried the
+	 * list again. Config is state, not a step of the stream, so re-sending it
+	 * costs nothing.
+	 */
+	private _sendStaticConfig(): void {
 		const driver = this._driver();
 		const choice = choiceForSession(undefined, driver.id);
 		this._sendConfig({
@@ -263,13 +282,9 @@ class AgentConnection {
 			agents: this._options.registry.list(),
 			models: driver.models,
 			permissionModes: driver.permissionModes,
-			model: this._pendingModel ?? pickModel(driver, choice.model),
-			permissionMode: this._pendingMode ?? pickMode(driver, choice.permissionMode),
+			model: this._entry?.model ?? this._pendingModel ?? pickModel(driver, choice.model),
+			permissionMode: this._entry?.permissionMode ?? this._pendingMode ?? pickMode(driver, choice.permissionMode),
 		});
-		if (this._requestedAgent) {
-			// Picking a backend in the UI should stick across new sessions.
-			void rememberChoice(undefined, { agent: driver.id });
-		}
 	}
 
 	private _sendConfig(patch: {
@@ -412,6 +427,11 @@ class AgentConnection {
 				// Handshake on connect. Without it a refreshed page stayed blank
 				// until the user typed something, because the session was only
 				// adopted on the first `user` command.
+				//
+				// Answer with the static config too: a pooled socket that outlives
+				// a panel already consumed the connect-time one, and its pickers
+				// would otherwise stay empty until the next turn.
+				this._sendStaticConfig();
 				const requested = typeof command.sessionId === 'string' && command.sessionId
 					? command.sessionId
 					: undefined;

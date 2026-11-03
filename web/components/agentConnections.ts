@@ -90,6 +90,14 @@ class AgentConnection implements AgentConnectionHandle {
 	private _busy = false;
 	private _lastSeq = 0;
 	private readonly _events: AgentServerEvent[] = [];
+	/**
+	 * Last `config` the server pushed.
+	 *
+	 * Kept for late subscribers: a panel that borrows an already-open socket has
+	 * missed the connect-time event, and without a replay its model / permission
+	 * pickers stay empty until the next turn reports the list again.
+	 */
+	private _lastConfig: AgentServerEvent | undefined;
 	private _queued: readonly QueuedMessage[] = [];
 	private _dirty = false;
 	private readonly _listeners = new Set<EventListener>();
@@ -134,6 +142,11 @@ class AgentConnection implements AgentConnectionHandle {
 
 	listen(listener: EventListener): () => void {
 		this._listeners.add(listener);
+		if (this._lastConfig) {
+			// Replay before returning, so a panel that took over this socket
+			// renders its pickers on the same tick instead of waiting for a turn.
+			listener(this._lastConfig);
+		}
 		return () => this._listeners.delete(listener);
 	}
 
@@ -302,7 +315,11 @@ class AgentConnection implements AgentConnectionHandle {
 			this._armIdle();
 			return;
 		}
-		if (event.type === 'system' || event.type === 'config') {
+		if (event.type === 'config') {
+			this._lastConfig = event;
+			return;
+		}
+		if (event.type === 'system') {
 			return;
 		}
 		this._events.push(event);
