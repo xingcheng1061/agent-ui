@@ -1678,6 +1678,104 @@ button {
 	background: var(--primary-hover);
 }
 
+/* ---------- question card (AskUserQuestion) ---------- */
+
+/* Same slot as the approval card, but this one asks instead of asking for
+   permission: the answers become the tool's input. */
+.question-card {
+	gap: 8px;
+}
+
+.question-title-head {
+	color: var(--primary);
+}
+
+.question {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.question-title {
+	display: flex;
+	align-items: baseline;
+	flex-wrap: wrap;
+	gap: 6px;
+	font-size: 12.5px;
+	color: var(--fg);
+}
+
+.question-header {
+	padding: 1px 6px;
+	background: var(--bg-active);
+	border-radius: 3px;
+	color: var(--fg-muted);
+	font-size: 10.5px;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.question-multi {
+	color: var(--fg-dim);
+	font-size: 10.5px;
+}
+
+.question-options {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.question-option {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	max-width: 340px;
+	padding: 5px 10px;
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	color: var(--fg);
+	font: inherit;
+	font-size: 12px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.question-option:hover {
+	border-color: var(--primary);
+}
+
+.question-option.active {
+	background: var(--primary);
+	border-color: var(--primary);
+	color: #fff;
+}
+
+.question-option-label {
+	font-weight: 600;
+}
+
+.question-option-desc {
+	font-size: 10.5px;
+	opacity: 0.75;
+}
+
+.question-freeform {
+	padding: 6px 8px;
+	background: var(--bg);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	color: var(--fg);
+	font: inherit;
+	font-size: 12px;
+}
+
+.question-freeform:focus {
+	outline: none;
+	border-color: var(--primary);
+}
+
 /* ---------- background task output ---------- */
 
 .task-log {

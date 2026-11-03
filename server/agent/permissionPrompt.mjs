@@ -52,7 +52,7 @@ function ask(payload) {
 				try {
 					const parsed = JSON.parse(chunks.join('') || '{}');
 					resolve(parsed.behavior === 'allow'
-						? { behavior: 'allow' }
+						? { behavior: 'allow', updatedInput: parsed.updatedInput }
 						: { behavior: 'deny', message: typeof parsed.message === 'string' ? parsed.message : '用户拒绝。' });
 				} catch {
 					resolve({ behavior: 'deny', message: '审批通道返回了无法解析的内容。' });
@@ -135,7 +135,9 @@ async function handle(line) {
 				toolUseId: typeof args.tool_use_id === 'string' ? args.tool_use_id : undefined,
 			});
 			const answer = decision.behavior === 'allow'
-				? { behavior: 'allow', updatedInput: args.input ?? {} }
+				// `updatedInput` carries the answers when the tool asked the user
+				// something; a plain approval has none and keeps the input as-is.
+				? { behavior: 'allow', updatedInput: decision.updatedInput ?? args.input ?? {} }
 				: { behavior: 'deny', message: decision.message ?? '用户拒绝。' };
 			write({
 				jsonrpc: '2.0',

@@ -2,25 +2,39 @@ import { useEffect, useRef, useState } from 'react';
 import { readFile, writeFile } from '../api';
 import { languageForPath, modelUri, monaco } from '../monacoSetup';
 import { Markdown } from './Markdown';
+import { readCursor, writeCursor } from './workspaceState';
 
 interface EditorProps {
 	readonly root: string;
 	readonly filePath: string | undefined;
 	/** Show the buffer rendered as markdown instead of the source text. */
 	readonly preview?: boolean;
+	/**
+	 * Bumped to re-read the open file from disk.
+	 *
+	 * Monaco models are cached by URI, so without this the buffer kept whatever
+	 * was on disk the first time the file was opened: everything the agent wrote
+	 * afterwards stayed invisible. The workspace bumps it when a turn ends and
+	 * from its reload button.
+	 */
+	readonly reloadToken?: number;
 	readonly onDirtyChange: (dirty: boolean) => void;
 	readonly onStatus: (message: string) => void;
 }
 
-export function Editor({ root, filePath, preview = false, onDirtyChange, onStatus }: EditorProps) {
+export function Editor({ root, filePath, preview = false, reloadToken = 0, onDirtyChange, onStatus }: EditorProps) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 	const dirtySubscriptionRef = useRef<monaco.IDisposable | undefined>(undefined);
+	const cursorSubscriptionRef = useRef<monaco.IDisposable | undefined>(undefined);
 	const currentFileRef = useRef<string | undefined>(undefined);
 	const onDirtyChangeRef = useRef(onDirtyChange);
 	const onStatusRef = useRef(onStatus);
 	const previewRef = useRef(preview);
 	const previewTimerRef = useRef<number | undefined>(undefined);
+	/** Set while the buffer is being replaced from disk, so that is not "dirty". */
+	const applyingRef = useRef(false);
+	const saveCursorTimerRef = useRef<number | undefined>(undefined);
 	const [previewText, setPreviewText] = useState('');
 
 	onDirtyChangeRef.current = onDirtyChange;
@@ -52,6 +66,46 @@ export function Editor({ root, filePath, preview = false, onDirtyChange, onStatu
 		}
 	};
 
+	/**
+	 * Replaces the buffer with disk content.
+	 *
+	 * `keepView` is what separates the two callers: a reload of the file already
+	 * on screen must not move the caret (that is the whole point of reloading
+	 * under the user's cursor), while switching to another file has to leave the
+	 * position alone so the caller can restore that file's own.
+	 */
+	const replaceContent = (
+		editor: monaco.editor.IStandaloneCodeEditor,
+		model: monaco.editor.ITextModel,
+		content: string,
+		keepView: boolean,
+	) => {
+		const position = editor.getPosition();
+		const scrollTop = editor.getScrollTop();
+		applyingRef.current = true;
+		model.setValue(content);
+		applyingRef.current = false;
+		if (keepView) {
+			if (position) {
+				editor.setPosition({ lineNumber: Math.min(position.lineNumber, model.getLineCount()), column: position.column });
+			}
+			editor.setScrollTop(scrollTop);
+		}
+		onDirtyChangeRef.current(false);
+		if (previewRef.current) {
+			setPreviewText(content);
+		}
+	};
+
+	const saveCursor = (editor: monaco.editor.IStandaloneCodeEditor) => {
+		const file = currentFileRef.current;
+		const position = editor.getPosition();
+		if (!file || !position) {
+			return;
+		}
+		writeCursor(root, file, { line: position.lineNumber, column: position.column, scrollTop: editor.getScrollTop() });
+	};
+
 	useEffect(() => {
 		const container = containerRef.current;
 		if (!container) {
@@ -74,7 +128,9 @@ export function Editor({ root, filePath, preview = false, onDirtyChange, onStatu
 
 		return () => {
 			window.clearTimeout(previewTimerRef.current);
+			window.clearTimeout(saveCursorTimerRef.current);
 			dirtySubscriptionRef.current?.dispose();
+			cursorSubscriptionRef.current?.dispose();
 			editor.getModel()?.dispose();
 			editor.dispose();
 			editorRef.current = null;
@@ -82,37 +138,82 @@ export function Editor({ root, filePath, preview = false, onDirtyChange, onStatu
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
+	// Open a file: reuse its model when it exists, but never trust its content —
+	// the previous read may be older than the file on disk.
 	useEffect(() => {
 		const editor = editorRef.current;
 		if (!editor || !filePath) {
 			return;
 		}
 		let cancelled = false;
-		currentFileRef.current = filePath;
+		const target = filePath;
+		currentFileRef.current = target;
 
 		void (async () => {
-			const uri = modelUri(root, filePath);
-			let model = monaco.editor.getModel(uri);
-			if (!model) {
-				const { content } = await readFile(root, filePath);
-				if (cancelled) {
-					return;
-				}
-				model = monaco.editor.createModel(content, languageForPath(filePath), uri);
-			}
+			const uri = modelUri(root, target);
+			const { content } = await readFile(root, target);
 			if (cancelled) {
 				return;
 			}
-			editor.setModel(model);
-			editor.focus();
+			let model = monaco.editor.getModel(uri);
+			if (!model) {
+				model = monaco.editor.createModel(content, languageForPath(target), uri);
+				editor.setModel(model);
+				editor.focus();
+			} else {
+				editor.setModel(model);
+				editor.focus();
+				if (model.getValue() !== content) {
+					replaceContent(editor, model, content, false);
+				}
+			}
+
 			dirtySubscriptionRef.current?.dispose();
 			dirtySubscriptionRef.current = model.onDidChangeContent(() => {
+				if (applyingRef.current) {
+					return;
+				}
 				onDirtyChangeRef.current(true);
 				if (previewRef.current) {
 					syncPreview(model);
 				}
 			});
 			onDirtyChangeRef.current(false);
+
+			// Where the caret was left last time; the panel is remounted on every
+			// project switch and reload, so this cannot live in component state.
+			const saved = readCursor(root, target);
+			if (saved) {
+				editor.setPosition({
+					lineNumber: Math.min(Math.max(1, saved.line), model.getLineCount()),
+					column: saved.column,
+				});
+				editor.setScrollTop(saved.scrollTop);
+			} else {
+				// A file whose model was already cached kept the caret of whichever
+				// file was open before it.
+				editor.setPosition({ lineNumber: 1, column: 1 });
+				editor.setScrollTop(0);
+			}
+
+			cursorSubscriptionRef.current?.dispose();
+			const scheduleSave = () => {
+				window.clearTimeout(saveCursorTimerRef.current);
+				saveCursorTimerRef.current = window.setTimeout(() => saveCursor(editor), 400);
+			};
+			const cursorSubscriptions = [
+				editor.onDidChangeCursorPosition(scheduleSave),
+				editor.onDidScrollChange(scheduleSave),
+			];
+			cursorSubscriptionRef.current = {
+				dispose: () => {
+					window.clearTimeout(saveCursorTimerRef.current);
+					for (const subscription of cursorSubscriptions) {
+						subscription.dispose();
+					}
+				},
+			};
+
 			if (previewRef.current) {
 				setPreviewText(model.getValue());
 			}
@@ -120,9 +221,51 @@ export function Editor({ root, filePath, preview = false, onDirtyChange, onStatu
 
 		return () => {
 			cancelled = true;
+			// Switching files is the last chance to record where the caret was.
+			const editor = editorRef.current;
+			if (editor && currentFileRef.current === target) {
+				saveCursor(editor);
+			}
 		};
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [filePath, root]);
+
+	// Disk → buffer for the file that is already open. The token is bumped when a
+	// turn ends (the agent may have rewritten it) and by the reload button; a
+	// dirty buffer is never replaced from here.
+	useEffect(() => {
+		if (reloadToken === 0) {
+			return;
+		}
+		const editor = editorRef.current;
+		const target = currentFileRef.current;
+		if (!editor || !target) {
+			return;
+		}
+		let cancelled = false;
+		void (async () => {
+			try {
+				const { content } = await readFile(root, target);
+				if (cancelled) {
+					return;
+				}
+				const model = editor.getModel();
+				if (!model || model.getValue() === content) {
+					return;
+				}
+				replaceContent(editor, model, content, true);
+				onStatusRef.current(`已重新载入 ${target}`);
+			} catch (error) {
+				if (!cancelled) {
+					onStatusRef.current(String(error));
+				}
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [reloadToken]);
 
 	// Entering the preview renders the buffer as it stands, unsaved edits included.
 	useEffect(() => {

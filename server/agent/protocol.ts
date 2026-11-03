@@ -226,8 +226,20 @@ export type AgentClientCommand =
 	| { readonly type: 'interrupt'; readonly sessionId?: string }
 	/** Hard stop: kills the process (used when a graceful stop does not land). */
 	| { readonly type: 'kill'; readonly sessionId?: string }
-	/** Answer to a `permission_request`. */
-	| { readonly type: 'permission_response'; readonly requestId: string; readonly behavior: 'allow' | 'deny'; readonly message?: string }
+	/**
+	 * Answer to a `permission_request`.
+	 *
+	 * `updatedInput` replaces the tool's input on the allow branch. It is how a
+	 * tool that asks the user something (`AskUserQuestion`) gets its answers:
+	 * `{ ...input, answers: { <question>: <answer> } }`.
+	 */
+	| {
+		readonly type: 'permission_response';
+		readonly requestId: string;
+		readonly behavior: 'allow' | 'deny';
+		readonly message?: string;
+		readonly updatedInput?: unknown;
+	}
 	/** Runtime switch through the CLI control channel; no process restart needed. */
 	| { readonly type: 'set_model'; readonly model: string }
 	| { readonly type: 'set_permission_mode'; readonly mode: string }

@@ -40,6 +40,7 @@ App.tsx                         会话状态、三栏布局、新建会话对话
 │   ├── ChangesList.tsx         git 变更（按目录折叠成树）
 │   ├── Editor.tsx              Monaco 编辑器
 │   ├── DiffView.tsx            Monaco diff（HEAD ↔ 工作区）
+│   ├── workspaceState.ts       按项目记忆：打开的文件 / 左栏页签 / 光标位置
 │   └── Terminal.tsx            xterm + fit addon
 ├── NewSessionDialog.tsx        目录选择（/api/fs/browse）
 └── Splitter.tsx                拖拽分隔线 + usePersistedSize
@@ -83,6 +84,21 @@ const childrenOf = (id: string) => items.filter(item => parentOf(item) === id);
 - `task_output` 追加到 `outputs[taskId]`，200KB 封顶
 - `result` → `streaming=false`、清空思考计数、推 `result` 摘要卡片、触发父组件刷新 git 变更
 - `permission_request` → 弹审批卡；`autoAllowRef` 里有的工具名直接自动允许。页面不可见时额外走 `web/attention.ts`：提示音 + 系统通知 + 标题角标，同一个 `requestId` 的重发不会重复提醒（见 `attach` 的补发）
+- `permission_request` 且 `toolName === 'AskUserQuestion'` → 不弹审批卡，改渲染**答题卡**（选项按钮 + 自由输入）。这类事件不是「要不要允许」，而是「答案是什么」，它的 `checkPermissions` 固定返回 `ask`，所以即使在 `bypassPermissions` 下也会走审批桥。答案原样装进 `updatedInput.answers`（问题文本 → 选项 label，多选用 `, ` 连接），自由输入走 `updatedInput.response`
+
+## 代码区：磁盘同步与视图记忆
+
+Monaco 的 model 是**按 URI 缓存**的：文件第一次打开时从磁盘读一次，之后 `getModel(uri)` 直接返回旧内容。agent 在终端/自己的工具里改文件，编辑器因此看不到——这正是「agent 说改了、界面还是旧的」的来源。现在有三个入口把磁盘推回缓冲区：
+
+| 入口 | 触发 | 行为 |
+|---|---|---|
+| 重新打开文件 | 点文件树 | 先读盘，与缓存 model 不一致就替换（重置光标到记录位置） |
+| 一轮结束 | `onTurnEnd` 让 `Workspace.revision` +1 | 缓冲区不脏时自动 bump `reloadToken`，编辑器重读；脏则跳过，不覆盖未保存的修改 |
+| 「重新加载」按钮 | 手动 | 同上；脏时先 `confirm` |
+
+`reloadToken` 是 Editor 唯一的外部刷新信号：只有它变化才会重读磁盘，替换时保留光标与滚动位置。
+
+视图记忆放在 `workspaceState.ts`（localStorage，`agentui.workspace`，root 归一化后作 key）：打开的文件、左栏页签、每个文件的光标行列与滚动位置。`Workspace` 以 `key={root}` 挂载，切项目必重挂，所以这些状态只能落在组件外；恢复打开文件前会先 `readFile` 探活，文件已被删除就清掉记忆而不是开一个报错页。
 
 ## 渲染管线
 

@@ -579,6 +579,7 @@ class AgentConnection {
 				this._entry?.session.resolvePermission(command.requestId, {
 					behavior: command.behavior,
 					message: command.message,
+					updatedInput: command.updatedInput,
 				});
 				return;
 			case 'kill': {

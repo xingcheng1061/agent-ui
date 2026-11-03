@@ -156,7 +156,14 @@ export type AgentClientCommand =
 	| { readonly type: 'promote'; readonly id: string; readonly sessionId?: string }
 	| { readonly type: 'interrupt'; readonly sessionId?: string }
 	| { readonly type: 'kill'; readonly sessionId?: string }
-	| { readonly type: 'permission_response'; readonly requestId: string; readonly behavior: 'allow' | 'deny'; readonly message?: string }
+	| {
+		readonly type: 'permission_response';
+		readonly requestId: string;
+		readonly behavior: 'allow' | 'deny';
+		readonly message?: string;
+		/** Replaces the tool input on allow; carries `answers` for question tools. */
+		readonly updatedInput?: unknown;
+	}
 	| { readonly type: 'set_model'; readonly model: string }
 	| { readonly type: 'set_permission_mode'; readonly mode: string }
 	| { readonly type: 'reset' };

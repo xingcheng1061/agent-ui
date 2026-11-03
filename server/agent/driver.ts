@@ -19,6 +19,15 @@ import type { AgentInfo, AgentServerEvent, ModelOption } from './protocol.js';
 export interface PermissionDecision {
 	readonly behavior: 'allow' | 'deny';
 	readonly message?: string;
+	/**
+	 * Replacement tool input for the allow branch.
+	 *
+	 * Approving a tool that asks the user something (`AskUserQuestion`) is not a
+	 * yes/no: the answers have to travel back as the tool's input, or the call
+	 * runs with the questions and no answers. The approval bridge hands this to
+	 * the CLI verbatim (see `permissionPrompt.mjs`).
+	 */
+	readonly updatedInput?: unknown;
 }
 
 export interface PermissionPrompt {

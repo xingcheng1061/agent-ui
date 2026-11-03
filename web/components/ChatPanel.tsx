@@ -31,6 +31,70 @@ interface PendingPermission {
 	readonly toolUseId?: string;
 }
 
+/** One multiple-choice question carried by an `AskUserQuestion` prompt. */
+interface Question {
+	readonly question: string;
+	readonly header?: string;
+	readonly options: readonly { readonly label: string; readonly description?: string }[];
+	readonly multiSelect: boolean;
+}
+
+/**
+ * The questions a `permission_request` is really carrying.
+ *
+ * `AskUserQuestion` declares its own permission as `ask`, so it travels the same
+ * approval bridge as a shell command — even under `bypassPermissions`. It is not
+ * asking for permission though, it is asking for an answer, so it must be
+ * rendered as a question card instead of an allow/deny one; the answers go back
+ * as the tool's `updatedInput`.
+ */
+function questionsOf(permission: PendingPermission | undefined): readonly Question[] {
+	if (!permission || permission.toolName !== 'AskUserQuestion') {
+		return [];
+	}
+	const input = permission.input;
+	if (typeof input !== 'object' || input === null) {
+		return [];
+	}
+	const raw = (input as { questions?: unknown }).questions;
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	const questions: Question[] = [];
+	for (const entry of raw) {
+		if (typeof entry !== 'object' || entry === null) {
+			continue;
+		}
+		const record = entry as { question?: unknown; header?: unknown; options?: unknown; multiSelect?: unknown };
+		if (typeof record.question !== 'string') {
+			continue;
+		}
+		const options: { label: string; description?: string }[] = [];
+		if (Array.isArray(record.options)) {
+			for (const candidate of record.options) {
+				if (typeof candidate !== 'object' || candidate === null) {
+					continue;
+				}
+				const option = candidate as { label?: unknown; description?: unknown };
+				if (typeof option.label !== 'string') {
+					continue;
+				}
+				options.push({
+					label: option.label,
+					description: typeof option.description === 'string' ? option.description : undefined,
+				});
+			}
+		}
+		questions.push({
+			question: record.question,
+			header: typeof record.header === 'string' ? record.header : undefined,
+			options,
+			multiSelect: record.multiSelect === true,
+		});
+	}
+	return questions;
+}
+
 type Item =
 	/** `queued` marks a message that was steered into a turn already running. */
 	| { readonly kind: 'user'; readonly id: string; readonly text: string; readonly queued?: boolean }
@@ -182,6 +246,17 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	const [tasks, setTasks] = useState<readonly TaskState[]>([]);
 	const [outputs, setOutputs] = useState<Readonly<Record<string, string>>>({});
 	const [permission, setPermission] = useState<PendingPermission | undefined>(undefined);
+	/** Picks per question (text → labels); an array because answers can be multi-select. */
+	const [answerPicks, setAnswerPicks] = useState<Readonly<Record<string, readonly string[]>>>({});
+	/** Free-form reply, which the CLI accepts instead of a structured option. */
+	const [freeform, setFreeform] = useState('');
+	const questions = questionsOf(permission);
+
+	// A new request means new questions: drop the previous picks.
+	useEffect(() => {
+		setAnswerPicks({});
+		setFreeform('');
+	}, [permission?.requestId]);
 	const [draft, setDraft] = useState('');
 	const [connection, setConnection] = useState<'connecting' | 'open' | 'closed'>('connecting');
 	const [meta, setMeta] = useState<{
@@ -642,7 +717,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						sendRef.current({ type: 'permission_response', requestId: event.requestId, behavior: 'allow' });
 						return;
 					}
-					setStatus(`等待审批：${event.toolName}`);
+					setStatus(event.toolName === 'AskUserQuestion' ? '等待你回答问题' : `等待审批：${event.toolName}`);
 					setPermission({
 						requestId: event.requestId,
 						toolName: event.toolName,
@@ -941,6 +1016,55 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		clearAttention();
 	};
 
+	/** Answers a question card. The CLI takes them back as the tool's input. */
+	const submitAnswers = () => {
+		if (!permission) {
+			return;
+		}
+		const answers: Record<string, string> = {};
+		for (const question of questions) {
+			const picked = answerPicks[question.question];
+			if (picked && picked.length > 0) {
+				// Its output schema says "question text → answer string", with
+				// multi-select answers comma-separated.
+				answers[question.question] = picked.join(', ');
+			}
+		}
+		const input = typeof permission.input === 'object' && permission.input !== null
+			? permission.input as Record<string, unknown>
+			: {};
+		const text = freeform.trim();
+		if (Object.keys(answers).length === 0 && text === '') {
+			setStatus('先选一个选项，或直接输入回答');
+			return;
+		}
+		send({
+			type: 'permission_response',
+			requestId: permission.requestId,
+			behavior: 'allow',
+			updatedInput: { ...input, answers, ...(text ? { response: text } : {}) },
+		});
+		setPermission(undefined);
+		setStatus('就绪');
+		clearAttention();
+	};
+
+	/** Declining a question prints "User declined to answer questions" for the model. */
+	const skipQuestions = () => {
+		if (!permission) {
+			return;
+		}
+		send({
+			type: 'permission_response',
+			requestId: permission.requestId,
+			behavior: 'deny',
+			message: '用户跳过了这些问题。',
+		});
+		setPermission(undefined);
+		setStatus('已跳过');
+		clearAttention();
+	};
+
 	const runningTasks = tasks.filter(task => task.status === 'running').length;
 	const parentOf = (item: Item) => 'parentToolUseId' in item ? item.parentToolUseId : undefined;
 	// A step whose parent card is missing must not vanish: a subagent can report
@@ -1157,20 +1281,79 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				))}
 			</div>
 
-			{permission && (
-				<div className="permission-card">
-					<div className="permission-head">
-						<span className="permission-title">需要审批：{permission.toolName}</span>
-						<span className="permission-hint">agent 正在等待你的决定</span>
+			{permission && (questions.length > 0
+				? (
+					<div className="permission-card question-card">
+						<div className="permission-head">
+							<span className="permission-title question-title-head">需要你回答</span>
+							<span className="permission-hint">agent 正在等这几个问题的答案</span>
+						</div>
+						{questions.map(question => {
+							const picked = answerPicks[question.question] ?? [];
+							return (
+								<div className="question" key={question.question}>
+									<div className="question-title">
+										{question.header && <span className="question-header">{question.header}</span>}
+										<span>{question.question}</span>
+										{question.multiSelect && <span className="question-multi">可多选</span>}
+									</div>
+									<div className="question-options">
+										{question.options.map(option => (
+											<button
+												type="button"
+												key={option.label}
+												className={`question-option${picked.includes(option.label) ? ' active' : ''}`}
+												title={option.description}
+												onClick={() => setAnswerPicks(previous => {
+													const current = previous[question.question] ?? [];
+													const next = question.multiSelect
+														? (current.includes(option.label)
+															? current.filter(label => label !== option.label)
+															: [...current, option.label])
+														: [option.label];
+													return { ...previous, [question.question]: next };
+												})}
+											>
+												<span className="question-option-label">{option.label}</span>
+												{option.description && <span className="question-option-desc">{option.description}</span>}
+											</button>
+										))}
+									</div>
+								</div>
+							);
+						})}
+						<input
+							className="question-freeform"
+							placeholder="也可以直接输入回答（自由文本，回车提交）"
+							value={freeform}
+							onChange={event => setFreeform(event.target.value)}
+							onKeyDown={event => {
+								if (event.key === 'Enter' && !event.shiftKey) {
+									event.preventDefault();
+									submitAnswers();
+								}
+							}}
+						/>
+						<div className="permission-actions">
+							<button type="button" className="primary" onClick={submitAnswers}>提交答案</button>
+							<button type="button" className="chip" onClick={skipQuestions}>跳过</button>
+						</div>
 					</div>
-					<pre className="permission-input">{formatJson(permission.input)}</pre>
-					<div className="permission-actions">
-						<button type="button" className="primary" onClick={() => answerPermission('allow')}>允许</button>
-						<button type="button" className="chip" onClick={() => answerPermission('allow', true)}>本会话总是允许 {permission.toolName}</button>
-						<button type="button" className="chip danger" onClick={() => answerPermission('deny')}>拒绝</button>
+				)
+				: (
+					<div className="permission-card">
+						<div className="permission-head">
+							<span className="permission-title">需要审批：{permission.toolName}</span>
+							<span className="permission-hint">agent 正在等待你的决定</span>
+						</div>
+						<pre className="permission-input">{formatJson(permission.input)}</pre>
+						<div className="permission-actions">
+							<button type="button" className="primary" onClick={() => answerPermission('allow')}>允许</button>
+							<button type="button" className="chip" onClick={() => answerPermission('allow', true)}>本会话总是允许 {permission.toolName}</button>
+							<button type="button" className="chip danger" onClick={() => answerPermission('deny')}>拒绝</button>
+						</div>
 					</div>
-				</div>
-			)}
+				))}
 
 			{queued.length > 0 && (
 				<div className="queue-strip">

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { closeTerminal, createTerminal, listTerminals, renameTerminal, type TerminalInfo } from '../api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { closeTerminal, createTerminal, listTerminals, readFile, renameTerminal, type TerminalInfo } from '../api';
 import { ChangesList } from './ChangesList';
 import { DiffView } from './DiffView';
 import { Editor } from './Editor';
@@ -7,6 +7,7 @@ import { FileTree } from './FileTree';
 import { Splitter, clamp, usePersistedSize } from './Splitter';
 import { TerminalView } from './Terminal';
 import { forgetTerminalSession } from './terminalSessions';
+import { readLeftTab, readOpenFile, writeLeftTab, writeOpenFile } from './workspaceState';
 
 interface WorkspaceProps {
 	readonly root: string;
@@ -42,7 +43,7 @@ function sameRoot(left: string, right: string): boolean {
  * Mount it with `key={root}` so switching project resets selection and terminal.
  */
 export function Workspace({ root, revision }: WorkspaceProps) {
-	const [leftTab, setLeftTab] = useState<'files' | 'changes'>('files');
+	const [leftTab, setLeftTab] = useState<'files' | 'changes'>(() => readLeftTab(root));
 	const [selectedFile, setSelectedFile] = useState<string | undefined>(undefined);
 	const [diffPath, setDiffPath] = useState<string | undefined>(undefined);
 	const [changeCount, setChangeCount] = useState(0);
@@ -51,6 +52,64 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 	const [terminalOpen, setTerminalOpen] = useState(true);
 	/** Rendered view of the open markdown file, as opposed to its source. */
 	const [preview, setPreview] = useState(false);
+	/** Bumped to make the editor re-read the open file from disk. */
+	const [reloadToken, setReloadToken] = useState(0);
+	/** Read by effects that must not re-run when the dirty flag flips. */
+	const dirtyRef = useRef(dirty);
+	dirtyRef.current = dirty;
+	const selectedFileRef = useRef(selectedFile);
+	selectedFileRef.current = selectedFile;
+
+	useEffect(() => {
+		writeLeftTab(root, leftTab);
+	}, [root, leftTab]);
+
+	// Reopen whatever this project had open. The panel is keyed by root, so the
+	// selection used to be lost on every switch and every reload.
+	useEffect(() => {
+		const remembered = readOpenFile(root);
+		if (!remembered) {
+			return;
+		}
+		let cancelled = false;
+		void readFile(root, remembered)
+			.then(() => {
+				if (!cancelled) {
+					setSelectedFile(remembered);
+				}
+			})
+			.catch(() => {
+				// Gone since: forget it instead of opening an error tab.
+				writeOpenFile(root, undefined);
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [root]);
+
+	// A finished turn may have rewritten the open file, and Monaco only sees the
+	// disk through this token. Unsaved edits win over the agent's version.
+	const firstRevisionRef = useRef(true);
+	useEffect(() => {
+		if (firstRevisionRef.current) {
+			firstRevisionRef.current = false;
+			return;
+		}
+		if (!selectedFileRef.current || dirtyRef.current) {
+			return;
+		}
+		setReloadToken(value => value + 1);
+	}, [revision]);
+
+	const reloadFile = () => {
+		if (!selectedFileRef.current) {
+			return;
+		}
+		if (dirtyRef.current && !window.confirm(`编辑器里有未保存的修改，重新加载会丢弃它们。\n\n${selectedFileRef.current}`)) {
+			return;
+		}
+		setReloadToken(value => value + 1);
+	};
 
 	// Terminals are server-side objects, so this list survives a reload and the
 	// shells keep running while their tab is closed.
@@ -149,6 +208,7 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 								setDiffPath(undefined);
 								// Another file starts as source; the toggle is per file.
 								setPreview(false);
+								writeOpenFile(root, filePath);
 							}}
 						/>
 					)
@@ -161,6 +221,8 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 							onSelect={filePath => {
 								setDiffPath(filePath);
 								setSelectedFile(undefined);
+								// A diff is not a file to reopen: only a real editor tab is.
+								writeOpenFile(root, undefined);
 							}}
 						/>
 					)}
@@ -178,6 +240,16 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 					<span className="spacer" />
 					<span className={`status${status.startsWith('saved') ? ' ok' : ''}`}>{status}</span>
 					{diffPath && <button type="button" className="toggle" onClick={() => setDiffPath(undefined)}>关闭 diff</button>}
+					{selectedFile && !diffPath && (
+						<button
+							type="button"
+							className="toggle"
+							title="从磁盘重新读取该文件（agent 改过会自动重载；有未保存修改时会先确认）"
+							onClick={reloadFile}
+						>
+							重新加载
+						</button>
+					)}
 					{previewable && (
 						<button
 							type="button"
@@ -201,6 +273,7 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 								root={root}
 								filePath={selectedFile}
 								preview={preview && previewable}
+								reloadToken={reloadToken}
 								onDirtyChange={setDirty}
 								onStatus={setStatus}
 							/>

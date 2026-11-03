@@ -108,6 +108,18 @@ claude 需要授权
 
 审批不会因为界面丢失而蒸发。卡片状态存在浏览器里，而 CLI 仍阻塞在 MCP 调用上，所以 `attach` 时服务端会用**同一个 `requestId` 重发**一次 `permission_request`——刷新、换标签、切到别的会话再回来，卡片都会重新出现。等待上限是 `AGENT_UI_PERMISSION_TIMEOUT_MS`（默认 24 小时），到点自动拒绝并记 `permission timeout -> deny`；用户主动发新消息则立刻取消挂起的审批。
 
+### 3.1 提问类工具：`AskUserQuestion`
+
+它声明的权限决策是 `ask`（`checkPermissions` 固定返回 `{ behavior: 'ask' }`），所以**在 `bypassPermissions` 下也照样经过审批桥**——那是 CLI 的设计，不是这里的 bug。区别在于它不是要「允许」，而是要「答案」：
+
+```
+permission_request{toolName:'AskUserQuestion', input:{questions:[{question, header?, options:[{label, description?}], multiSelect?}]}}
+  → 前端渲染答题卡（选项按钮 + 自由输入），不是允许/拒绝
+  → permission_response{behavior:'allow', updatedInput:{...input, answers:{<问题文本>: <label[, label]>}, response?}}
+```
+
+`answers` 的键是**问题文本**，多选答案按 CLI 的 output schema 用 `, ` 拼接；自由输入走 `response`。整条链路（`permission_response.updatedInput` → `PermissionDecision.updatedInput` → `/internal/permission` 响应 → `permissionPrompt.mjs` 交给 CLI）必须逐层透传，早先版本在最后一跳把它丢了，于是「允许」了却拿不到答案。
+
 ## 多后端并存
 
 agent 通道的上层不认识任何具体后端，只认识 `AgentSession` / `AgentDriver` 两个抽象（定义在 `server/agent/driver.ts`）。后端通过 cordis 插件注册进 `AgentRegistry`，由 `server/agent/runtime.ts` 在 HTTP 服务启动**之前**装好。
