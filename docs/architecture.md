@@ -47,7 +47,7 @@
 | `paths.ts` | `root` 解析、越界防护 | 所有 fs/git 接口都经过 `resolveRoot`，拒绝 `..` 逃逸 |
 | `projects.ts` | 项目发现 | 两个来源：CLI 会话库反推 + `~/.agent-ui/projects.json` |
 | `sessions.ts` | jsonl → transcript | 只认 `text` / `thinking` / `tool_use` / `tool_result` 四种块 |
-| `git.ts` | 变更列表与单文件 diff | `status --porcelain=v1 -uall`（展开未跟踪目录，否则只能看到 `server/` 这种目录行） |
+| `git.ts` | 变更列表与单文件 diff | `status --porcelain=v1 -uall`（展开未跟踪目录，否则只能看到 `server/` 这种目录行）；工作区路径以 `rev-parse --show-toplevel` 为基准，见下方决策 9 |
 | `terminals.ts` | 多终端注册表 | PTY 存活于服务端，断线保留，重连回放缓冲 |
 | `agent/router.ts` | 连接管理、会话认领、排队、回收 | 一个 `LiveSession` = 一个 CLI 进程 |
 | `agent/driver.ts` | 后端接缝 | 路由层完全不认识 claude，只认识 `AgentSession` |
@@ -230,6 +230,24 @@ CLI 只在一条消息**写完后**才把它追加进 jsonl。所以流式进行
 ### 8. 为什么变更列表要用 `-uall`
 
 `git status --porcelain` 默认把未跟踪目录折叠成一行 `?? server/`，点它打开 diff 是空的（`git show HEAD:server/` 失败、读目录也失败）。加上 `-uall` 才列出具体文件。未跟踪文件没有 HEAD 版本，`--numstat` 也不统计，所以额外读文件数行补上 `+N`。
+
+### 9. 为什么 git 路径要以「仓库根」为基准
+
+`git -C <session root> status --porcelain` 输出的路径**始终相对仓库根**，即使 session root 就是仓库的子目录：
+
+```bash
+$ cd repo/sub && git status --porcelain
+ M sub/deep/a.ts        # 不是 deep/a.ts
+```
+
+早先 `gitFileVersions` 直接 `path.join(root, filePath)` 拼工作区路径，于是当项目是仓库子目录时路径被拼成 `repo/sub/sub/deep/a.ts`：`fs.readFile` ENOENT，而 `.catch(() => undefined)` 把它吞成空串。结果是 diff 左边有整份文件、右边空白，每行都成了「被删除」。而 `git show HEAD:…` 用的是仓库相对路径，反而是对的——只有工作区那一侧坏，所以症状非常有辨识度。
+
+现在的做法：
+
+- 用 `git rev-parse --show-toplevel` 求仓库根，作为**写盘路径的基准**；
+- 两种调用约定都试（变更列表传仓库相对路径，文件树传 root 相对路径），命中哪个用哪个；
+- 显示时把仓库相对路径裁成 root 相对，让变更列表和文件树一致；
+- 读不到时不再静默：先查 `git status --porcelain -- <path>` 判断是不是真的删除，是真删除才返回空串，否则抛错并在 DiffView 上显示尝试过的绝对路径。删掉静默 fallback 是这次修复的关键——**「读不到」和「文件被删了」在 UI 上必须能区分**。
 
 ## 终端：为什么 PTY 活在服务端
 

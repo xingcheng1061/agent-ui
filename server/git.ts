@@ -64,6 +64,9 @@ export async function gitStatus(root: string): Promise<GitStatusResult> {
 		// empty repository: no commits yet
 	}
 
+	/** Resolved once: it is a subprocess, and both callers below need it. */
+	const base = await repoRoot(root) ?? root;
+
 	const counts = new Map<string, { insertions: number; deletions: number }>();
 	try {
 		for (const line of (await git(root, ['diff', '--numstat', 'HEAD'])).split('\n')) {
@@ -109,7 +112,9 @@ export async function gitStatus(root: string): Promise<GitStatusResult> {
 	}
 
 	if (pending.length > 0) {
-		const counted = await Promise.all(pending.map(entry => countNewLines(path.join(root, entry.filePath))));
+		// Paths from git are relative to the repository root, which is the session
+		// root only when the project happens to *be* the repository.
+		const counted = await Promise.all(pending.map(entry => countNewLines(path.join(base, entry.filePath))));
 		pending.forEach((entry, index) => {
 			const row = rows.find(candidate => candidate.filePath === entry.filePath);
 			if (row) {
@@ -118,8 +123,21 @@ export async function gitStatus(root: string): Promise<GitStatusResult> {
 		});
 	}
 
+	// Display relative to the session root, so the list matches the file tree even
+	// when the project is a subdirectory of the repository. `gitFileVersions`
+	// accepts both conventions, so the click that follows still resolves.
+	const prefix = toPosix(path.relative(base, root));
+	const forDisplay = (filePath: string) => prefix && filePath.startsWith(`${prefix}/`)
+		? filePath.slice(prefix.length + 1)
+		: filePath;
+
 	for (const row of rows) {
-		files.push({ path: row.filePath, status: row.status, insertions: row.insertions, deletions: row.deletions });
+		files.push({
+			path: forDisplay(row.filePath),
+			status: row.status,
+			insertions: row.insertions,
+			deletions: row.deletions,
+		});
 	}
 
 	files.sort((a, b) => a.path.localeCompare(b.path));
@@ -137,16 +155,93 @@ async function countNewLines(absolute: string): Promise<{ insertions: number; de
 	return { insertions: Math.max(0, text.split('\n').length - trailing), deletions: 0 };
 }
 
+/**
+ * Repository root — the base every path `git status` prints is relative to.
+ *
+ * `git -C <subdir> status --porcelain` still answers `sub/deep/a.ts`, not
+ * `deep/a.ts`, so joining those paths onto the session root doubled the prefix:
+ * the working copy could not be read, and the diff showed a full file on the
+ * left and nothing on the right — every line painted as deleted. Windows only
+ * hid it while the project *was* the repository root.
+ */
+async function repoRoot(root: string): Promise<string | undefined> {
+	try {
+		const top = (await git(root, ['rev-parse', '--show-toplevel'])).trim();
+		return top ? path.resolve(top) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function toPosix(value: string): string {
+	return value.split(path.sep).join('/');
+}
+
+/** Whether the worktree copy is gone by design (a deletion, not a read error). */
+async function isDeletedInWorktree(base: string, filePath: string): Promise<boolean> {
+	try {
+		const status = await git(base, ['status', '--porcelain=v1', '--', filePath]);
+		return /^( D|D |DD|AD)/.test(status);
+	} catch {
+		return false;
+	}
+}
+
 /** HEAD version vs. working tree, both as text (binary detected via NUL). */
 export async function gitFileVersions(root: string, filePath: string): Promise<GitFileVersions> {
-	const absolute = path.join(root, filePath);
-	const modified = await fs.readFile(absolute, 'utf8').catch(() => undefined);
+	const base = await repoRoot(root) ?? root;
+	// Two conventions reach this function: the changes list passes paths relative
+	// to the repository root (that is what git printed), the file tree passes
+	// paths relative to the session root. Trying both keeps either working.
+	const candidates = path.isAbsolute(filePath)
+		? [filePath]
+		: [path.join(base, filePath), path.join(root, filePath)];
+
+	let absolute: string | undefined;
+	let modified: string | undefined;
+	const problems: string[] = [];
+	for (const candidate of new Set(candidates)) {
+		try {
+			modified = await fs.readFile(candidate, 'utf8');
+			absolute = candidate;
+			break;
+		} catch (error) {
+			problems.push(`${candidate}: ${(error as NodeJS.ErrnoException).code ?? String(error)}`);
+		}
+	}
+
+	/** Every way the caller's path could be spelled inside the repository. */
+	const repoRelative = [...new Set([
+		...(absolute ? [toPosix(path.relative(base, absolute))] : []),
+		filePath,
+		toPosix(path.relative(base, path.join(root, filePath))),
+	])];
+
+	if (modified === undefined) {
+		// A deleted file legitimately has no working copy — that diff *is* "all
+		// lines removed". Anything else is a path problem and must be reported:
+		// swallowing it made the two indistinguishable, which is how every file
+		// came to be painted as fully deleted.
+		let deleted = false;
+		for (const candidate of repoRelative) {
+			if (await isDeletedInWorktree(base, candidate)) {
+				deleted = true;
+				break;
+			}
+		}
+		if (!deleted) {
+			throw new Error(`无法读取工作区文件 ${filePath}（尝试过 ${problems.join('；')}）`);
+		}
+	}
 
 	let original: string | undefined;
-	try {
-		original = await git(root, ['show', `HEAD:${filePath}`]);
-	} catch {
-		// added or untracked file: no HEAD version
+	for (const candidate of repoRelative) {
+		try {
+			original = await git(root, ['show', `HEAD:${candidate}`]);
+			break;
+		} catch {
+			// A wrong spelling, or an added/untracked file with no HEAD version.
+		}
 	}
 
 	if (modified?.includes('\u0000') || original?.includes('\u0000')) {
