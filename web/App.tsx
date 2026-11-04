@@ -409,8 +409,10 @@ export function App() {
 								onTurnEnd={() => {
 									setRevision(value => value + 1);
 									// A finished turn flips the sidebar's marker at once
-									// instead of on the next poll tick.
+									// instead of on the next poll tick, and may have left a
+									// fresh ai-title behind, so the list gets re-read too.
 									void refreshRunning();
+									void refresh().catch(() => undefined);
 								}}
 							/>
 							<Splitter axis="x" onResize={delta => setChatWidth(clamp(chatWidth + delta, 320, 1200))} />

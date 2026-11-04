@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { invalidateProjectsCache, listProjects, projectsDir } from './projects.js';
 import { JsonStore } from './store.js';
@@ -82,9 +83,14 @@ interface TranscriptLine {
 const MAX_ITEMS = 400;
 const MAX_TOOL_TEXT = 4000;
 const TITLE_BUDGET = 60;
-/** Title discovery reads the head of the jsonl, plus the tail of a long one. */
+/**
+ * ai-title records are appended mid-file — the model names the conversation a
+ * few turns in — so title discovery scans the whole transcript in chunks of
+ * this size, line-aligned, instead of sampling the head and the tail.
+ */
+const TITLE_CHUNK_BYTES = 256 * 1024;
+/** The fallback title still comes from the head of the file. */
 const TITLE_HEAD_BYTES = 64 * 1024;
-const TITLE_TAIL_BYTES = 16 * 1024;
 
 /**
  * User-owned session properties, keyed by `<projectId>/<sessionId>`.
@@ -153,45 +159,94 @@ function aiTitleOf(chunk: string): string | undefined {
  * real user message.
  *
  * The name the model picks is what `claude --resume` shows, so preferring it
- * keeps the rail and the CLI in agreement. It lives at the end of the file once
- * the conversation has been retitled, hence the tail read for long transcripts.
+ * keeps the rail and the CLI in agreement. Head/tail sampling missed it on
+ * every real transcript, because the record is appended mid-file — a few turns
+ * in — and the file only grows afterwards. So the scan covers everything, and
+ * the result is cached: the sidebar re-reads titles for every session on every
+ * refresh, and rescanning megabytes each time would be the new bottleneck.
  */
+const titleCache = new Map<string, { readonly size: number; readonly mtimeMs: number; readonly title: string }>();
+
 async function readTitle(filePath: string): Promise<string> {
 	const handle = await fs.open(filePath, 'r').catch(() => undefined);
 	if (!handle) {
 		return '(untitled)';
 	}
 	try {
-		const head = Buffer.alloc(TITLE_HEAD_BYTES);
-		const { bytesRead } = await handle.read(head, 0, head.length, 0);
-		const headText = head.subarray(0, bytesRead).toString('utf8');
-		let title = aiTitleOf(headText);
-		if (!title && bytesRead === TITLE_HEAD_BYTES) {
-			const { size } = await handle.stat();
-			const from = Math.max(0, size - TITLE_TAIL_BYTES);
-			const tail = Buffer.alloc(size - from);
-			const read = await handle.read(tail, 0, tail.length, from);
-			title = aiTitleOf(tail.subarray(0, read.bytesRead).toString('utf8'));
+		const stat = await handle.stat();
+		const cached = titleCache.get(filePath);
+		if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+			return cached.title;
 		}
-		if (title) {
-			return title;
-		}
-		for (const line of headText.split('\n')) {
-			const entry = parseLine(line);
-			if (entry?.type !== 'user') {
-				continue;
-			}
-			const text = blocksOf(entry)
-				.filter(block => block.type === 'text' && typeof block.text === 'string')
-				.map(block => block.text ?? '')
-				.join(' ')
-				.trim();
-			if (text && !isMetaText(text)) {
-				return text.length > 80 ? `${text.slice(0, 80)}…` : text;
-			}
-		}
+		const title = (await scanAiTitle(handle, stat.size)) ?? (await firstUserText(handle));
+		titleCache.set(filePath, { size: stat.size, mtimeMs: stat.mtimeMs, title });
+		return title;
 	} finally {
 		await handle.close();
+	}
+}
+
+/**
+ * Scans the transcript for the last `ai-title` record.
+ *
+ * Chunks are aligned to record boundaries on purpose: a 0x0A byte can never
+ * occur inside a multi-byte UTF-8 sequence, so splitting the raw bytes at the
+ * last newline and decoding each side separately cannot corrupt a record that
+ * straddles a chunk boundary. Whatever follows the newline rides along to the
+ * next chunk as `pending`.
+ */
+async function scanAiTitle(handle: FileHandle, size: number): Promise<string | undefined> {
+	const buffer = Buffer.alloc(TITLE_CHUNK_BYTES);
+	let pending: Buffer = Buffer.alloc(0);
+	let title: string | undefined;
+	for (let position = 0; position < size; ) {
+		const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+		if (bytesRead === 0) {
+			break;
+		}
+		position += bytesRead;
+		// `concat` copies, so `pending` may keep referencing this chunk while
+		// `buffer` is refilled on the next iteration.
+		const chunk = Buffer.concat([pending, buffer.subarray(0, bytesRead)]);
+		const lastNewline = chunk.lastIndexOf(0x0a);
+		if (lastNewline === -1) {
+			pending = chunk;
+			continue;
+		}
+		pending = chunk.subarray(lastNewline + 1);
+		for (const line of chunk.subarray(0, lastNewline).toString('utf8').split('\n')) {
+			const found = aiTitleOf(line);
+			if (found) {
+				title = found;
+			}
+		}
+	}
+	if (pending.length > 0) {
+		const found = aiTitleOf(pending.toString('utf8'));
+		if (found) {
+			title = found;
+		}
+	}
+	return title;
+}
+
+/** First real user message, the fallback when the CLI never titled the file. */
+async function firstUserText(handle: FileHandle): Promise<string> {
+	const head = Buffer.alloc(TITLE_HEAD_BYTES);
+	const { bytesRead } = await handle.read(head, 0, head.length, 0);
+	for (const line of head.subarray(0, bytesRead).toString('utf8').split('\n')) {
+		const entry = parseLine(line);
+		if (entry?.type !== 'user') {
+			continue;
+		}
+		const text = blocksOf(entry)
+			.filter(block => block.type === 'text' && typeof block.text === 'string')
+			.map(block => block.text ?? '')
+			.join(' ')
+			.trim();
+		if (text && !isMetaText(text)) {
+			return text.length > 80 ? `${text.slice(0, 80)}…` : text;
+		}
 	}
 	return '(untitled)';
 }
