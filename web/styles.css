@@ -1728,6 +1728,79 @@ button {
 	user-select: none;
 }
 
+.search-result {
+	margin: 0;
+	max-height: 300px;
+	overflow: auto;
+	font-family: var(--font-mono);
+	font-size: 11.5px;
+	line-height: 1.5;
+	white-space: pre;
+}
+
+.search-line {
+	display: block;
+}
+
+.task-line {
+	display: flex;
+	gap: 6px;
+	font-size: 12px;
+	color: var(--fg);
+}
+
+.task-mark {
+	flex: none;
+	width: 12px;
+	color: var(--ok);
+}
+
+/* The raw arguments of a tool that has no dedicated card: one click away, so
+   the expanded card shows the result first. */
+.tool-raw > summary {
+	cursor: pointer;
+	color: var(--fg-dim);
+	font-size: 11px;
+	list-style: none;
+	user-select: none;
+}
+
+.tool-raw > summary::before {
+	content: '▸ ';
+}
+
+.tool-raw[open] > summary::before {
+	content: '▾ ';
+}
+
+.tool-raw .tool-input {
+	max-height: 240px;
+}
+
+.question-answer {
+	font-size: 12px;
+	color: var(--ok);
+}
+
+/* The answered card is a record, not a control: no hover affordance. */
+.question-result .question-option {
+	cursor: default;
+}
+
+.plan-body {
+	max-height: 420px;
+	overflow: auto;
+	font-size: 12.5px;
+}
+
+/* A fetched page is already markdown; it gets the same fixed-height scroller as
+   a plan so a long article cannot push the rest of the conversation away. */
+.web-body {
+	max-height: 420px;
+	overflow: auto;
+	font-size: 12.5px;
+}
+
 .diff-more,
 .edit-note {
 	margin-top: 4px;

@@ -142,6 +142,14 @@ const TASK_STATUS_LABEL: Record<string, string> = {
 	error: '出错',
 };
 
+/** The status enum `TaskUpdate` carries, which arrives in English. */
+const TODO_STATUS_LABEL: Record<string, string> = {
+	pending: '待处理',
+	in_progress: '进行中',
+	completed: '已完成',
+	deleted: '已删除',
+};
+
 const STATUS_LABEL: Record<string, string> = {
 	requesting: '生成中',
 	idle: '空闲',
@@ -164,6 +172,24 @@ const FILE_CHANGE_TOOLS: ReadonlySet<string> = new Set(['Edit', 'MultiEdit', 'Wr
 
 /** Tools that return a numbered listing of one file. */
 const READ_TOOLS: ReadonlySet<string> = new Set(['Read']);
+
+/** The agent asked the user something; the input holds the questions. */
+const QUESTION_TOOLS: ReadonlySet<string> = new Set(['AskUserQuestion']);
+
+/** Pattern searches: the answer is a list of hits, not JSON. */
+const SEARCH_TOOLS: ReadonlySet<string> = new Set(['Grep', 'Glob']);
+
+/** Todo lists and the task board. */
+const TASK_TOOLS: ReadonlySet<string> = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskOutput', 'TaskStop']);
+
+/** Plan mode carries a markdown plan, which reads badly as escaped JSON. */
+const PLAN_TOOLS: ReadonlySet<string> = new Set(['ExitPlanMode', 'EnterPlanMode']);
+
+/**
+ * Network tools. `WebSearch` answers with a hit list and `WebFetch` with the
+ * page as markdown, neither of which survives a `<pre>` of the raw result.
+ */
+const WEB_TOOLS: ReadonlySet<string> = new Set(['WebFetch', 'WebSearch']);
 
 /** Cap per task so a chatty background shell cannot blow up the DOM. */
 const MAX_TASK_LOG = 200_000;
@@ -1561,16 +1587,7 @@ function ChatItemView({ item, childrenOf, outputOf, live = false }: {
 		case 'thinking':
 			return <ThinkingBlock text={item.text} live={live} />;
 		case 'tool':
-			// Shell calls get their own control: a collapsed one-liner that opens
-			// into the full command plus its output. `PowerShell` is what the CLI
-			// emits on Windows, so matching only `Bash` hid half of them.
-			return SHELL_TOOLS.has(item.name)
-				? <BashCard item={item} />
-				: FILE_CHANGE_TOOLS.has(item.name)
-					? <FileChangeCard item={item} />
-					: READ_TOOLS.has(item.name)
-						? <ReadCard item={item} />
-						: <ToolCard item={item} childrenOf={childrenOf} outputOf={outputOf} />;
+			return toolCardFor(item, childrenOf, outputOf);
 		case 'result':
 			return (
 				<div className={`msg result${item.isError && !item.interrupted ? ' failed' : ''}${item.interrupted ? ' interrupted' : ''}`}>
@@ -1819,6 +1836,12 @@ function ReadCard({ item }: { readonly item: Extract<Item, { kind: 'tool' }> }) 
 						))}
 					</pre>
 				)}
+				{/* Not every read answers with `number<TAB>text`: a binary or image
+				    file comes back as a one-line placeholder, which the numbered
+				    renderer filtered away and left the card looking empty. */}
+				{!failed && rows.length === 0 && content.trim() !== '' && (
+					<pre className="tool-result">{truncate(content, 4000)}</pre>
+				)}
 			</div>
 		</details>
 	);
@@ -1879,6 +1902,348 @@ function FileChangeCard({ item }: { readonly item: Extract<Item, { kind: 'tool' 
 				    only a failure carries something worth reading. */}
 				{item.result?.isError && (
 					<div className="edit-note failed">{truncateLine(toolErrorText(item.result.content), 300)}</div>
+				)}
+			</div>
+		</details>
+	);
+}
+
+type ToolItem = Extract<Item, { kind: 'tool' }>;
+
+/**
+ * One card per tool family.
+ *
+ * Anything unrecognised still falls back to `ToolCard`, which now keeps the raw
+ * arguments behind a disclosure — expanding a card used to mean reading JSON.
+ */
+function toolCardFor(
+	item: ToolItem,
+	childrenOf: (id: string) => readonly Item[],
+	outputOf: (taskId: string) => string | undefined,
+) {
+	// Shell calls get their own control: `PowerShell` is what the CLI emits on
+	// Windows, so matching only `Bash` hid half of them.
+	if (SHELL_TOOLS.has(item.name)) {
+		return <BashCard item={item} />;
+	}
+	if (FILE_CHANGE_TOOLS.has(item.name)) {
+		return <FileChangeCard item={item} />;
+	}
+	if (READ_TOOLS.has(item.name)) {
+		return <ReadCard item={item} />;
+	}
+	if (QUESTION_TOOLS.has(item.name)) {
+		return <QuestionCard item={item} />;
+	}
+	if (SEARCH_TOOLS.has(item.name)) {
+		return <SearchCard item={item} />;
+	}
+	if (WEB_TOOLS.has(item.name)) {
+		return <WebCard item={item} />;
+	}
+	if (TASK_TOOLS.has(item.name)) {
+		return <TaskToolCard item={item} />;
+	}
+	if (PLAN_TOOLS.has(item.name)) {
+		return <PlanCard item={item} />;
+	}
+	return <ToolCard item={item} childrenOf={childrenOf} outputOf={outputOf} />;
+}
+
+interface AskedOption {
+	readonly label: string;
+	readonly description?: string;
+}
+
+interface AskedQuestion {
+	readonly question: string;
+	readonly header?: string;
+	readonly multiSelect: boolean;
+	readonly options: readonly AskedOption[];
+}
+
+/** The `questions` array an AskUserQuestion call carries. */
+function askedQuestions(record: Record<string, unknown>): readonly AskedQuestion[] {
+	const raw = record['questions'];
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	const asked: AskedQuestion[] = [];
+	for (const entry of raw as readonly Record<string, unknown>[]) {
+		if (typeof entry['question'] !== 'string') {
+			continue;
+		}
+		const options: AskedOption[] = [];
+		if (Array.isArray(entry['options'])) {
+			for (const option of entry['options'] as readonly Record<string, unknown>[]) {
+				if (typeof option['label'] === 'string') {
+					options.push({
+						label: option['label'],
+						description: typeof option['description'] === 'string' ? option['description'] : undefined,
+					});
+				}
+			}
+		}
+		asked.push({
+			question: entry['question'],
+			header: typeof entry['header'] === 'string' ? entry['header'] : undefined,
+			multiSelect: entry['multiSelect'] === true,
+			options,
+		});
+	}
+	return asked;
+}
+
+/**
+ * Answers come back as prose: `Your questions have been answered: "Q"="A", …`.
+ * There is no structured field, so the quoted pairs are what can be trusted.
+ */
+function answersOf(text: string): ReadonlyMap<string, string> {
+	const answers = new Map<string, string>();
+	for (const match of text.matchAll(/"([^"]+)"\s*=\s*"([^"]*)"/g)) {
+		answers.set(match[1], match[2]);
+	}
+	return answers;
+}
+
+/**
+ * An answered question round. The live card (permission prompt) has its buttons;
+ * this is the record of it, so the chosen options are marked instead.
+ */
+function QuestionCard({ item }: { readonly item: ToolItem }) {
+	const record = (item.input ?? {}) as Record<string, unknown>;
+	const asked = askedQuestions(record);
+	const answers = answersOf(item.result?.content ?? '');
+	const state = item.result?.isError ? 'failed' : item.result ? 'done' : 'running';
+	const [open, setOpen] = useState(false);
+	const picked = (question: AskedQuestion, label: string) => {
+		const answer = answers.get(question.question);
+		return answer !== undefined
+			&& answer.split(/[,，]\s*/).some(part => part.trim() === label);
+	};
+	return (
+		<details
+			className={`tool-card question-result ${state}`}
+			open={open}
+			onToggle={event => setOpen(event.currentTarget.open)}
+		>
+			<summary className="tool-head">
+				<span className={`tool-dot ${state}`} />
+				<span className="tool-name">提问</span>
+				<span className="tool-file">{asked.length} 个问题</span>
+				<span className="tool-tag">{answers.size > 0 ? `已回答 ${answers.size}` : '未回答'}</span>
+			</summary>
+			<div className="tool-body">
+				{asked.map(question => (
+					<div className="question" key={question.question}>
+						<div className="question-title">
+							{question.header && <span className="question-header">{question.header}</span>}
+							<span>{question.question}</span>
+							{question.multiSelect && <span className="question-multi">可多选</span>}
+						</div>
+						<div className="question-options">
+							{question.options.map(option => (
+								<span
+									key={option.label}
+									className={`question-option${picked(question, option.label) ? ' active' : ''}`}
+								>
+									<span className="question-option-label">{option.label}</span>
+									{option.description && <span className="question-option-desc">{option.description}</span>}
+								</span>
+							))}
+						</div>
+						{answers.get(question.question) && (
+							<div className="question-answer">答：{answers.get(question.question)}</div>
+						)}
+					</div>
+				))}
+				{item.result?.isError && (
+					<div className="edit-note failed">{truncateLine(toolErrorText(item.result.content), 300)}</div>
+				)}
+			</div>
+		</details>
+	);
+}
+
+/** Grep / Glob: the query plus the hits it produced. */
+function SearchCard({ item }: { readonly item: ToolItem }) {
+	const record = (item.input ?? {}) as Record<string, unknown>;
+	const pattern = typeof record['pattern'] === 'string' ? record['pattern'] as string : '';
+	const scope = typeof record['path'] === 'string' ? record['path'] as string : '';
+	const output = item.result?.content ?? '';
+	const lines = item.result?.isError || output === ''
+		? []
+		: output.replace(/\r\n/g, '\n').split('\n').filter(line => line.trim() !== '');
+	const shown = lines.slice(0, 60);
+	const state = item.result?.isError ? 'failed' : item.result ? 'done' : 'running';
+	const [open, setOpen] = useState(false);
+	return (
+		<details
+			className={`tool-card search-card ${state}`}
+			open={open}
+			onToggle={event => setOpen(event.currentTarget.open)}
+		>
+			<summary className="tool-head">
+				<span className={`tool-dot ${state}`} />
+				<span className="tool-name">{item.name}</span>
+				<span className="tool-file" title={scope}>{pattern || '搜索'}</span>
+				{lines.length > 0 && <span className="tool-tag">{lines.length} 行</span>}
+				{!item.result && <span className="tool-tag running">运行中</span>}
+			</summary>
+			<div className="tool-body">
+				{item.result?.isError
+					? <pre className="tool-result failed">{truncate(toolErrorText(output), 2000)}</pre>
+					: shown.length > 0 && (
+						<pre className="search-result">
+							{shown.map((line, index) => <span key={index} className="search-line">{line}</span>)}
+						</pre>
+					)}
+				{lines.length > shown.length && <div className="diff-more">还有 {lines.length - shown.length} 行未显示</div>}
+			</div>
+		</details>
+	);
+}
+
+/**
+ * WebFetch / WebSearch. A hit list and a page's markdown both arrive as one
+ * blob; rendering the blob in a `<pre>` threw away the only thing that made
+ * either readable — the line breaks and the markdown itself.
+ */
+function WebCard({ item }: { readonly item: ToolItem }) {
+	const record = (item.input ?? {}) as Record<string, unknown>;
+	const search = item.name === 'WebSearch';
+	const key = search ? 'query' : 'url';
+	const target = typeof record[key] === 'string' ? record[key] as string : '';
+	const output = item.result?.content ?? '';
+	const lines = item.result?.isError || output === ''
+		? []
+		: output.replace(/\r\n/g, '\n').split('\n').filter(line => line.trim() !== '');
+	const shown = lines.slice(0, 60);
+	const state = item.result?.isError ? 'failed' : item.result ? 'done' : 'running';
+	const [open, setOpen] = useState(false);
+	return (
+		<details
+			className={`tool-card web-card ${state}`}
+			open={open}
+			onToggle={event => setOpen(event.currentTarget.open)}
+		>
+			<summary className="tool-head">
+				<span className={`tool-dot ${state}`} />
+				<span className="tool-name">{item.name}</span>
+				<span className="tool-file" title={target}>{truncateLine(target, 90) || (search ? '搜索' : '页面')}</span>
+				{!item.result && <span className="tool-tag running">运行中</span>}
+			</summary>
+			<div className="tool-body">
+				{item.result?.isError
+					? <pre className="tool-result failed">{truncate(toolErrorText(output), 2000)}</pre>
+					: !item.result
+						? <div className="tool-pending">执行中…</div>
+						: search
+							? (
+								<>
+									<pre className="search-result">
+										{shown.map((line, index) => <span key={index} className="search-line">{line}</span>)}
+									</pre>
+									{lines.length > shown.length && <div className="diff-more">还有 {lines.length - shown.length} 行未显示</div>}
+								</>
+							)
+							/* The fetched page is already markdown; the card caps its
+							   height so a long article cannot push the rest away. */
+							: <div className="web-body"><Markdown text={truncate(output, 20000)} /></div>}
+			</div>
+		</details>
+	);
+}
+
+/** TodoWrite / Task* : the list or the single task a step touched. */
+function TaskToolCard({ item }: { readonly item: ToolItem }) {
+	const record = (item.input ?? {}) as Record<string, unknown>;
+	const state = item.result?.isError ? 'failed' : item.result ? 'done' : 'running';
+	const [open, setOpen] = useState(item.name === 'TodoWrite');
+	const mark = (status: unknown) => status === 'completed' ? '✓' : status === 'in_progress' ? '▸' : '○';
+
+	const todos = Array.isArray(record['todos']) ? record['todos'] as readonly Record<string, unknown>[] : [];
+	const rows: { mark: string; text: string }[] = todos.map(todo => ({
+		mark: mark(todo['status']),
+		text: typeof todo['content'] === 'string' ? todo['content'] as string : '',
+	}));
+
+	if (rows.length === 0) {
+		// TaskCreate carries subject/description, TaskUpdate only ids and a status.
+		const field = (key: string) => typeof record[key] === 'string' ? record[key] as string : '';
+		const status = TODO_STATUS_LABEL[field('status')] ?? field('status');
+		const subject = [field('subject'), field('description'), field('task_id') || field('taskId'), status]
+			.filter(Boolean);
+		if (subject.length > 0) {
+			rows.push({ mark: '', text: subject.join(' · ') });
+		}
+	}
+	const done = rows.filter(row => row.mark === '✓').length;
+	// TodoWrite and TaskCreate answer with boilerplate ("Todos have been
+	// modified successfully"), but TaskOutput answers with the log the user
+	// asked for and TaskStop with the reason it could not stop.
+	const output = item.result && !item.result.isError ? item.result.content.trim() : '';
+	const showOutput = output !== '' && (item.name === 'TaskOutput' || item.name === 'TaskStop');
+	return (
+		<details
+			className={`tool-card task-tool-card ${state}`}
+			open={open}
+			onToggle={event => setOpen(event.currentTarget.open)}
+		>
+			<summary className="tool-head">
+				<span className={`tool-dot ${state}`} />
+				<span className="tool-name">{item.name}</span>
+				<span className="tool-file">{item.name === 'TodoWrite' ? `${done}/${rows.length} 完成` : rows[0]?.text ?? ''}</span>
+			</summary>
+			<div className="tool-body">
+				{rows.map((row, index) => (
+					<div key={index} className="task-line">
+						<span className="task-mark">{row.mark}</span>{row.text}
+					</div>
+				))}
+				{showOutput && <pre className="task-log">{truncate(output, 4000)}</pre>}
+				{item.result?.isError && (
+					<div className="edit-note failed">{truncateLine(toolErrorText(item.result.content), 300)}</div>
+				)}
+			</div>
+		</details>
+	);
+}
+
+/** EnterPlanMode / ExitPlanMode: the plan is markdown, not escaped JSON. */
+function PlanCard({ item }: { readonly item: ToolItem }) {
+	const record = (item.input ?? {}) as Record<string, unknown>;
+	const plan = typeof record['plan'] === 'string' ? record['plan'] as string : '';
+	const result = item.result;
+	const state = result?.isError ? 'failed' : result ? 'done' : 'running';
+	const [open, setOpen] = useState(false);
+	// `ExitPlanMode` answers with the approval or the rejection, which is the
+	// only part of the card the user can act on — and it used to be dropped.
+	// `EnterPlanMode` carries no arguments at all, so printing its input only
+	// ever produced a bare `{}`.
+	const note = result ? truncateLine(result.content, 300) : '';
+	const extra = Object.keys(record).filter(key => key !== 'plan');
+	return (
+		<details
+			className={`tool-card plan-card ${state}`}
+			open={open}
+			onToggle={event => setOpen(event.currentTarget.open)}
+		>
+			<summary className="tool-head">
+				<span className={`tool-dot ${state}`} />
+				<span className="tool-name">{item.name === 'ExitPlanMode' ? '提交计划' : '进入计划模式'}</span>
+				<span className="tool-file">{plan === '' ? '' : `${plan.split('\n').length} 行`}</span>
+				{!result && <span className="tool-tag running">运行中</span>}
+			</summary>
+			<div className="tool-body">
+				{plan !== '' && <div className="plan-body"><Markdown text={plan} /></div>}
+				{note !== '' && <div className={`edit-note${result?.isError ? ' failed' : ''}`}>{note}</div>}
+				{plan === '' && note === '' && <div className="tool-pending">等待确认…</div>}
+				{extra.length > 0 && (
+					<details className="tool-raw">
+						<summary>原始参数</summary>
+						<pre className="tool-input">{formatJson(item.input)}</pre>
+					</details>
 				)}
 			</div>
 		</details>
@@ -1974,13 +2339,14 @@ function ToolCard({ item, childrenOf, outputOf }: {
 							<pre className="tool-input">{prompt}</pre>
 						</details>
 					)
-				) : item.name === 'Read' ? (
-					// The arguments of a read are just a path and a line range, and
-					// the summary already shows the path; the numbered text below is
-					// the part worth reading.
-					null
 				) : (
-					<pre className="tool-input">{formatJson(item.input)}</pre>
+					// The arguments of an unrecognised tool stay available, but one
+					// more click away: expanding the card should show what the tool
+					// produced, not a JSON document.
+					<details className="tool-raw">
+						<summary>原始参数</summary>
+						<pre className="tool-input">{formatJson(item.input)}</pre>
+					</details>
 				)}
 
 				{answer && (
@@ -2010,6 +2376,19 @@ function ThinkingBlock({ text, live }: { readonly text: string; readonly live?: 
 	);
 }
 
+/**
+ * The task tools disagree on their parameter name (`taskId` for TaskUpdate,
+ * `task_id` for TaskOutput/TaskStop), so read whichever one is present.
+ */
+function taskId(record: Record<string, unknown>): string {
+	for (const key of ['taskId', 'task_id']) {
+		if (typeof record[key] === 'string') {
+			return record[key] as string;
+		}
+	}
+	return '';
+}
+
 /** Human-readable one-liner for the tool call currently in flight. */
 function activityLabel(item: Extract<Item, { kind: 'tool' }>): string {
 	const record = (item.input ?? {}) as Record<string, unknown>;
@@ -2037,6 +2416,22 @@ function activityLabel(item: Extract<Item, { kind: 'tool' }>): string {
 			return `抓取 ${text('url')}`;
 		case 'WebSearch':
 			return `搜索 ${text('query')}`;
+		case 'AskUserQuestion':
+			return '向你提问';
+		case 'TodoWrite':
+			return '更新任务清单';
+		case 'TaskCreate':
+			return `新建任务：${text('subject')}`;
+		case 'TaskUpdate':
+			return `更新任务 ${taskId(record)}`;
+		case 'TaskOutput':
+			return `读取任务输出 ${taskId(record)}`;
+		case 'TaskStop':
+			return `停止任务 ${taskId(record)}`;
+		case 'ExitPlanMode':
+			return '提交计划';
+		case 'EnterPlanMode':
+			return '进入计划模式';
 		default:
 			return `调用 ${item.name}`;
 	}
