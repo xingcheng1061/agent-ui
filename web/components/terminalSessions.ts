@@ -34,10 +34,34 @@ interface ServerMessage {
 	readonly code?: number;
 }
 
-/** xterm has no palette switching, so both are declared here. */
-const XTERM_THEMES: Record<ThemeName, { background: string; foreground: string; cursor: string }> = {
-	dark: { background: '#181818', foreground: '#d4d4d4', cursor: '#aeafad' },
-	light: { background: '#ffffff', foreground: '#24292f', cursor: '#044289' },
+/**
+ * xterm has no palette switching, so both are declared here.
+ *
+ * `selectionBackground` is not optional: xterm's built-in default is white,
+ * which on the light theme is the same colour as the background — selecting
+ * text looked like nothing had happened. The values are VS Code's.
+ */
+const XTERM_THEMES: Record<ThemeName, {
+	background: string;
+	foreground: string;
+	cursor: string;
+	selectionBackground: string;
+	selectionInactiveBackground: string;
+}> = {
+	dark: {
+		background: '#181818',
+		foreground: '#d4d4d4',
+		cursor: '#aeafad',
+		selectionBackground: '#264f78',
+		selectionInactiveBackground: '#3a3d41',
+	},
+	light: {
+		background: '#ffffff',
+		foreground: '#24292f',
+		cursor: '#044289',
+		selectionBackground: '#add6ff',
+		selectionInactiveBackground: '#e5ebf1',
+	},
 };
 
 /** Silent retries before asking the user; covers transient blips. */

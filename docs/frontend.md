@@ -34,7 +34,7 @@ App.tsx                         会话状态、三栏布局、新建会话对话
 │   ├── CodeHighlight.tsx       shiki 封装
 │   ├── ThinkingBlock           思考块（可折叠，默认收起）
 │   ├── ToolCard                通用工具卡片（<details> 折叠）
-│   └── BashCard                Bash 专用卡片（运行中自动展开，跑完收起）
+│   └── BashCard                Bash 专用卡片（默认收起，点开展开命令与输出）
 ├── Workspace.tsx               代码区
 │   ├── FileTree.tsx            文件树
 │   ├── ChangesList.tsx         git 变更（按目录折叠成树）

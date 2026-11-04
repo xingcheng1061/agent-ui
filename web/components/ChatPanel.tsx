@@ -1609,35 +1609,20 @@ function ChatItemView({ item, childrenOf, outputOf, live = false }: {
 /**
  * Dedicated Bash card. Collapsed it is one line — `❯ <command>` plus a status —
  * expanded it shows the full command (copyable) and the command's output, both
- * syntax highlighted. It starts open and stays open: the output is the whole
- * point of the card, and folding it by default — after a reload, or the moment
- * the command finished — made it look as if nothing had been recorded.
+ * syntax highlighted.
+ *
+ * Collapsed by default, and it stays collapsed while running: a turn that shells
+ * out a dozen times otherwise buries the conversation under output nobody asked
+ * to read. The header keeps the command and the status, so the card still says
+ * what is happening; the output is one click away.
  */
 function BashCard({ item }: { readonly item: Extract<Item, { kind: 'tool' }> }) {
 	const record = (item.input ?? {}) as Record<string, unknown>;
 	const command = typeof record['command'] === 'string' ? record['command'] : '';
 	const description = typeof record['description'] === 'string' ? record['description'] : undefined;
 	const state = item.result?.isError ? 'failed' : item.result ? 'done' : 'running';
-	const [open, setOpen] = useState(true);
+	const [open, setOpen] = useState(false);
 	const [copied, setCopied] = useState(false);
-	const userToggled = useRef(false);
-	const previousState = useRef(state);
-
-	// Follow the run: expand when it starts and leave the output in place when it
-	// ends. Collapsing exactly at that moment made a finished command look like
-	// its result had disappeared the instant the turn wrapped up. A manual toggle
-	// still hands control to the user for the rest of this card's life.
-	useEffect(() => {
-		const was = previousState.current;
-		if (was === state) {
-			return;
-		}
-		previousState.current = state;
-		if (userToggled.current || state !== 'running') {
-			return;
-		}
-		setOpen(true);
-	}, [state]);
 
 	const copy = () => {
 		void navigator.clipboard.writeText(command)
@@ -1656,10 +1641,7 @@ function BashCard({ item }: { readonly item: Extract<Item, { kind: 'tool' }> }) 
 				type="button"
 				className="bash-head"
 				aria-expanded={open}
-				onClick={() => {
-					userToggled.current = true;
-					setOpen(value => !value);
-				}}
+				onClick={() => setOpen(value => !value)}
 				title={command}
 			>
 				<span className={`bash-arrow${open ? ' open' : ''}`} />
