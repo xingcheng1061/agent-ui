@@ -216,3 +216,4 @@ useEffect(() => {
 | 每一轮都卡在审批、5 分钟循环 | `--permission-prompt-tool` 让 CLI 把所有判定都走 MCP，包括 `acceptEdits` 该放行的编辑 |
 | 连上后立刻发第一条消息丢失 | `AgentConnection.start()` 在 `await resolveRoot()` 之后才挂监听。改成连接时先缓冲，接线完再回放 |
 | `<details>` 用 `open` 属性时用户展开后又被自动关上 | React 会按 prop 重新应用。改用本地 state + `onToggle` 同步 |
+| 代码块、JSON 挤成一行 | streamdown 靠 Tailwind 的 `block` 类给每行换行，本仓库没有 Tailwind。`.md pre code > span { display: block }` 补回 |

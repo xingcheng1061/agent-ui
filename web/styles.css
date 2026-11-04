@@ -2312,6 +2312,16 @@ button {
 	line-height: 1.5;
 }
 
+/*
+ * streamdown lays every code line out with Tailwind's `block` class, and this
+ * app ships no Tailwind: without the rule below each line of a fenced block —
+ * code, JSON, diffs — ran together into a single line. Token spans live one
+ * level deeper, so only the line wrappers become blocks.
+ */
+.md pre code > span {
+	display: block;
+}
+
 .md blockquote {
 	margin: 0 0 8px;
 	padding-left: 10px;
