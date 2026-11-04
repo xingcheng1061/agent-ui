@@ -1,5 +1,6 @@
 import { defineConfig, type ProxyOptions } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
 const SERVER_ORIGIN = process.env.AGENT_UI_ORIGIN ?? 'http://127.0.0.1:4711';
 
@@ -20,7 +21,7 @@ function silenceProxyErrors(options: ProxyOptions): ProxyOptions {
 
 export default defineConfig({
 	root: 'web',
-	plugins: [react()],
+	plugins: [react(), tailwindcss()],
 	server: {
 		// 127.0.0.1 rather than 'localhost': the latter binds ::1 only on this
 		// machine, so http://127.0.0.1:4712 looked like a dead port.

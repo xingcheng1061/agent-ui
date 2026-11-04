@@ -1065,10 +1065,45 @@ button {
 .workspace {
 	display: grid;
 	grid-template-columns: 220px 1fr;
+	/* Row 1 is the tree + editor. The terminal adds two implicit rows (its drag
+	   handle and the panel), and `auto` lets them take the height the panel was
+	   given instead of squeezing the editor. */
 	grid-template-rows: minmax(0, 1fr);
+	grid-auto-rows: auto;
 	min-height: 0;
 	overflow: hidden;
 	flex: 1;
+}
+
+/*
+ * Explicit placement for everything in here. The terminal rows span all three
+ * columns — the shell runs underneath the file tree too, only the session rail
+ * (a sibling of this grid) stays clear — and with auto flow the panel would
+ * otherwise land in the empty cell left beside the tree.
+ */
+.workspace > .file-pane {
+	grid-column: 1;
+	grid-row: 1;
+}
+
+.workspace > .splitter.x {
+	grid-column: 2;
+	grid-row: 1;
+}
+
+.workspace > .code-pane {
+	grid-column: 3;
+	grid-row: 1;
+}
+
+.workspace > .splitter.y {
+	grid-column: 1 / -1;
+	grid-row: 2;
+}
+
+.workspace > .terminal-panel {
+	grid-column: 1 / -1;
+	grid-row: 3;
 }
 
 .file-pane {
@@ -1470,6 +1505,9 @@ button {
 	flex-direction: column;
 	border-top: 1px solid var(--border);
 	background: var(--surface-sunken);
+	/* Grid item in a full-width row: without this the xterm canvas sets the
+	   minimum and the panel pushes past the workspace instead of scrolling. */
+	min-width: 0;
 }
 
 /* ---------- agent transcript: tool cards, subagents, task strip ---------- */
@@ -2280,9 +2318,9 @@ button {
 }
 
 /*
- * streamdown marks bold with `<span data-streamdown="strong" class="font-semibold">`
- * — a Tailwind class, and this app ships no Tailwind, so `**bold**` used to come
- * out as plain text.
+ * streamdown marks bold with `<span data-streamdown="strong" class="font-semibold">`.
+ * `tailwind.css` now compiles that utility, so this is belt and braces — and it
+ * keeps the weight correct even if the utility ever disappears from the build.
  */
 .md [data-streamdown='strong'] {
 	font-weight: 600;
@@ -2313,10 +2351,11 @@ button {
 }
 
 /*
- * streamdown lays every code line out with Tailwind's `block` class, and this
- * app ships no Tailwind: without the rule below each line of a fenced block —
- * code, JSON, diffs — ran together into a single line. Token spans live one
- * level deeper, so only the line wrappers become blocks.
+ * streamdown lays every code line out with Tailwind's `block` class. Tailwind
+ * now compiles it, but this rule predates that and costs nothing: without it
+ * every line of a fenced block — code, JSON, diffs — ran together into a single
+ * line. Token spans live one level deeper, so only the line wrappers become
+ * blocks.
  */
 .md pre code > span {
 	display: block;
@@ -2353,10 +2392,10 @@ button {
 }
 
 /*
- * streamdown ships tailwind utilities, which this app does not build, so its
- * table chrome has no layout at all: the copy / download / fullscreen icons sat
- * in block wrappers and stacked vertically. These rules rebuild that chrome
- * against streamdown's `data-streamdown` hooks instead.
+ * streamdown's table chrome (copy / download / fullscreen icons) arrives with
+ * its own tailwind layout. Unlayered rules win over Tailwind's `utilities`
+ * layer, so these still decide the look: the icons sit in a compact strip that
+ * follows the app's tokens instead of streamdown's spacing and palette.
  */
 .md [data-streamdown='table-wrapper'] {
 	display: flex;
@@ -2511,9 +2550,10 @@ button {
 }
 
 /*
- * mermaid diagrams. streamdown styles them with Tailwind classes, which this
- * app does not ship, so the wrapper is rebuilt against its `data-streamdown`
- * hooks — same approach as the table chrome above.
+ * mermaid diagrams. streamdown styles them with Tailwind classes; the wrapper
+ * is rebuilt against its `data-streamdown` hooks — same approach as the table
+ * chrome above, and still the winning one since unlayered rules outrank
+ * Tailwind's utilities layer.
  */
 .md [data-streamdown='mermaid-block'] {
 	margin: 0 0 10px;

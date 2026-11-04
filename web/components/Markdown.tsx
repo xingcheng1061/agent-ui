@@ -31,7 +31,7 @@ function mermaidConfig(theme: ThemeName) {
 /**
  * Markdown renderer for agent output.
  *
- * Wraps `streamdown` (MIT, https://github.com/vercel/streamdown) — a renderer
+ * Wraps `streamdown` (Apache-2.0, https://github.com/vercel/streamdown) — a renderer
  * built for streaming LLM responses. Unlike plain react-markdown it repairs
  * unterminated constructs on every render, so a half-received ` ```ts ` fence or
  * `**bold` does not flash as raw text before closing.
@@ -42,8 +42,9 @@ function mermaidConfig(theme: ThemeName) {
  * swallowed as formulas. LaTeX's `\(…\)` / `\[…\]` are not delimiters here and
  * come out as literal text.
  *
- * streamdown's `styles.css` only ships animations, so all typography comes from
- * the `.md` rules in `styles.css` to match the app theme.
+ * streamdown's `styles.css` only ships animations: the utilities it emits are
+ * compiled by `web/tailwind.css` (mapped onto this app's theme tokens), and the
+ * typography comes from the `.md` rules in `styles.css`, which outrank them.
  */
 export function Markdown({ text, streaming = false, mermaid = false, controls }: MarkdownProps) {
 	const [diagram, setDiagram] = useState<DiagramPlugin | undefined>(undefined);

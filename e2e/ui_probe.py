@@ -117,8 +117,8 @@ VISUAL_JS = r"""
 			});
 		}
 	});
-	// streamdown draws its own toolbar; with no Tailwind build it collapses into a
-	// column unless the app restores it. One row means all tops are equal.
+	// streamdown draws its own toolbar; stacked in a column it reads as broken.
+	// One row means all tops are equal.
 	document.querySelectorAll('[data-streamdown="table-wrapper"] > div:first-child').forEach(row => {
 		const tops = Array.from(row.children).map(child => Math.round(child.getBoundingClientRect().top));
 		if (new Set(tops).size > 1) {

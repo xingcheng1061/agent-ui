@@ -88,8 +88,8 @@ class Checker:
 
 def assert_markdown(check: Checker, scope: str, label: str) -> None:
     check.check(label + ' 标题 <h1>', check.text(scope + ' h1') == '渲染探针', check.text(scope + ' h1'))
-    # streamdown renders emphasis as `<span data-streamdown="strong">`, and the
-    # weight has to come from this app's CSS (there is no Tailwind build).
+    # streamdown renders emphasis as `<span data-streamdown="strong">`; the
+    # weight comes from the app's own `.md` rule, which outranks the utility.
     weight = check.js(
         "const node = document.querySelector(arguments[0] + \" [data-streamdown='strong']\");"
         "return node ? getComputedStyle(node).fontWeight : '';", scope)

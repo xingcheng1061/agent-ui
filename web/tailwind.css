@@ -1,0 +1,70 @@
+/*
+ * Tailwind, used only to style streamdown's rendered markdown.
+ *
+ * streamdown emits utility classes (`font-semibold`, `flex`, `text-muted-foreground`,
+ * `dark:bg-[...]`) and expects the host app to compile them. The rest of this app
+ * uses hand-written semantic CSS, so:
+ *
+ *  - preflight is NOT imported: a global CSS reset would rewrite 3000 lines of
+ *    layout. Only the one declaration Tailwind's border utilities depend on is
+ *    recreated below, scoped to `.md`.
+ *  - utilities live in a `utilities` layer, so the unlayered `.md` rules in
+ *    styles.css still win whenever both target the same element. Tailwind only
+ *    fills in the parts we never restyled (code block buttons, table chrome,
+ *    mermaid captions, footnote markers, error boxes).
+ */
+@layer theme, base, components, utilities;
+
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/utilities.css' layer(utilities);
+
+/* node_modules is gitignored, so automatic source detection cannot see these. */
+@source '../node_modules/streamdown/dist';
+@source '../node_modules/@streamdown';
+/* Allow utilities in our own components too; nothing there carries a Tailwind
+   class today, so this only matters for future markup. */
+@source './';
+
+/* Dark is the default: `data-theme` is absent until the user picks light. */
+@custom-variant dark (&:where(:root:not([data-theme='light']), :root:not([data-theme='light']) *));
+
+/*
+ * streamdown uses shadcn-style semantic color names rather than fixed shades.
+ * Those names are not in Tailwind's default theme — defining them here both
+ * generates the utilities and binds them to this app's theme tokens, so a
+ * `bg-background` or `text-muted-foreground` follows light/dark automatically.
+ */
+@theme inline {
+	--color-background: var(--bg);
+	--color-foreground: var(--fg);
+	--color-muted: var(--surface-inset);
+	--color-muted-foreground: var(--fg-dim);
+	--color-border: var(--border);
+	--color-primary: var(--primary);
+	--color-primary-foreground: #ffffff;
+	--color-sidebar: var(--surface-raised);
+
+	/* Error states (mermaid failures, invalid code) should not paint a fixed
+	   near-white card into the dark theme. */
+	--color-red-50: var(--danger-bg);
+	--color-red-100: var(--danger-bg);
+	--color-red-600: var(--danger-text);
+	--color-red-700: var(--danger-text);
+	--color-red-800: var(--danger-text);
+}
+
+/*
+ * Preflight normally supplies `border-style: solid; border-width: 0` to every
+ * element. Without it, `border`, `border-b-2` and `border-l-4` set a width on a
+ * `border-style: none` element and draw nothing. Recreate just that bit inside
+ * markdown; our unlayered rules (e.g. `.md pre { border: 1px solid … }`) still
+ * take precedence.
+ */
+@layer base {
+	.md *,
+	.md *::before,
+	.md *::after {
+		border-width: 0;
+		border-style: solid;
+	}
+}

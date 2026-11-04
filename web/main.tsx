@@ -3,6 +3,9 @@ import { createRoot } from 'react-dom/client';
 import { reportClientLog } from './api';
 import { App } from './App';
 import './monacoSetup';
+// Utilities for streamdown's markdown output. Loaded before the app styles;
+// Tailwind's rules are layered, so `styles.css` keeps the final say.
+import './tailwind.css';
 import './styles.css';
 // Applies `data-theme` before the first paint, so there is no flash of the
 // wrong palette. Must run before the styles are used.

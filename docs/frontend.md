@@ -122,7 +122,7 @@ xterm 接管了键盘和鼠标，浏览器的默认行为基本到不了终端�
 
 ### Markdown
 
-`streamdown`（Vercel，MIT），选它的理由是 `remend` 会修复未闭合的 Markdown——流式中途的 `**粗体` 不会闪原始符号。
+`streamdown`（Vercel，Apache-2.0），选它的理由是 `remend` 会修复未闭合的 Markdown——流式中途的 `**粗体` 不会闪原始符号。
 
 ```tsx
 <Streamdown mode={streaming ? 'streaming' : 'static'} parseIncompleteMarkdown plugins={{ math }}>
@@ -130,7 +130,13 @@ xterm 接管了键盘和鼠标，浏览器的默认行为基本到不了终端�
 
 - `mode` 只对**正在接收 delta 的那一条**用 `streaming`，历史消息用 `static`
 - 数学公式走 `@streamdown/math`（KaTeX）。**只认 `$$…$$` 和 `\[…\]`**，单美元 `$…$` 故意关掉——agent 输出里 `$HOME`、`$5` 太常见，会被当成公式吞掉
-- `streamdown/styles.css` 只带动画，排版全部自己写（`.md` 系列规则）
+- `streamdown/styles.css` 只带动画，排版由 `web/tailwind.css` + `.md` 系列规则共同负责
+
+Tailwind 只服务 markdown，接入时有三条硬约束（`web/tailwind.css`）：
+
+1. **不引入 preflight**。全局 reset 会推翻 `styles.css` 那 3000 行布局。只补回 Tailwind 边框工具依赖的一条（`border-style: solid; border-width: 0`），并且限定在 `.md` 子树里
+2. **utilities 在 `@layer utilities` 里**。`styles.css` 是无层样式，优先级永久高于任何 utility，所以手写规则仍然说了算；Tailwind 只补我们从没重写过的那部分（代码块按钮、脚注、错误卡片）
+3. **语义色映射到主题 token**。streamdown 用的是 shadcn 风格的名字（`bg-background`、`text-muted-foreground`、`border-border`），这些不在 Tailwind 默认主题里，正好在 `@theme inline` 里绑到 `--bg` / `--fg-dim` / `--border`，明暗主题自动跟随；`dark:` 变体也改绑到 `:root:not([data-theme='light'])`，而不是默认的 `prefers-color-scheme`
 
 ### 语法高亮
 
@@ -216,4 +222,5 @@ useEffect(() => {
 | 每一轮都卡在审批、5 分钟循环 | `--permission-prompt-tool` 让 CLI 把所有判定都走 MCP，包括 `acceptEdits` 该放行的编辑 |
 | 连上后立刻发第一条消息丢失 | `AgentConnection.start()` 在 `await resolveRoot()` 之后才挂监听。改成连接时先缓冲，接线完再回放 |
 | `<details>` 用 `open` 属性时用户展开后又被自动关上 | React 会按 prop 重新应用。改用本地 state + `onToggle` 同步 |
-| 代码块、JSON 挤成一行 | streamdown 靠 Tailwind 的 `block` 类给每行换行，本仓库没有 Tailwind。`.md pre code > span { display: block }` 补回 |
+| 代码块、JSON 挤成一行 | streamdown 靠 Tailwind 的 `block` 类给每行换行，当时本仓库没有 Tailwind。`.md pre code > span { display: block }` 补回，后来接入了 Tailwind 仍保留 |
+| 加粗不生效 | `font-semibold` 是 Tailwind 类，早先没编译。`.md [data-streamdown='strong']` 兜底 |

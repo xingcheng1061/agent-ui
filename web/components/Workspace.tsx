@@ -370,59 +370,65 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 							/>
 						)
 						: <div className="placeholder">Ctrl+S 保存 · 终端在该项目根目录启动</div>}
-
-				{terminalOpen && (
-					<>
-						<Splitter axis="y" onResize={delta => setTerminalHeight(clamp(terminalHeight - delta, 100, 720))} />
-						<section className="terminal-panel" style={{ height: terminalHeight }}>
-							<div className="terminal-tabs">
-								{terminals.map(candidate => (
-									<button
-										type="button"
-										key={candidate.id}
-										className={`terminal-tab${candidate.id === activeTerminal ? ' active' : ''}`}
-										onClick={() => setActiveTerminal(candidate.id)}
-										onDoubleClick={() => {
-											const next = window.prompt('终端名称', candidate.title);
-											if (next && next.trim()) {
-												void renameTerminal(candidate.id, next).then(updated => {
-													if (updated) {
-														void reloadTerminals();
-													}
-												});
-											}
-										}}
-										title={`${candidate.title}\n${candidate.root}\n双击重命名`}
-									>
-										{candidate.title}
-										<span
-											className="terminal-tab-close"
-											role="button"
-											tabIndex={-1}
-											onClick={event => {
-												// Nested inside the tab button: stop the switch.
-												event.stopPropagation();
-												void removeTerminal(candidate.id);
-											}}
-										>×</span>
-									</button>
-								))}
-								<button type="button" className="terminal-tab add" onClick={() => void addTerminal()} title="新建终端">+</button>
-								<span className="spacer" />
-								<span className="terminal-path">{active?.root ?? root}</span>
-							</div>
-							{activeTerminal && (
-								<TerminalView
-									key={activeTerminal}
-									terminalId={activeTerminal}
-									root={root}
-									onOpenTarget={openFromTerminal}
-								/>
-							)}
-						</section>
-					</>
-				)}
 			</div>
+
+			{/*
+			 * Deliberately outside `.code-pane`: the panel is a row of the workspace
+			 * grid spanning all three columns, so the shell runs edge to edge under
+			 * the file tree instead of stopping at the editor's left border. The
+			 * session rail is a sibling of this grid and stays clear.
+			 */}
+			{terminalOpen && (
+				<>
+					<Splitter axis="y" onResize={delta => setTerminalHeight(clamp(terminalHeight - delta, 100, 720))} />
+					<section className="terminal-panel" style={{ height: terminalHeight }}>
+						<div className="terminal-tabs">
+							{terminals.map(candidate => (
+								<button
+									type="button"
+									key={candidate.id}
+									className={`terminal-tab${candidate.id === activeTerminal ? ' active' : ''}`}
+									onClick={() => setActiveTerminal(candidate.id)}
+									onDoubleClick={() => {
+										const next = window.prompt('终端名称', candidate.title);
+										if (next && next.trim()) {
+											void renameTerminal(candidate.id, next).then(updated => {
+												if (updated) {
+													void reloadTerminals();
+												}
+											});
+										}
+									}}
+									title={`${candidate.title}\n${candidate.root}\n双击重命名`}
+								>
+									{candidate.title}
+									<span
+										className="terminal-tab-close"
+										role="button"
+										tabIndex={-1}
+										onClick={event => {
+											// Nested inside the tab button: stop the switch.
+											event.stopPropagation();
+											void removeTerminal(candidate.id);
+										}}
+									>×</span>
+								</button>
+							))}
+							<button type="button" className="terminal-tab add" onClick={() => void addTerminal()} title="新建终端">+</button>
+							<span className="spacer" />
+							<span className="terminal-path">{active?.root ?? root}</span>
+						</div>
+						{activeTerminal && (
+							<TerminalView
+								key={activeTerminal}
+								terminalId={activeTerminal}
+								root={root}
+								onOpenTarget={openFromTerminal}
+							/>
+						)}
+					</section>
+				</>
+			)}
 		</div>
 	);
 }
