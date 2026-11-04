@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { Router } from 'express';
 import { MAX_FILE_SIZE } from './config.js';
@@ -106,4 +107,126 @@ fsRouter.post('/write', async (req, res) => {
 
 	await fs.writeFile(absolute, content, 'utf8');
 	res.json({ ok: true, path: relative });
+});
+
+/**
+ * New file or directory from the tree.
+ *
+ * An existing entry is an error on purpose: the inline input is one mistyped
+ * keystroke away from a file that already has content, and truncating it is
+ * not something a "new file" action may do.
+ */
+fsRouter.post('/create', async (req, res) => {
+	const body: unknown = req.body;
+	if (typeof body !== 'object' || body === null) {
+		throw new BadRequestError('Expected a JSON body.');
+	}
+	const { root, path: relative, type } = body as { root?: unknown; path?: unknown; type?: unknown };
+	if (typeof root !== 'string' || typeof relative !== 'string' || typeof type !== 'string') {
+		throw new BadRequestError('`root`, `path` and `type` are required.');
+	}
+	if (type !== 'file' && type !== 'dir') {
+		throw new BadRequestError('`type` must be "file" or "dir".');
+	}
+
+	const resolvedRoot = await resolveRoot(root);
+	const absolute = toAbsolute(resolvedRoot, relative.trim());
+	if (absolute === resolvedRoot) {
+		throw new BadRequestError('The project root already exists.');
+	}
+	const parent = path.dirname(absolute);
+	const parentStat = await fs.stat(parent).catch(() => undefined);
+	if (!parentStat?.isDirectory()) {
+		throw new BadRequestError(`目录不存在：${toRelative(resolvedRoot, parent)}`);
+	}
+
+	try {
+		if (type === 'dir') {
+			await fs.mkdir(absolute);
+		} else {
+			// `wx` fails instead of truncating, which is what the check above is for.
+			await fs.writeFile(absolute, '', { encoding: 'utf8', flag: 'wx' });
+		}
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+			res.status(409).json({ error: `同名文件或目录已存在：${relative}` });
+			return;
+		}
+		throw error;
+	}
+
+	res.json({ ok: true, path: toRelative(resolvedRoot, absolute), type });
+});
+
+/** Deletes one entry from the tree; a directory goes with everything inside it. */
+fsRouter.delete('/delete', async (req, res) => {
+	const body: unknown = req.body;
+	if (typeof body !== 'object' || body === null) {
+		throw new BadRequestError('Expected a JSON body.');
+	}
+	const { root, path: relative } = body as { root?: unknown; path?: unknown };
+	if (typeof root !== 'string' || typeof relative !== 'string' || relative.trim() === '') {
+		throw new BadRequestError('`root` and `path` are required.');
+	}
+
+	const resolvedRoot = await resolveRoot(root);
+	const absolute = toAbsolute(resolvedRoot, relative.trim());
+	// Deleting the root would take the whole project, sessions included.
+	if (absolute === resolvedRoot) {
+		throw new BadRequestError('不能删除项目根目录。');
+	}
+
+	const stat = await fs.stat(absolute).catch(() => undefined);
+	if (!stat) {
+		res.status(404).json({ error: `不存在：${relative}` });
+		return;
+	}
+	// `rm` on a symlink removes the link, not what it points at.
+	await fs.rm(absolute, { recursive: stat.isDirectory(), force: false });
+	res.json({ ok: true });
+});
+
+/**
+ * Directory search for the project picker.
+ *
+ * Typing `agent` should find a nested checkout, not only a child of whichever
+ * directory the picker happens to be showing, so this walks downwards from the
+ * current one. Bounded like the file search: depth, scanned entries, results.
+ */
+fsRouter.get('/find-dirs', async (req, res) => {
+	const requested = typeof req.query['path'] === 'string' ? req.query['path'] : '';
+	const start = requested ? path.resolve(requested) : os.homedir();
+	const query = (typeof req.query['q'] === 'string' ? req.query.q : '').trim().toLowerCase();
+	if (query.length < 2) {
+		res.json({ path: start, directories: [], truncated: false });
+		return;
+	}
+
+	const directories: { name: string; path: string }[] = [];
+	let scanned = 0;
+	const walk = async (directory: string, depth: number): Promise<void> => {
+		if (depth > 5 || scanned > 8000 || directories.length >= 40) {
+			return;
+		}
+		const dirents = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+		for (const dirent of dirents) {
+			if (scanned++ > 8000 || directories.length >= 40) {
+				return;
+			}
+			if (!dirent.isDirectory() || shouldIgnore(dirent.name)) {
+				continue;
+			}
+			const absolute = path.join(directory, dirent.name);
+			if (dirent.name.toLowerCase().includes(query)) {
+				directories.push({ name: dirent.name, path: absolute });
+			}
+			await walk(absolute, depth + 1);
+		}
+	};
+
+	await walk(start, 0);
+	// Prefix matches read as "the one I meant"; the rest by depth then name.
+	const rank = (entry: { name: string }) => entry.name.toLowerCase().startsWith(query) ? 0 : 1;
+	directories.sort((a, b) => rank(a) - rank(b) || a.path.length - b.path.length || a.name.localeCompare(b.name));
+	res.json({ path: start, directories, truncated: directories.length >= 40 });
 });

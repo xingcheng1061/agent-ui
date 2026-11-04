@@ -125,6 +125,21 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 		setReloadToken(value => value + 1);
 	}, [revision]);
 
+	/**
+	 * The tree loads a directory once, so a file the agent just created stayed
+	 * invisible until the project was remounted. Bumped on every finished turn,
+	 * and by the refresh button for the cases nobody signals.
+	 */
+	const [treeReload, setTreeReload] = useState(0);
+	const treeRevisionRef = useRef(revision);
+	useEffect(() => {
+		if (treeRevisionRef.current === revision) {
+			return;
+		}
+		treeRevisionRef.current = revision;
+		setTreeReload(value => value + 1);
+	}, [revision]);
+
 	const reloadFile = () => {
 		const target = openedRef.current;
 		if (!target) {
@@ -252,6 +267,12 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 						className={`pane-tab${leftTab === 'changes' ? ' active' : ''}`}
 						onClick={() => setLeftTab('changes')}
 					>变更{changeCount > 0 ? ` ${changeCount}` : ''}</button>
+					<button
+						type="button"
+						className="pane-tab icon"
+						title="重新读取文件列表（agent 新建的文件会在每轮结束时自动出现）"
+						onClick={() => setTreeReload(value => value + 1)}
+					>↻</button>
 				</div>
 
 				{leftTab === 'files'
@@ -259,7 +280,21 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 						<FileTree
 							root={root}
 							selectedPath={selectedFile}
+							reloadToken={treeReload}
 							onOpenFile={filePath => openFileFrom({ root, path: filePath })}
+							onPathDeleted={deletedPath => {
+								// The open file may be the deleted one, or live inside a
+								// deleted directory: either way the tab has nothing to show.
+								const current = openedRef.current;
+								if (current && sameRoot(current.root, root)
+									&& (current.path === deletedPath || current.path.startsWith(`${deletedPath}/`))) {
+									setOpened(undefined);
+									writeOpenFile(root, undefined);
+								}
+								if (diffPath === deletedPath || diffPath?.startsWith(`${deletedPath}/`)) {
+									setDiffPath(undefined);
+								}
+							}}
 						/>
 					)
 					: (

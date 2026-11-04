@@ -178,6 +178,37 @@ export function writeFile(root: string, filePath: string, content: string): Prom
 	});
 }
 
+/** Creates an empty file or a directory; an existing path is refused. */
+export function createEntry(root: string, filePath: string, type: 'file' | 'dir'): Promise<{ ok: boolean }> {
+	return requestJson('/api/fs/create', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ root, path: filePath, type }),
+	});
+}
+
+/** Deletes a file, or a directory with everything inside it. */
+export function deleteEntry(root: string, filePath: string): Promise<{ ok: boolean }> {
+	return requestJson('/api/fs/delete', {
+		method: 'DELETE',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ root, path: filePath }),
+	});
+}
+
+export interface DirectoryHit {
+	readonly name: string;
+	readonly path: string;
+}
+
+/** Directories under `start` whose name matches; bounded server-side. */
+export async function findDirectories(start: string, query: string): Promise<readonly DirectoryHit[]> {
+	const result = await requestJson<{ directories: DirectoryHit[] }>(
+		`/api/fs/find-dirs?path=${encodeURIComponent(start)}&q=${encodeURIComponent(query)}`,
+	);
+	return result.directories;
+}
+
 export interface GitFileEntry {
 	readonly path: string;
 	readonly status: string;

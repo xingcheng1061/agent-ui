@@ -550,6 +550,23 @@ button {
 	color: var(--fg);
 }
 
+/* Filter box over the existing-project list. */
+.modal-search {
+	flex: none;
+	margin: 8px 8px 0;
+	background: var(--bg);
+	color: var(--fg);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	padding: 5px 8px;
+	font-size: 12px;
+	outline: none;
+}
+
+.modal-search:focus {
+	border-color: var(--accent);
+}
+
 .modal-list {
 	overflow: auto;
 	padding: 8px;
@@ -602,7 +619,14 @@ button {
 	padding: 8px 8px 4px;
 }
 
-.browse-path input {
+/* Directory search sits under the path box and filters a walk, not the list. */
+.browse-search {
+	display: flex;
+	padding: 4px 8px 0;
+}
+
+.browse-path input,
+.browse-search input {
 	flex: 1;
 	min-width: 0;
 	background: var(--bg);
@@ -615,7 +639,8 @@ button {
 	outline: none;
 }
 
-.browse-path input:focus {
+.browse-path input:focus,
+.browse-search input:focus {
 	border-color: var(--accent);
 }
 
@@ -1085,6 +1110,12 @@ button {
 	color: var(--bg-active-fg);
 }
 
+/* The refresh button sits beside the tabs instead of stretching like them. */
+.pane-tab.icon {
+	flex: none;
+	padding: 3px 7px;
+}
+
 .change-list {
 	display: flex;
 	flex-direction: column;
@@ -1342,6 +1373,95 @@ button {
 
 .tree-hint.error {
 	color: var(--danger);
+}
+
+/* Filter boxes above the file tree and the change list. */
+.tree-search {
+	display: flex;
+	padding: 6px 8px 4px;
+}
+
+.tree-search input {
+	flex: 1;
+	min-width: 0;
+	background: var(--bg-sunken);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	color: var(--fg);
+	font-size: 11.5px;
+	padding: 3px 7px;
+	outline: none;
+}
+
+.change-search {
+	margin: 0 8px 6px;
+	background: var(--bg-sunken);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	color: var(--fg);
+	font-size: 11.5px;
+	padding: 3px 7px;
+	outline: none;
+}
+
+.tree-search input:focus,
+.change-search:focus {
+	border-color: var(--accent);
+}
+
+/* The inline "new file / new folder" input, in place of a row. */
+.tree-input {
+	flex: 1;
+	min-width: 0;
+	background: var(--bg-sunken);
+	border: 1px solid var(--accent);
+	border-radius: 3px;
+	color: var(--fg);
+	font-family: var(--font-mono);
+	font-size: 11.5px;
+	padding: 1px 4px;
+	outline: none;
+}
+
+/* Right-click menu: 新建文件 / 新建文件夹 / 删除. */
+.tree-menu {
+	position: fixed;
+	z-index: 30;
+	min-width: 160px;
+	padding: 4px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	background: var(--bg-elevated);
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.tree-menu button {
+	background: transparent;
+	border: none;
+	border-radius: 4px;
+	color: var(--fg);
+	font-size: 12px;
+	text-align: left;
+	padding: 5px 10px;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.tree-menu button:hover {
+	background: var(--bg-hover);
+}
+
+.tree-menu button.danger {
+	color: var(--danger);
+}
+
+.tree-menu-sep {
+	height: 1px;
+	margin: 3px 4px;
+	background: var(--border);
 }
 
 .terminal-panel {

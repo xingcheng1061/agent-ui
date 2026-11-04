@@ -92,6 +92,9 @@ export function ChangesList({ root, activePath, revision, onSelect, onCountChang
 	const [error, setError] = useState<string | undefined>(undefined);
 	/** Folder paths the user folded shut; everything starts open. */
 	const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set());
+	/** Filter box: matches are shown flat, with their full path. */
+	const [query, setQuery] = useState('');
+	const trimmedQuery = query.trim().toLowerCase();
 
 	useEffect(() => {
 		let cancelled = false;
@@ -138,6 +141,12 @@ export function ChangesList({ root, activePath, revision, onSelect, onCountChang
 	}, [activePath]);
 
 	const tree = useMemo(() => buildTree(status?.files ?? []), [status]);
+	const matches = useMemo(
+		() => (trimmedQuery === ''
+			? []
+			: (status?.files ?? []).filter(file => file.path.toLowerCase().includes(trimmedQuery))),
+		[status, trimmedQuery],
+	);
 
 	if (error) {
 		return <div className="rail-empty">{error}</div>;
@@ -165,17 +174,62 @@ export function ChangesList({ root, activePath, revision, onSelect, onCountChang
 		<div className="change-list">
 			<div className="change-branch">
 				<span>{status.branch || '(no commits yet)'}</span>
-				<span className="change-count">{status.files.length} 个文件</span>
+				<span className="change-count">
+					{trimmedQuery === '' ? `${status.files.length} 个文件` : `${matches.length} / ${status.files.length} 个文件`}
+				</span>
 			</div>
-			{status.files.length === 0 && <div className="rail-empty">工作区干净</div>}
-			<TreeRows
-				nodes={tree}
-				depth={0}
-				folded={folded}
-				activePath={activePath}
-				onToggle={toggle}
-				onSelect={onSelect}
+			<input
+				className="change-search"
+				value={query}
+				onChange={event => setQuery(event.target.value)}
+				onKeyDown={event => {
+					if (event.key === 'Escape') {
+						setQuery('');
+					}
+					// Enter jumps to the first match, like a quick filter.
+					if (event.key === 'Enter' && matches.length > 0) {
+						onSelect(matches[0]!.path);
+					}
+				}}
+				placeholder="过滤变更文件"
+				spellCheck={false}
 			/>
+			{trimmedQuery !== ''
+				? (
+					<>
+						{matches.length === 0 && <div className="rail-empty">没有匹配「{query.trim()}」的变更</div>}
+						{matches.map(file => (
+							<button
+								type="button"
+								key={file.path}
+								className={`change-row${file.path === activePath ? ' active' : ''}`}
+								style={{ paddingLeft: 6 }}
+								onClick={() => onSelect(file.path)}
+								title={file.path}
+							>
+								<span className={`change-status ${statusClass(file.status)}`}>{file.status}</span>
+								<span className="change-path">{file.path}</span>
+								<span className="change-stat">
+									{file.insertions > 0 && <span className="add">+{file.insertions}</span>}
+									{file.deletions > 0 && <span className="del">-{file.deletions}</span>}
+								</span>
+							</button>
+						))}
+					</>
+				)
+				: (
+					<>
+						{status.files.length === 0 && <div className="rail-empty">工作区干净</div>}
+						<TreeRows
+							nodes={tree}
+							depth={0}
+							folded={folded}
+							activePath={activePath}
+							onToggle={toggle}
+							onSelect={onSelect}
+						/>
+					</>
+				)}
 		</div>
 	);
 }
