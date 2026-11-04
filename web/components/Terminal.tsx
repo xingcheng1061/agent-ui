@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { acquireTerminalSession, peekTerminalState, type TerminalSession, type TerminalState } from './terminalSessions';
+import type { TerminalTarget } from './terminalPaths';
+
+interface TerminalViewProps {
+	readonly terminalId: string;
+	/** Base for relative paths printed in the screen. */
+	readonly root: string;
+	/** Ctrl+click on a path: open it in the code pane. */
+	readonly onOpenTarget: (target: TerminalTarget) => void;
+}
 
 /**
  * One terminal tab.
@@ -8,9 +17,14 @@ import { acquireTerminalSession, peekTerminalState, type TerminalSession, type T
  * so unmounting this — switching to another project, closing the panel — no
  * longer closes the connection or loses the screen. See that file for why.
  */
-export function TerminalView({ terminalId }: { readonly terminalId: string }) {
+export function TerminalView({ terminalId, root, onOpenTarget }: TerminalViewProps) {
 	const slotRef = useRef<HTMLDivElement | null>(null);
 	const sessionRef = useRef<TerminalSession | undefined>(undefined);
+	// The screen outlives this component, so the handler it calls is read
+	// through a ref: re-registering one on every render would be churn, and a
+	// stale closure would open files against the previous project root.
+	const openTargetRef = useRef(onOpenTarget);
+	openTargetRef.current = onOpenTarget;
 	// Seeded from the pool: coming back to a live screen must not paint an
 	// overlay first and hide it again on the next tick.
 	const [state, setState] = useState<TerminalState>(() => peekTerminalState(terminalId));
@@ -22,6 +36,7 @@ export function TerminalView({ terminalId }: { readonly terminalId: string }) {
 		}
 		const session = acquireTerminalSession(terminalId);
 		sessionRef.current = session;
+		session.setOpenTargetHandler(root, target => openTargetRef.current(target));
 		session.attach(slot);
 		const stopState = session.watchState(setState);
 		const observer = new ResizeObserver(() => session.fit());
@@ -29,13 +44,14 @@ export function TerminalView({ terminalId }: { readonly terminalId: string }) {
 		return () => {
 			observer.disconnect();
 			stopState();
+			session.setOpenTargetHandler(root, undefined);
 			// Not a teardown: the screen and its socket go back to the pool.
 			session.detach(slot);
 			if (sessionRef.current === session) {
 				sessionRef.current = undefined;
 			}
 		};
-	}, [terminalId]);
+	}, [terminalId, root]);
 
 	return (
 		<div className="terminal-host">

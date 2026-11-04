@@ -19,7 +19,7 @@
 | 工具可视化 | `tool_use`/`tool_result` 配对；子 agent（`Agent` 工具）嵌套展示；后台任务实时输出轮询 |
 | 控制 | 运行时切模型 / 切权限模式；优雅中断；强制结束；消息排队；工具审批（允许 / 总是允许 / 拒绝） |
 | 代码 | Monaco 编辑、文件树、git 变更按目录折叠、只读 diff、agent 每轮结束自动刷新变更 |
-| 终端 | `node-pty` 真终端，**多标签**，shell 与连接都活在服务端池子里（切标签/切项目/刷新都不重连），真断线时回放最近几屏输出 |
+| 终端 | `node-pty` 真终端，**多标签**，shell 与连接都活在服务端池子里（切标签/切项目/刷新都不重连），真断线时回放最近几屏输出；`Ctrl+C`/`Ctrl+V` 复制粘贴，`Ctrl+单击` 路径直接在代码区打开（支持 `path:12`，跨项目绝对路径也行） |
 | 账户 | 登录鉴权，账号密码存 `~/.agent-ui/users.json`（scrypt 哈希），会话令牌走 HttpOnly Cookie |
 | 布局 | 会话列表 / 对话 / 代码 三栏，所有分隔线可拖拽，宽度持久化 |
 | 主题 | 暗色 / 明亮双主题，跟随系统，选择持久化 |
@@ -166,6 +166,7 @@ agent-ui/
 │       ├── FileTree.tsx       # 文件树
 │       ├── Terminal.tsx       # 终端视图（一根槽，挂载/脱离）
 │       ├── terminalSessions.ts # 终端屏幕池：xterm 与 socket 都在这里
+│       ├── terminalPaths.ts   # 终端里的路径 → 绝对路径 / 归属项目
 │       ├── AuthPage.tsx       # 登录 / 首次创建管理员
 │       ├── SessionSidebar.tsx # 会话列表
 │       ├── NewSessionDialog.tsx

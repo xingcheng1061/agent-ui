@@ -41,7 +41,9 @@ App.tsx                         会话状态、三栏布局、新建会话对话
 │   ├── Editor.tsx              Monaco 编辑器
 │   ├── DiffView.tsx            Monaco diff（HEAD ↔ 工作区）
 │   ├── workspaceState.ts       按项目记忆：打开的文件 / 左栏页签 / 光标位置
-│   └── Terminal.tsx            xterm + fit addon
+│   ├── Terminal.tsx            xterm + fit addon
+│   ├── terminalSessions.ts     屏幕/连接池（跨挂载存活）+ 复制粘贴 + 链接提供器
+│   └── terminalPaths.ts        终端里的路径 → 绝对路径 / 归属项目
 ├── NewSessionDialog.tsx        目录选择（/api/fs/browse）
 └── Splitter.tsx                拖拽分隔线 + usePersistedSize
 ```
@@ -99,6 +101,20 @@ Monaco 的 model 是**按 URI 缓存**的：文件第一次打开时从磁盘读
 `reloadToken` 是 Editor 唯一的外部刷新信号：只有它变化才会重读磁盘，替换时保留光标与滚动位置。
 
 视图记忆放在 `workspaceState.ts`（localStorage，`agentui.workspace`，root 归一化后作 key）：打开的文件、左栏页签、每个文件的光标行列与滚动位置。`Workspace` 以 `key={root}` 挂载，切项目必重挂，所以这些状态只能落在组件外；恢复打开文件前会先 `readFile` 探活，文件已被删除就清掉记忆而不是开一个报错页。
+
+## 终端：复制粘贴与路径链接
+
+xterm 接管了键盘和鼠标，浏览器的默认行为基本到不了终端里，所以这两件事都得自己实现（`terminalSessions.ts` + `terminalPaths.ts`）。
+
+| 操作 | 行为 |
+|---|---|
+| `Ctrl+C`（有选中）/ `Ctrl+Shift+C` / `Ctrl+Insert` | 复制选中内容。**没有选中时 `Ctrl+C` 仍然是 SIGINT** |
+| `Ctrl+V` / `Ctrl+Shift+V` / `Shift+Insert` | 粘贴，走 `term.paste()`：shell 开了 bracketed paste 时整段插入，不会逐行执行 |
+| macOS | 上述修饰键换成 `Cmd` |
+
+- 剪贴板**写入**在非安全上下文（http + 局域网 IP）下没有 `navigator.clipboard`，退到 `execCommand('copy')`；**读取**没有兜底，这种情况会打印一次提示，要求改用 localhost 或 HTTPS 访问。
+- 路径链接由 `registerLinkProvider` 提供：每行渲染时用正则找出「带扩展名的路径」，支持 `path:12`、`path:12:5`、`path:12-20`。只有 `Ctrl/⌘ + 单击`才激活（与 VS Code 一致，普通点击仍然只是选中文本），带行号的会 `revealLineInCenter` 跳过去。
+- 相对路径以**终端的项目根**为基准；shell 里 `cd` 过之后不会跟随，因为没有 shell integration（OSC 633）可读。绝对路径先在已打开的项目列表里找归属，命中后按那个项目的 root 打开——服务端只允许读已知 root 下的文件，所以跨项目是「换一个 root 去读」，不是放开越权。
 
 ## 渲染管线
 

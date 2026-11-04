@@ -18,11 +18,17 @@ interface EditorProps {
 	 * from its reload button.
 	 */
 	readonly reloadToken?: number;
+	/**
+	 * Jump here after opening — the `path:line` of a link clicked in the
+	 * terminal. Changing the object re-applies it, so callers keep it stable
+	 * between renders.
+	 */
+	readonly reveal?: { readonly line: number; readonly column?: number };
 	readonly onDirtyChange: (dirty: boolean) => void;
 	readonly onStatus: (message: string) => void;
 }
 
-export function Editor({ root, filePath, preview = false, reloadToken = 0, onDirtyChange, onStatus }: EditorProps) {
+export function Editor({ root, filePath, preview = false, reloadToken = 0, reveal, onDirtyChange, onStatus }: EditorProps) {
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 	const dirtySubscriptionRef = useRef<monaco.IDisposable | undefined>(undefined);
@@ -36,6 +42,8 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, onDir
 	const applyingRef = useRef(false);
 	const saveCursorTimerRef = useRef<number | undefined>(undefined);
 	const [previewText, setPreviewText] = useState('');
+	/** Bumped once a file's model is on screen, so `reveal` can be applied. */
+	const [loadedToken, setLoadedToken] = useState(0);
 
 	onDirtyChangeRef.current = onDirtyChange;
 	onStatusRef.current = onStatus;
@@ -214,6 +222,7 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, onDir
 				},
 			};
 
+			setLoadedToken(value => value + 1);
 			if (previewRef.current) {
 				setPreviewText(model.getValue());
 			}
@@ -229,6 +238,23 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, onDir
 		};
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [filePath, root]);
+
+	// A `path:12` link: the file may already have been open, in which case the
+	// effect above does not re-run, so the jump gets an effect of its own.
+	useEffect(() => {
+		if (!reveal || !filePath) {
+			return;
+		}
+		const editor = editorRef.current;
+		const model = editor?.getModel();
+		if (!editor || !model || currentFileRef.current !== filePath) {
+			return;
+		}
+		const line = Math.min(Math.max(1, reveal.line), model.getLineCount());
+		editor.setPosition({ lineNumber: line, column: Math.max(1, reveal.column ?? 1) });
+		editor.revealLineInCenter(line);
+		editor.focus();
+	}, [reveal, filePath, loadedToken]);
 
 	// Disk → buffer for the file that is already open. The token is bumped when a
 	// turn ends (the agent may have rewritten it) and by the reload button; a

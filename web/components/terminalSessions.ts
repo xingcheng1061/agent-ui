@@ -1,8 +1,9 @@
 import { FitAddon } from '@xterm/addon-fit';
-import { Terminal as XTerm } from '@xterm/xterm';
+import { Terminal as XTerm, type ILink } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { terminalUrl } from '../api';
 import { getTheme, onThemeChange, type ThemeName } from '../theme';
+import { findPathTokens, resolveTerminalTarget, type TerminalTarget } from './terminalPaths';
 
 /**
  * One live terminal screen per terminal id, owned outside React.
@@ -57,6 +58,11 @@ export interface TerminalSession {
 	watchState(listener: (state: TerminalState) => void): () => void;
 	/** After the fallback overlay appeared: try again without a reload. */
 	reconnect(): void;
+	/**
+	 * Where ctrl+click on a path goes. `root` is the base for relative paths;
+	 * pass `undefined` as the handler when no code pane is showing the screen.
+	 */
+	setOpenTargetHandler(root: string, handler: ((target: TerminalTarget) => void) | undefined): void;
 }
 
 class LiveScreen implements TerminalSession {
@@ -92,6 +98,12 @@ class LiveScreen implements TerminalSession {
 	/** Size last reported to the server, so re-attaching does not re-signal it. */
 	private _sentCols = 0;
 	private _sentRows = 0;
+	/** Set by the view: ctrl+click on a printed path opens it in the code pane. */
+	private _openTarget: ((target: TerminalTarget) => void) | undefined;
+	/** Base for relative paths — the terminal's project root. */
+	private _openRoot = '';
+	/** The insecure-context paste notice is worth saying once, not per keystroke. */
+	private _pasteHintShown = false;
 
 	constructor(id: string) {
 		this.id = id;
@@ -108,6 +120,13 @@ class LiveScreen implements TerminalSession {
 		this._fit = new FitAddon();
 		this._term.loadAddon(this._fit);
 		this._term.onData(data => this._type(data));
+		// Ctrl+C / Ctrl+V are xterm's business only when it has nothing better to
+		// do: without this hook it sends ^C and ^V to the shell and the browser's
+		// own copy/paste never runs.
+		this._term.attachCustomKeyEventHandler(event => this._handleKey(event));
+		this._term.registerLinkProvider({
+			provideLinks: (bufferLineNumber, callback) => callback(this._linksAt(bufferLineNumber)),
+		});
 		this._onTheme = onThemeChange(theme => {
 			this._term.options.theme = XTERM_THEMES[theme];
 		});
@@ -193,6 +212,108 @@ class LiveScreen implements TerminalSession {
 		}
 		this._retriesLeft = AUTO_RETRIES;
 		this._connect();
+	}
+
+	setOpenTargetHandler(root: string, handler: ((target: TerminalTarget) => void) | undefined): void {
+		this._openRoot = root;
+		this._openTarget = handler;
+	}
+
+	/**
+	 * Links on one row, recomputed on demand.
+	 *
+	 * xterm asks per visible row on every repaint, so this stays a plain regex
+	 * pass; the expensive part — deciding which project owns the path — happens
+	 * on click, in the workspace.
+	 */
+	private _linksAt(bufferLineNumber: number): ILink[] | undefined {
+		if (!this._openTarget || !this._openRoot) {
+			return undefined;
+		}
+		const line = this._term.buffer.active.getLine(bufferLineNumber - 1);
+		if (!line) {
+			return undefined;
+		}
+		const text = line.translateToString(true);
+		const tokens = findPathTokens(text);
+		if (tokens.length === 0) {
+			return undefined;
+		}
+		return tokens.map(token => ({
+			range: {
+				start: { x: token.start + 1, y: bufferLineNumber },
+				end: { x: token.end, y: bufferLineNumber },
+			},
+			text: token.text,
+			activate: (event: MouseEvent) => {
+				// Same rule as VS Code: hover shows the target, ctrl+click opens it.
+				if (!event.ctrlKey && !event.metaKey) {
+					return;
+				}
+				this._openTarget?.(resolveTerminalTarget(token, this._openRoot));
+			},
+		}));
+	}
+
+	/**
+	 * Clipboard shortcuts, with VS Code's behaviour.
+	 *
+	 * Returning false means "xterm, do not touch this event": the browser's
+	 * default is already prevented, because letting it run (devtools on
+	 * Ctrl+Shift+C, for one) is worse than swallowing it.
+	 */
+	private _handleKey(event: KeyboardEvent): boolean {
+		if (event.type !== 'keydown') {
+			return true;
+		}
+		const key = event.key.toLowerCase();
+		const isMac = /Mac|iPhone|iPad/.test(navigator.userAgent);
+		const primary = isMac ? event.metaKey : event.ctrlKey;
+		const copyRequested = (primary && key === 'c' && this._term.hasSelection())
+			|| (event.ctrlKey && event.shiftKey && key === 'c')
+			|| (event.ctrlKey && event.key === 'Insert');
+		if (copyRequested) {
+			event.preventDefault();
+			this._copySelection();
+			return false;
+		}
+		const pasteRequested = (primary && key === 'v')
+			|| (event.ctrlKey && event.shiftKey && key === 'v')
+			|| (event.shiftKey && event.key === 'Insert');
+		if (pasteRequested) {
+			event.preventDefault();
+			if (!navigator.clipboard?.readText) {
+				// Reading the clipboard needs a secure context, and xterm would
+				// swallow Ctrl+V as ^V anyway — say why instead of doing nothing.
+				if (!this._pasteHintShown) {
+					this._pasteHintShown = true;
+					this._term.write('\r\n\x1b[90m[无法读取剪贴板：请通过 localhost 或 HTTPS 打开本页]\x1b[0m\r\n');
+				}
+				return false;
+			}
+			this._pasteFromClipboard();
+			return false;
+		}
+		return true;
+	}
+
+	private _copySelection(): void {
+		const text = this._term.getSelection();
+		if (text) {
+			void writeClipboard(text);
+		}
+	}
+
+	private _pasteFromClipboard(): void {
+		void readClipboard().then(text => {
+			if (!text || this._disposed) {
+				return;
+			}
+			// `paste` wraps the text in bracketed-paste markers when the shell
+			// asked for them, which is what keeps a multi-line paste from being
+			// executed line by line as if it had been typed.
+			this._term.paste(text);
+		});
 	}
 
 	dispose(): void {
@@ -335,6 +456,42 @@ class LiveScreen implements TerminalSession {
 		for (const listener of this._listeners) {
 			listener(state);
 		}
+	}
+}
+
+/**
+ * Clipboard writes need a secure context, which a self-hosted instance reached
+ * over plain http on a LAN address does not have; `execCommand` still works
+ * there, and this is the one place it is worth keeping.
+ */
+async function writeClipboard(text: string): Promise<void> {
+	try {
+		await navigator.clipboard.writeText(text);
+		return;
+	} catch {
+		// No API (insecure context) or the permission was denied.
+	}
+	const area = document.createElement('textarea');
+	area.value = text;
+	area.setAttribute('readonly', '');
+	area.style.position = 'fixed';
+	area.style.top = '-1000px';
+	area.style.opacity = '0';
+	document.body.appendChild(area);
+	area.select();
+	try {
+		document.execCommand('copy');
+	} finally {
+		area.remove();
+	}
+}
+
+/** Empty when the browser refuses: paste then simply does nothing. */
+async function readClipboard(): Promise<string> {
+	try {
+		return await navigator.clipboard.readText();
+	} catch {
+		return '';
 	}
 }
 

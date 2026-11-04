@@ -416,7 +416,7 @@ export function App() {
 								}}
 							/>
 							<Splitter axis="x" onResize={delta => setChatWidth(clamp(chatWidth + delta, 320, 1200))} />
-							<Workspace key={active.root} root={active.root} revision={revision} />
+							<Workspace key={active.root} root={active.root} projects={projects} revision={revision} />
 						</>
 					)}
 				</main>

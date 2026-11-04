@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { closeTerminal, createTerminal, listTerminals, readFile, renameTerminal, type TerminalInfo } from '../api';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { closeTerminal, createTerminal, listTerminals, readFile, renameTerminal, type ProjectInfo, type TerminalInfo } from '../api';
 import { ChangesList } from './ChangesList';
 import { DiffView } from './DiffView';
 import { Editor } from './Editor';
@@ -7,12 +7,23 @@ import { FileTree } from './FileTree';
 import { Splitter, clamp, usePersistedSize } from './Splitter';
 import { TerminalView } from './Terminal';
 import { forgetTerminalSession } from './terminalSessions';
+import { relativeToRoot, type TerminalTarget } from './terminalPaths';
 import { readLeftTab, readOpenFile, writeLeftTab, writeOpenFile } from './workspaceState';
 
 interface WorkspaceProps {
 	readonly root: string;
+	/** Every known project: a terminal link may point outside this one. */
+	readonly projects: readonly ProjectInfo[];
 	/** Incremented when an agent turn ends, so git state is refetched. */
 	readonly revision: number;
+}
+
+/** The file on screen, and the project it belongs to. */
+interface OpenFile {
+	readonly root: string;
+	readonly path: string;
+	readonly line?: number;
+	readonly column?: number;
 }
 
 /** The terminal a project lands on when nothing was remembered. */
@@ -38,13 +49,18 @@ function sameRoot(left: string, right: string): boolean {
 	return /^[a-zA-Z]:\//.test(a) && a.toLowerCase() === b.toLowerCase();
 }
 
+function baseName(root: string): string {
+	const parts = root.split(/[\\/]/).filter(part => part.length > 0);
+	return parts.length > 0 ? parts[parts.length - 1]! : root;
+}
+
 /**
  * Code side of a session: everything here is scoped to the session's project root.
  * Mount it with `key={root}` so switching project resets selection and terminal.
  */
-export function Workspace({ root, revision }: WorkspaceProps) {
+export function Workspace({ root, projects, revision }: WorkspaceProps) {
 	const [leftTab, setLeftTab] = useState<'files' | 'changes'>(() => readLeftTab(root));
-	const [selectedFile, setSelectedFile] = useState<string | undefined>(undefined);
+	const [opened, setOpened] = useState<OpenFile | undefined>(undefined);
 	const [diffPath, setDiffPath] = useState<string | undefined>(undefined);
 	const [changeCount, setChangeCount] = useState(0);
 	const [dirty, setDirty] = useState(false);
@@ -57,8 +73,16 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 	/** Read by effects that must not re-run when the dirty flag flips. */
 	const dirtyRef = useRef(dirty);
 	dirtyRef.current = dirty;
-	const selectedFileRef = useRef(selectedFile);
-	selectedFileRef.current = selectedFile;
+	const openedRef = useRef(opened);
+	openedRef.current = opened;
+
+	/** Only a file from this project highlights in the tree. */
+	const selectedFile = opened && sameRoot(opened.root, root) ? opened.path : undefined;
+	/** Stable per open, or the jump effect in the editor would re-run forever. */
+	const reveal = useMemo(
+		() => (opened?.line === undefined ? undefined : { line: opened.line, column: opened.column }),
+		[opened],
+	);
 
 	useEffect(() => {
 		writeLeftTab(root, leftTab);
@@ -75,7 +99,7 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 		void readFile(root, remembered)
 			.then(() => {
 				if (!cancelled) {
-					setSelectedFile(remembered);
+					setOpened({ root, path: remembered });
 				}
 			})
 			.catch(() => {
@@ -95,17 +119,18 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 			firstRevisionRef.current = false;
 			return;
 		}
-		if (!selectedFileRef.current || dirtyRef.current) {
+		if (!openedRef.current || dirtyRef.current) {
 			return;
 		}
 		setReloadToken(value => value + 1);
 	}, [revision]);
 
 	const reloadFile = () => {
-		if (!selectedFileRef.current) {
+		const target = openedRef.current;
+		if (!target) {
 			return;
 		}
-		if (dirtyRef.current && !window.confirm(`编辑器里有未保存的修改，重新加载会丢弃它们。\n\n${selectedFileRef.current}`)) {
+		if (dirtyRef.current && !window.confirm(`编辑器里有未保存的修改，重新加载会丢弃它们。\n\n${target.path}`)) {
 			return;
 		}
 		setReloadToken(value => value + 1);
@@ -180,7 +205,38 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 	};
 
 	const active = terminals.find(candidate => candidate.id === activeTerminal);
-	const previewable = selectedFile !== undefined && /\.(md|markdown)$/i.test(selectedFile);
+	const previewable = opened !== undefined && /\.(md|markdown)$/i.test(opened.path);
+
+	/** Opens a file in the pane; `target.root` is not always this project. */
+	const openFileFrom = (target: OpenFile) => {
+		setOpened(target);
+		setDiffPath(undefined);
+		// Another file starts as source; the toggle is per file.
+		setPreview(false);
+		// Only a file of this project can be the one remembered for it.
+		writeOpenFile(root, sameRoot(target.root, root) ? target.path : undefined);
+	};
+
+	/**
+	 * A path clicked in the terminal.
+	 *
+	 * The screen prints whatever it likes — `ls` two directories up, an absolute
+	 * path from another checkout — and the server only reads files under a known
+	 * project, so the owning project has to be found before anything is opened.
+	 */
+	const openFromTerminal = (target: TerminalTarget) => {
+		const owner = projects
+			.map(project => project.cwd)
+			.filter(candidate => relativeToRoot(candidate, target.path) !== undefined)
+			// Nested projects: the deepest root containing the file wins.
+			.sort((left, right) => right.length - left.length)[0];
+		const relative = owner === undefined ? undefined : relativeToRoot(owner, target.path);
+		if (owner === undefined || relative === undefined || relative === '') {
+			setStatus(`不在任何已打开的项目里：${target.path}`);
+			return;
+		}
+		openFileFrom({ root: owner, path: relative, line: target.line, column: target.column });
+	};
 
 	return (
 		<div className="workspace" style={{ gridTemplateColumns: `${treeWidth}px 5px 1fr` }}>
@@ -203,13 +259,7 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 						<FileTree
 							root={root}
 							selectedPath={selectedFile}
-							onOpenFile={filePath => {
-								setSelectedFile(filePath);
-								setDiffPath(undefined);
-								// Another file starts as source; the toggle is per file.
-								setPreview(false);
-								writeOpenFile(root, filePath);
-							}}
+							onOpenFile={filePath => openFileFrom({ root, path: filePath })}
 						/>
 					)
 					: (
@@ -220,7 +270,7 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 							onCountChange={setChangeCount}
 							onSelect={filePath => {
 								setDiffPath(filePath);
-								setSelectedFile(undefined);
+								setOpened(undefined);
 								// A diff is not a file to reopen: only a real editor tab is.
 								writeOpenFile(root, undefined);
 							}}
@@ -234,13 +284,18 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 				<div className="tabbar">
 					{diffPath
 						? <span className="tab">diff · {diffPath}</span>
-						: selectedFile
-							? <span className="tab">{selectedFile}{dirty ? ' ●' : ''}</span>
+						: opened
+							? (
+								<span className="tab">
+									{sameRoot(opened.root, root) ? opened.path : `${baseName(opened.root)}/${opened.path}`}
+									{dirty ? ' ●' : ''}
+								</span>
+							)
 							: <span className="tab empty">选择左侧文件，或看"变更"</span>}
 					<span className="spacer" />
 					<span className={`status${status.startsWith('saved') ? ' ok' : ''}`}>{status}</span>
 					{diffPath && <button type="button" className="toggle" onClick={() => setDiffPath(undefined)}>关闭 diff</button>}
-					{selectedFile && !diffPath && (
+					{opened && !diffPath && (
 						<button
 							type="button"
 							className="toggle"
@@ -267,13 +322,14 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 
 				{diffPath
 					? <DiffView root={root} filePath={diffPath} revision={revision} />
-					: selectedFile
+					: opened
 						? (
 							<Editor
-								root={root}
-								filePath={selectedFile}
+								root={opened.root}
+								filePath={opened.path}
 								preview={preview && previewable}
 								reloadToken={reloadToken}
+								reveal={reveal}
 								onDirtyChange={setDirty}
 								onStatus={setStatus}
 							/>
@@ -320,7 +376,14 @@ export function Workspace({ root, revision }: WorkspaceProps) {
 								<span className="spacer" />
 								<span className="terminal-path">{active?.root ?? root}</span>
 							</div>
-							{activeTerminal && <TerminalView key={activeTerminal} terminalId={activeTerminal} />}
+							{activeTerminal && (
+								<TerminalView
+									key={activeTerminal}
+									terminalId={activeTerminal}
+									root={root}
+									onOpenTarget={openFromTerminal}
+								/>
+							)}
 						</section>
 					</>
 				)}
