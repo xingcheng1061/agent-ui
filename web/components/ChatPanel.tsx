@@ -155,6 +155,16 @@ const STATUS_LABEL: Record<string, string> = {
  */
 const SHELL_TOOLS: ReadonlySet<string> = new Set(['Bash', 'PowerShell', 'Shell', 'sh']);
 
+/**
+ * Tools whose input is a file edit. They render as a diff instead of raw JSON:
+ * `old_string` / `new_string` already describe one, and printing the arguments
+ * made the agent's change unreadable.
+ */
+const FILE_CHANGE_TOOLS: ReadonlySet<string> = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
+
+/** Tools that return a numbered listing of one file. */
+const READ_TOOLS: ReadonlySet<string> = new Set(['Read']);
+
 /** Cap per task so a chatty background shell cannot blow up the DOM. */
 const MAX_TASK_LOG = 200_000;
 
@@ -1556,7 +1566,11 @@ function ChatItemView({ item, childrenOf, outputOf, live = false }: {
 			// emits on Windows, so matching only `Bash` hid half of them.
 			return SHELL_TOOLS.has(item.name)
 				? <BashCard item={item} />
-				: <ToolCard item={item} childrenOf={childrenOf} outputOf={outputOf} />;
+				: FILE_CHANGE_TOOLS.has(item.name)
+					? <FileChangeCard item={item} />
+					: READ_TOOLS.has(item.name)
+						? <ReadCard item={item} />
+						: <ToolCard item={item} childrenOf={childrenOf} outputOf={outputOf} />;
 		case 'result':
 			return (
 				<div className={`msg result${item.isError && !item.interrupted ? ' failed' : ''}${item.interrupted ? ' interrupted' : ''}`}>
@@ -1670,6 +1684,207 @@ function isRepeatedAnswer(result: string, children: readonly Item[]): boolean {
 	return target !== '' && children.some(child => child.kind === 'assistant' && normalize(child.text) === target);
 }
 
+/** One rendered line of a file change. */
+interface DiffLine {
+	readonly kind: 'context' | 'add' | 'remove';
+	readonly text: string;
+}
+
+/** Past this the card is a wall of text; the rest is folded into a count. */
+const MAX_DIFF_LINES = 300;
+
+/** LCS line diff, bounded so a whole-file write cannot freeze the panel. */
+function lineDiff(before: string, after: string): readonly DiffLine[] {
+	const split = (value: string) => value === ''
+		? []
+		: value.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
+	const left = split(before);
+	const right = split(after);
+	if (left.length * right.length > 160_000) {
+		return [
+			...left.map(text => ({ kind: 'remove' as const, text })),
+			...right.map(text => ({ kind: 'add' as const, text })),
+		];
+	}
+	const table: number[][] = Array.from({ length: left.length + 1 }, () => new Array<number>(right.length + 1).fill(0));
+	for (let i = left.length - 1; i >= 0; i--) {
+		for (let j = right.length - 1; j >= 0; j--) {
+			table[i][j] = left[i] === right[j]
+				? table[i + 1][j + 1] + 1
+				: Math.max(table[i + 1][j], table[i][j + 1]);
+		}
+	}
+	const lines: DiffLine[] = [];
+	let i = 0;
+	let j = 0;
+	while (i < left.length && j < right.length) {
+		if (left[i] === right[j]) {
+			lines.push({ kind: 'context', text: left[i] });
+			i++;
+			j++;
+		} else if (table[i + 1][j] >= table[i][j + 1]) {
+			lines.push({ kind: 'remove', text: left[i] });
+			i++;
+		} else {
+			lines.push({ kind: 'add', text: right[j] });
+			j++;
+		}
+	}
+	while (i < left.length) {
+		lines.push({ kind: 'remove', text: left[i] });
+		i++;
+	}
+	while (j < right.length) {
+		lines.push({ kind: 'add', text: right[j] });
+		j++;
+	}
+	return lines;
+}
+
+/** The before/after text a file-editing tool described, in its own words. */
+function changeOf(name: string, record: Record<string, unknown>): { before: string; after: string } {
+	const text = (value: unknown) => typeof value === 'string' ? value : '';
+	if (name === 'Write') {
+		return { before: '', after: text(record['content']) };
+	}
+	if (name === 'NotebookEdit') {
+		return { before: '', after: text(record['new_source']) };
+	}
+	if (name === 'MultiEdit') {
+		const edits = Array.isArray(record['edits']) ? record['edits'] as readonly Record<string, unknown>[] : [];
+		return {
+			before: edits.map(edit => text(edit['old_string'])).filter(Boolean).join('\n'),
+			after: edits.map(edit => text(edit['new_string'])).filter(Boolean).join('\n'),
+		};
+	}
+	return { before: text(record['old_string']), after: text(record['new_string']) };
+}
+
+/** CLI failures arrive wrapped in `<tool_use_error>`; the tag is not the message. */
+function toolErrorText(value: string): string {
+	return value.replace(/<\/?tool_use_error>/g, '').trim();
+}
+
+/**
+ * The last two segments of a path: the full one is noise in a narrow rail, the
+ * file name is the part worth reading.
+ */
+function shortPath(value: string): string {
+	return value.split(/[\\/]/).filter(Boolean).slice(-2).join('/');
+}
+
+/**
+ * A file read. The CLI answers with `<line>\t<text>` lines, which is a code
+ * listing rather than a blob of prose: the numbers get their own column and the
+ * card starts closed, so a 200-line read cannot bury the conversation.
+ */
+function ReadCard({ item }: { readonly item: Extract<Item, { kind: 'tool' }> }) {
+	const record = (item.input ?? {}) as Record<string, unknown>;
+	const path = typeof record['file_path'] === 'string' ? record['file_path'] as string : '';
+	const content = item.result?.content ?? '';
+	const failed = item.result?.isError === true;
+	const rows = !failed && content !== ''
+		? content.replace(/\r\n/g, '\n').split('\n')
+			.map(line => {
+				const numbered = /^(\d+)\t(.*)$/.exec(line);
+				return numbered
+					? { number: numbered[1], text: numbered[2] }
+					: { number: '', text: line };
+			})
+			.filter(row => row.number !== '' || row.text.trim() !== '')
+		: [];
+	const state = failed ? 'failed' : item.result ? 'done' : 'running';
+	const [open, setOpen] = useState(false);
+	return (
+		<details
+			className={`tool-card read-card ${state}`}
+			open={open}
+			onToggle={event => setOpen(event.currentTarget.open)}
+		>
+			<summary className="tool-head">
+				<span className={`tool-dot ${state}`} />
+				<span className="tool-name">{item.name}</span>
+				<span className="tool-file" title={path}>{shortPath(path) || '文件'}</span>
+				{rows.length > 0 && <span className="tool-tag">{rows.length} 行</span>}
+				{!item.result && <span className="tool-tag running">运行中</span>}
+			</summary>
+			<div className="tool-body">
+				{failed && <pre className="tool-result failed">{truncate(toolErrorText(content), 2000)}</pre>}
+				{rows.length > 0 && (
+					<pre className="read-code">
+						{rows.map((row, index) => (
+							<span key={index} className="read-line">
+								<span className="read-number">{row.number || ' '}</span>{row.text}
+							</span>
+						))}
+					</pre>
+				)}
+			</div>
+		</details>
+	);
+}
+
+/**
+ * A file edit rendered as a diff.
+ *
+ * `old_string`/`new_string` already describe one, so the card shows removed
+ * lines in red and added ones in green instead of dumping the arguments as
+ * JSON — which is what made an Edit look like a wall of escaped quotes.
+ */
+function FileChangeCard({ item }: { readonly item: Extract<Item, { kind: 'tool' }> }) {
+	const record = (item.input ?? {}) as Record<string, unknown>;
+	const path = typeof record['file_path'] === 'string'
+		? record['file_path'] as string
+		: typeof record['notebook_path'] === 'string' ? record['notebook_path'] as string : '';
+	const state = item.result?.isError ? 'failed' : item.result ? 'done' : 'running';
+	const { before, after } = changeOf(item.name, record);
+	const lines = lineDiff(before, after);
+	const added = lines.filter(line => line.kind === 'add').length;
+	const removed = lines.filter(line => line.kind === 'remove').length;
+	const [open, setOpen] = useState(true);
+	const shown = lines.slice(0, MAX_DIFF_LINES);
+	const hidden = lines.length - shown.length;
+	const label = shortPath(path);
+	return (
+		<details
+			className={`tool-card edit-card ${state}`}
+			open={open}
+			onToggle={event => setOpen(event.currentTarget.open)}
+		>
+			<summary className="tool-head">
+				<span className={`tool-dot ${state}`} />
+				<span className="tool-name">{item.name}</span>
+				<span className="tool-file" title={path}>{label || '文件'}</span>
+				<span className="diff-stat">
+					<span className="added">+{added}</span>
+					<span className="removed">−{removed}</span>
+				</span>
+				{!item.result && <span className="tool-tag running">运行中</span>}
+			</summary>
+			<div className="tool-body">
+				{lines.length === 0
+					? <pre className="tool-input">{formatJson(item.input)}</pre>
+					: (
+						<pre className="edit-diff">
+							{shown.map((line, index) => (
+								<span key={index} className={`diff-line ${line.kind}`}>
+									<span className="diff-sign">{line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : ' '}</span>{line.text}
+								</span>
+							))}
+						</pre>
+					)}
+				{hidden > 0 && <div className="diff-more">还有 {hidden} 行未显示</div>}
+				{/* A successful edit only ever answers with boilerplate ("The file …
+				    has been updated successfully"), which the diff already says;
+				    only a failure carries something worth reading. */}
+				{item.result?.isError && (
+					<div className="edit-note failed">{truncateLine(toolErrorText(item.result.content), 300)}</div>
+				)}
+			</div>
+		</details>
+	);
+}
+
 function ToolCard({ item, childrenOf, outputOf }: {
 	readonly item: Extract<Item, { kind: 'tool' }>;
 	readonly childrenOf: (id: string) => readonly Item[];
@@ -1759,6 +1974,11 @@ function ToolCard({ item, childrenOf, outputOf }: {
 							<pre className="tool-input">{prompt}</pre>
 						</details>
 					)
+				) : item.name === 'Read' ? (
+					// The arguments of a read are just a path and a line range, and
+					// the summary already shows the path; the numbered text below is
+					// the part worth reading.
+					null
 				) : (
 					<pre className="tool-input">{formatJson(item.input)}</pre>
 				)}

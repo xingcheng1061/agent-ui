@@ -199,6 +199,9 @@ class Options:
 	timeout: float
 	out_dir: Path
 	allow_agent: bool
+	# The session-actions scenario renames and archives a real conversation; it
+	# restores both, but a crash mid-way would leave the rail changed.
+	allow_writes: bool
 	server_log: Optional[Path]
 	fail_on_error: bool
 	only: str = ''
@@ -777,6 +780,349 @@ def scenario_file_tree(probe: Probe) -> None:
 	probe.wait_for('.code-pane .tabbar, .editor-host', timeout=20)
 
 
+def scenario_diff_view(probe: Probe) -> None:
+	"""The diff pane reads HEAD from the git object store and the worktree from
+	disc, so a path resolved against the wrong root shows one side content and
+	the other side blank — the regression this guards."""
+	probe.step = '切到变更面板'
+	tab = probe.button_with_text('变更', '.pane-tabs')
+	if tab is None:
+		tab = None
+		for candidate in probe.find_all('.pane-tab'):
+			if '变更' in (candidate.text or ''):
+				tab = candidate
+				break
+	if tab is None:
+		probe.skip('找不到变更标签')
+	if not probe.click(tab, '变更标签'):
+		return
+	if probe.wait_for('.change-row', timeout=15) is None:
+		probe.skip('工作区没有变更')
+	rows = [row for row in probe.find_all('.change-row') if 'dir' not in (row.get_attribute('class') or '')]
+	if not rows:
+		probe.skip('变更列表只剩目录节点')
+	probe.step = '打开一个文件的 diff'
+	probe.current.note = '变更 ' + str(len(rows)) + ' 个文件'
+	if not probe.click(rows[0], '变更条目'):
+		return
+	if probe.wait_for('.diff-wrap', timeout=20) is None:
+		probe.issue('diff', '点击变更后没有出现 diff 面板', severity='error')
+		return
+	if probe.wait_for('.diff-wrap .monaco-diff-editor', timeout=25) is None:
+		probe.issue('diff', 'diff 面板没有渲染出编辑器（Monaco 未加载？）', severity='error')
+		return
+	probe.step = '检查两侧内容'
+	note = probe.first_text('.diff-note')
+	if note:
+		probe.issue('diff', 'diff 面板显示错误：' + note, severity='error')
+		return
+	# Two traps here: `.monaco-editor` also matches the widget's overview editor,
+	# and Monaco re-renders removed/added rows inside `.view-zones`; only the
+	# real content lines outside that zone belong to the pane.
+	sides = probe.driver.execute_script("""
+		const read = selector => {
+			const node = [...document.querySelectorAll(selector)].find(candidate => !candidate.closest('.view-zones'));
+			return node ? (node.textContent || '').trim().length : -1;
+		};
+		return [
+			read('.diff-wrap .monaco-diff-editor .editor.original .view-lines'),
+			read('.diff-wrap .monaco-diff-editor .editor.modified .view-lines'),
+		];
+	""") or []
+	if len(sides) < 2:
+		probe.issue('diff', 'diff 只渲染了 ' + str(len(sides)) + ' 侧', severity='error')
+		return
+	if sides[0] == 0 and sides[1] == 0:
+		probe.issue('diff', 'diff 两侧都没有内容', severity='error')
+	elif sides[0] == 0:
+		probe.issue('diff', 'diff 左侧（HEAD）为空，疑似路径解析错误', severity='error')
+	elif sides[1] == 0:
+		# A deleted file legitimately looks like this; only flag when the row
+		# does not say so, and say which file, because that is the useful part.
+		label = (rows[0].text or '').strip()
+		probe.issue('diff', 'diff 右侧（工作区）为空：' + label, severity='warning')
+	probe.step = '返回文件树'
+	files_tab = probe.button_with_text('文件', '.pane-tabs')
+	if files_tab is not None:
+		probe.click(files_tab, '文件标签')
+	# Switching the tab does not clear the diff, so the pane would stay on it and
+	# the editor scenario would wait for an editor that is not on screen. Open a
+	# file again to put the pane back where the rest of the run expects it.
+	files = [row for row in probe.find_all('.file-tree .tree-row') if not row.get_attribute('aria-expanded')]
+	if files:
+		probe.click(files[0], '文件节点')
+		probe.wait_for('.editor-host', timeout=20)
+
+
+def scenario_session_actions(probe: Probe) -> None:
+	"""Rename, archive and unarchive through the row's own buttons.
+
+	Both changes are undone, but a crash in between would leave the first
+	conversation renamed or hidden, so this needs --allow-writes. The delete
+	button is deliberately left alone: a transcript does not come back.
+
+	Buttons are clicked through the DOM: they only exist while the row is
+	hovered, and synthetic mouse moves are unreliable in headless Chrome.
+	"""
+	if not probe.options.allow_writes:
+		probe.skip('未开启 --allow-writes（会改名 / 归档真实会话）')
+	rows = probe.find_all('.session-row')
+	if not rows:
+		probe.skip('侧栏没有会话')
+	before_count = len(rows)
+	texts = probe.find_all('.session-row .session-text')
+	if not texts:
+		probe.skip('会话行没有标题')
+	original = (texts[0].text or '').strip()
+	if not original:
+		probe.skip('会话标题为空')
+	temporary = original + ' [probe]'
+
+	def js_click(selector: str) -> bool:
+		return bool(probe.driver.execute_script(
+			'const element = document.querySelector(arguments[0]);'
+			'if (!element) return false;'
+			'element.click();'
+			'return true;', selector))
+
+	def wait_title(expected: str, timeout: float = 15.0) -> bool:
+		deadline = time.time() + timeout
+		while time.time() < deadline:
+			for node in probe.find_all('.session-row .session-text'):
+				if (node.text or '').strip() == expected:
+					return True
+			time.sleep(0.2)
+		return False
+
+	def set_title(title: str) -> bool:
+		probe.step = '改名为 ' + title
+		if not js_click('.session-row .session-action[title^="重命名"]'):
+			probe.issue('session-actions', '找不到重命名按钮', severity='error')
+			return False
+		if probe.wait_for('.session-rename', timeout=10) is None:
+			probe.issue('session-actions', '重命名输入框没有出现', severity='error')
+			return False
+		# Typed keys do not reach the input here (the terminal takes focus), so
+		# the same change a user makes is delivered as an input + Enter event.
+		probe.driver.execute_script("""
+			const input = document.querySelector('.session-rename');
+			const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+			setter.call(input, arguments[0]);
+			input.dispatchEvent(new Event('input', { bubbles: true }));
+			input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+		""", title)
+		if wait_title(title):
+			return True
+		probe.issue('session-actions', '改名后列表没有显示「' + title + '」', severity='error')
+		return False
+
+	def show_archived(enabled: bool) -> None:
+		probe.driver.execute_script("""
+			const box = document.querySelector('.rail-check input');
+			if (!box) return;
+			if (box.checked !== arguments[0]) box.click();
+		""", enabled)
+		time.sleep(0.3)
+
+	try:
+		if not set_title(temporary):
+			return
+		if not set_title(original):
+			probe.issue('session-actions', '无法把标题改回原名', severity='error')
+			return
+		probe.current.note = '会话 ' + str(before_count) + ' 条，改名往返一次'
+
+		probe.step = '归档'
+		if not js_click('.session-row .session-action[title^="归档"]'):
+			probe.issue('session-actions', '找不到归档按钮', severity='error')
+			return
+		deadline = time.time() + 15
+		while time.time() < deadline and len(probe.find_all('.session-row')) >= before_count:
+			time.sleep(0.2)
+		if len(probe.find_all('.session-row')) >= before_count:
+			probe.issue('session-actions', '归档后会话仍在默认列表里', severity='error')
+			return
+
+		probe.step = '显示已归档'
+		show_archived(True)
+		if not wait_title(original):
+			probe.issue('session-actions', '勾选「显示已归档」后没找回会话', severity='error')
+			return
+
+		probe.step = '取消归档'
+		if not js_click('.session-row .session-action[title^="取消归档"]'):
+			probe.issue('session-actions', '找不到取消归档按钮', severity='error')
+			return
+		show_archived(False)
+		deadline = time.time() + 15
+		while time.time() < deadline and len(probe.find_all('.session-row')) < before_count:
+			time.sleep(0.2)
+		if len(probe.find_all('.session-row')) < before_count:
+			probe.issue('session-actions', '取消归档后会话没有回到默认列表', severity='error')
+	finally:
+		show_archived(False)
+		# A failed run must not leave the conversation showing the probe name.
+		present = [node.text.strip() for node in probe.find_all('.session-row .session-text')]
+		if temporary in present:
+			set_title(original)
+
+
+def scenario_question_card(probe: Probe) -> None:
+	"""AskUserQuestion arrives as a permission with kind `ask`.
+
+	It must not render as an allow/deny prompt: the card has one button per
+	option (multi-select aware) plus a free-text box, and the picks come back to
+	the agent as `updatedInput.answers`.
+	"""
+	if not probe.options.allow_agent:
+		probe.skip('未开启 --allow-agent（需要 agent 真的调用 AskUserQuestion）')
+	probe.step = '新建会话'
+	if not create_session(probe):
+		probe.skip('无法新建会话')
+	probe.step = '让 agent 提问'
+	if not send_message(
+		probe,
+		'请立刻调用 AskUserQuestion 工具问我一个问题：今天先做哪一项？'
+		'选项就三个：「重构」「修 bug」「写文档」。只调用工具，不要先解释。',
+		'提问请求',
+	):
+		return
+	if probe.wait_for('.question-card', timeout=120) is None:
+		probe.issue('question', 'agent 提问后没有出现问题卡片（.question-card）', severity='error')
+		return
+	probe.step = '检查问题卡片'
+	questions = probe.find_all('.question-card .question')
+	if not questions:
+		probe.issue('question', '问题卡片里没有题目（.question）', severity='error')
+		return
+	options = probe.find_all('.question-card .question-option')
+	if len(options) < 2:
+		probe.issue('question', '选项按钮只有 ' + str(len(options)) + ' 个', severity='error')
+		return
+	probe.current.note = '题目 ' + str(len(questions)) + ' 个，选项 ' + str(len(options)) + ' 个'
+	probe.step = '选一个选项'
+	if not probe.click(options[0], '选项按钮'):
+		return
+	picked = probe.find_all('.question-card .question-option.active')
+	if not picked:
+		probe.issue('question', '点击选项后没有选中态（.active）', severity='error')
+	probe.step = '提交答案'
+	submit = probe.button_with_text('提交答案', '.question-card')
+	if submit is None:
+		probe.issue('question', '找不到「提交答案」按钮', severity='error')
+		return
+	if not probe.click(submit, '提交答案'):
+		return
+	deadline = time.time() + 30
+	while time.time() < deadline and probe.find_all('.question-card'):
+		time.sleep(0.2)
+	if probe.find_all('.question-card'):
+		probe.issue('question', '提交答案后问题卡片没有关闭', severity='error')
+	probe.step = '等待 agent 继续'
+	time.sleep(3)
+
+
+def scenario_editor_sync(probe: Probe) -> None:
+	"""A file the agent rewrote must show up in an already-open editor.
+
+	Monaco caches models per URI, so without a reload the buffer keeps whatever
+	the file held when it was first opened.
+	"""
+	if not probe.options.allow_agent:
+		probe.skip('未开启 --allow-agent（需要 agent 真的写文件）')
+	target = 'README.md'
+	# Same reason as the edit-card scenario: the file must belong to agent-ui,
+	# not to whichever project happens to sort first.
+	probe.step = '在 agent-ui 项目里新建会话'
+	if not create_session(probe, 'agent-ui'):
+		probe.skip('新建会话对话框里没有 agent-ui 项目（避免改到其它仓库）')
+	probe.step = '切到文件树'
+	files_tab = probe.button_with_text('文件', '.pane-tabs')
+	if files_tab is not None:
+		probe.click(files_tab, '文件标签')
+	row = None
+	for candidate in probe.find_all('.file-tree .tree-row'):
+		if (candidate.text or '').strip().endswith(target):
+			row = candidate
+			break
+	if row is None:
+		probe.skip('文件树里找不到 ' + target)
+	if not probe.click(row, '文件 ' + target):
+		return
+	if probe.wait_for('.editor-host', timeout=25) is None:
+		probe.skip('编辑器没有打开')
+	probe.step = '让 agent 在第一行前加一行'
+	marker = 'ui-probe edit check'
+	if not send_message(
+		probe,
+		'请用 Edit 工具在 README.md 的最开头插入一行：<!-- ' + marker + ' -->'
+		'不要改动文件的其它任何内容，也不要创建新文件。',
+		'改文件请求',
+	):
+		return
+	deadline = time.time() + 120
+	seen = False
+	while time.time() < deadline:
+		# Monaco renders the spaces of a line as NBSP spans, so a plain `in`
+		# check never matches text that is perfectly visible on screen.
+		text = probe.driver.execute_script("""
+			const node = document.querySelector('.editor-host .view-lines');
+			return node ? (node.textContent || '').replace(/\\u00a0/g, ' ') : '';
+		""") or ''
+		if marker in text:
+			seen = True
+			break
+		time.sleep(0.5)
+	if not seen:
+		probe.issue('editor', 'agent 写入后已打开的编辑器没有自动刷新', severity='error')
+	probe.current.note = '编辑器已自动同步 agent 的修改'
+
+
+def scenario_edit_card(probe: Probe) -> None:
+	"""A file-editing tool must render as a diff, not as its raw arguments.
+
+	The input already carries `old_string`/`new_string`, so the card is expected
+	to show red/green lines and the file name instead of a JSON dump.
+	"""
+	if not probe.options.allow_agent:
+		probe.skip('未开启 --allow-agent（需要 agent 真的编辑文件）')
+	probe.step = '在 agent-ui 项目里新建会话'
+	if not create_session(probe, 'agent-ui'):
+		probe.skip('新建会话对话框里没有 agent-ui 项目（避免改到其它仓库）')
+	probe.step = '让 agent 编辑 README.md'
+	if not send_message(
+		probe,
+		'请用 Edit 工具在 README.md 的第一行前面插入一行：<!-- ui-probe edit card -->'
+		'只改这一处，不要创建文件，不要动其它内容。',
+		'编辑请求',
+	):
+		return
+	if probe.wait_for('.edit-card', timeout=120) is None:
+		probe.issue('edit-card', 'agent 编辑文件后没有出现 diff 卡片（.edit-card）', severity='error')
+		return
+	probe.step = '检查 diff 渲染'
+	dump = probe.find_all('.edit-card .tool-input')
+	if dump:
+		probe.issue('edit-card', 'diff 卡片里仍然打印了原始参数', severity='error')
+	added = probe.find_all('.edit-card .diff-line.add')
+	removed = probe.find_all('.edit-card .diff-line.remove')
+	if not added and not removed:
+		probe.issue('edit-card', 'diff 卡片没有任何增删行', severity='error')
+	name = probe.first_text('.edit-card .tool-file').strip()
+	if name and 'README.md' not in name:
+		probe.issue('edit-card', 'diff 卡片显示的文件名不对：' + name, severity='warning')
+	probe.current.note = 'diff 卡片：+' + str(len(added)) + ' −' + str(len(removed))
+	probe.step = '检查还有没有打印原始参数'
+	dumps = probe.driver.execute_script("""
+		return [...document.querySelectorAll('.tool-card .tool-input')]
+			.filter(node => (node.textContent || '').includes('"file_path"')).length;
+	""") or 0
+	if dumps:
+		probe.issue('edit-card', '仍有 ' + str(dumps) + ' 张卡片打印了文件工具的原始参数', severity='warning')
+	probe.step = '等待轮次结束'
+	time.sleep(3)
+
+
 def scenario_editor(probe: Probe) -> None:
 	probe.step = '等待编辑器'
 	if probe.wait_for('.code-pane', timeout=20) is None:
@@ -929,7 +1275,13 @@ def send_message(probe: Probe, text: str, what: str = '消息') -> bool:
 	return probe.click(buttons[0], '发送按钮')
 
 
-def create_session(probe: Probe) -> bool:
+def create_session(probe: Probe, project_hint: str = '') -> bool:
+	"""New session in the first project, or in the one matching `project_hint`.
+
+	File-writing scenarios pass a hint: the first project is whichever the user
+	touched last, and an agent told to edit `README.md` there would modify a
+	repository the run has no business touching.
+	"""
 	button = probe.button_with_text('新建会话', '.session-rail')
 	if button is None:
 		return False
@@ -937,6 +1289,8 @@ def create_session(probe: Probe) -> bool:
 	if probe.wait_for('.modal', timeout=10) is None:
 		return False
 	items = probe.find_all('.modal .modal-item:not(.dir)')
+	if project_hint:
+		items = [item for item in items if project_hint in (item.text or '')]
 	if not items:
 		return False
 	probe.click(items[0], '项目条目')
@@ -2449,6 +2803,11 @@ SCENARIOS: Tuple[Tuple[str, Any], ...] = (
 	('open-recent', scenario_open_recent),
 	('switch-sessions', scenario_switch_sessions),
 	('file-tree', scenario_file_tree),
+	('diff-view', scenario_diff_view),
+	('session-actions', scenario_session_actions),
+	('question-card', scenario_question_card),
+	('editor-sync', scenario_editor_sync),
+	('edit-card', scenario_edit_card),
 	('editor', scenario_editor),
 	('terminal', scenario_terminal),
 	('theme', scenario_theme),
@@ -2542,6 +2901,7 @@ def parse_args(argv: Optional[List[str]] = None) -> Options:
 	parser.add_argument('--timeout', type=float, default=20.0, help='单个等待的秒数')
 	parser.add_argument('--out', default='reports', help='报告输出根目录')
 	parser.add_argument('--allow-agent', action='store_true', help='允许新建会话、发送消息（会消耗 token）')
+	parser.add_argument('--allow-writes', action='store_true', help='允许改名 / 归档真实会话（会改回原样）')
 	parser.add_argument('--only', default='', help='只跑指定场景，逗号分隔')
 	parser.add_argument('--skip', default='', help='跳过指定场景，逗号分隔')
 	parser.add_argument('--server-log', default='', help='服务端日志文件路径，报告里附带可疑行')
@@ -2558,6 +2918,7 @@ def parse_args(argv: Optional[List[str]] = None) -> Options:
 		timeout=args.timeout,
 		out_dir=Path(args.out),
 		allow_agent=args.allow_agent,
+		allow_writes=args.allow_writes,
 		server_log=Path(args.server_log) if args.server_log else None,
 		fail_on_error=args.fail_on_error,
 		only=args.only,

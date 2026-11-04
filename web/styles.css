@@ -41,6 +41,7 @@
 	--ok: #89d185;
 	--ok-border: #3a5a3a;
 	--ok-border-soft: #2f4a2f;
+	--ok-bg: #1e3520;
 
 	/* warnings (approval card, queue) */
 	--warn: #e2c08d;
@@ -94,6 +95,7 @@
 	--ok: #1a7f37;
 	--ok-border: #aceebb;
 	--ok-border-soft: #aceebb;
+	--ok-bg: #e6ffec;
 
 	--warn: #9a6700;
 	--warn-text: #6e5a2a;
@@ -1638,6 +1640,107 @@ button {
 }
 
 .tool-result.failed {
+	color: var(--danger-text);
+}
+
+/* File edits rendered as a diff. Kept out of the `<pre>` styling above: those
+   wrap long lines, while a diff has to keep its leading sign aligned. */
+.tool-file {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	font-family: var(--font-mono);
+	color: var(--fg-muted);
+}
+
+.diff-stat {
+	flex: none;
+	display: flex;
+	gap: 6px;
+	font-family: var(--font-mono);
+	font-size: 11px;
+}
+
+.diff-stat .added {
+	color: var(--ok);
+}
+
+.diff-stat .removed {
+	color: var(--danger);
+}
+
+.edit-diff {
+	margin: 0;
+	max-height: 320px;
+	overflow: auto;
+	font-family: var(--font-mono);
+	font-size: 11.5px;
+	line-height: 1.5;
+	white-space: pre;
+}
+
+.diff-line {
+	display: block;
+	padding: 0 6px;
+}
+
+.diff-line.add {
+	background: var(--ok-bg);
+	color: var(--ok);
+}
+
+.diff-line.remove {
+	background: var(--danger-bg);
+	color: var(--danger-text);
+}
+
+.diff-line.context {
+	color: var(--fg-dim);
+}
+
+.diff-sign {
+	display: inline-block;
+	width: 14px;
+	user-select: none;
+	opacity: 0.8;
+}
+
+.read-code {
+	margin: 0;
+	max-height: 320px;
+	overflow: auto;
+	font-family: var(--font-mono);
+	font-size: 11.5px;
+	line-height: 1.5;
+	white-space: pre;
+}
+
+.read-line {
+	display: block;
+}
+
+.read-number {
+	display: inline-block;
+	width: 34px;
+	padding-right: 8px;
+	text-align: right;
+	color: var(--fg-dim);
+	user-select: none;
+}
+
+.diff-more,
+.edit-note {
+	margin-top: 4px;
+	padding-top: 4px;
+	border-top: 1px solid var(--border);
+	color: var(--fg-dim);
+}
+
+.edit-note {
+	color: var(--fg-muted);
+}
+
+.edit-note.failed {
 	color: var(--danger-text);
 }
 
