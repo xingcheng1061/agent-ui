@@ -35,20 +35,28 @@ fsRouter.get('/search', async (req, res) => {
 	const query = readStringQuery(req.query['q'] ?? '', 'q').toLowerCase();
 	const skip = new Set(['node_modules', '.git', 'dist', 'out', 'build', '.next', 'target', 'coverage', '.cache']);
 	const files: string[] = [];
+	const dirs: string[] = [];
 	let scanned = 0;
+	const full = () => files.length >= 200 || dirs.length >= 100;
 
 	const walk = async (directory: string, depth: number): Promise<void> => {
-		if (depth > 8 || scanned > 20000 || files.length >= 200) {
+		if (depth > 8 || scanned > 20000 || full()) {
 			return;
 		}
 		const dirents = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
 		for (const dirent of dirents) {
-			if (scanned++ > 20000 || files.length >= 200) {
+			if (scanned++ > 20000 || full()) {
 				return;
 			}
 			if (dirent.isDirectory()) {
 				if (skip.has(dirent.name) || shouldIgnore(dirent.name)) {
 					continue;
+				}
+				const relative = toRelative(root, path.join(directory, dirent.name));
+				// A directory is a destination the tree can expand, not a file to
+				// open, so it is collected separately instead of sharing `files`.
+				if (!query || relative.toLowerCase().includes(query)) {
+					dirs.push(relative);
 				}
 				await walk(path.join(directory, dirent.name), depth + 1);
 			} else if (dirent.isFile()) {
@@ -63,7 +71,8 @@ fsRouter.get('/search', async (req, res) => {
 	await walk(root, 0);
 	// Shorter paths first: `package.json` before `server/agent/package.json`.
 	files.sort((a, b) => a.length - b.length || a.localeCompare(b));
-	res.json({ files, truncated: files.length >= 200 });
+	dirs.sort((a, b) => a.length - b.length || a.localeCompare(b));
+	res.json({ files, dirs, truncated: full() });
 });
 
 fsRouter.get('/read', async (req, res) => {
@@ -261,20 +270,36 @@ fsRouter.get('/find-dirs', async (req, res) => {
 
 	const directories: { name: string; path: string }[] = [];
 	let scanned = 0;
+	/** Deep enough for a monorepo module, bounded so a huge tree cannot stall. */
+	const MAX_DEPTH = 20;
+	const MAX_SCANNED = 100_000;
+	const MAX_RESULTS = 100;
+
+	// The directory on screen counts as a hit: "it is right here" is the most
+	// common reason a search looks broken.
+	if (path.basename(start).toLowerCase().includes(query)) {
+		directories.push({ name: path.basename(start), path: start });
+	}
+
 	const walk = async (directory: string, depth: number): Promise<void> => {
-		if (depth > 5 || scanned > 8000 || directories.length >= 40) {
+		if (depth > MAX_DEPTH || scanned > MAX_SCANNED || directories.length >= MAX_RESULTS) {
 			return;
 		}
 		const dirents = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
 		for (const dirent of dirents) {
-			if (scanned++ > 8000 || directories.length >= 40) {
+			if (scanned++ > MAX_SCANNED || directories.length >= MAX_RESULTS) {
 				return;
 			}
-			if (!dirent.isDirectory() || shouldIgnore(dirent.name)) {
+			// Hidden directories (`.git`, `.venv`, `.cache`, …) are never a
+			// project root worth offering, and skipping them keeps the walk fast.
+			if (!dirent.isDirectory() || shouldIgnore(dirent.name) || dirent.name.startsWith('.')) {
 				continue;
 			}
 			const absolute = path.join(directory, dirent.name);
-			if (dirent.name.toLowerCase().includes(query)) {
+			// Match the path relative to the search root, so `services/foo`
+			// finds a nested folder and not only a direct child by that name.
+			const relative = path.relative(start, absolute).split(path.sep).join('/');
+			if (relative.toLowerCase().includes(query) || dirent.name.toLowerCase().includes(query)) {
 				directories.push({ name: dirent.name, path: absolute });
 			}
 			await walk(absolute, depth + 1);
@@ -285,5 +310,5 @@ fsRouter.get('/find-dirs', async (req, res) => {
 	// Prefix matches read as "the one I meant"; the rest by depth then name.
 	const rank = (entry: { name: string }) => entry.name.toLowerCase().startsWith(query) ? 0 : 1;
 	directories.sort((a, b) => rank(a) - rank(b) || a.path.length - b.path.length || a.name.localeCompare(b.name));
-	res.json({ path: start, directories, truncated: directories.length >= 40 });
+	res.json({ path: start, directories, truncated: directories.length >= MAX_RESULTS });
 });

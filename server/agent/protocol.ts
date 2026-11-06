@@ -89,6 +89,14 @@ export type AgentServerPayload =
 		readonly agent?: string;
 		/** All registered backends. */
 		readonly agents?: readonly AgentInfo[];
+		/**
+		 * Last init's command lists, replayed so a fresh conversation's `/`
+		 * menu is populated before its process has started.
+		 */
+		readonly slashCommands?: readonly string[];
+		readonly skills?: readonly string[];
+		/** Subagent types; `agents` above is the backend list. */
+		readonly subagents?: readonly string[];
 	}
 	/**
 	 * Answer to `attach`: whether a live CLI process backs this session.

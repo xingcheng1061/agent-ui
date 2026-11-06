@@ -261,6 +261,19 @@ class AgentConnection {
 	/** Model / permission-mode chosen before any session exists; applied at spawn. */
 	private _pendingModel: string | undefined;
 	private _pendingMode: string | undefined;
+	/**
+	 * Last `system/init` capabilities, per backend.
+	 *
+	 * A brand-new conversation has no process yet, so no `system` event has
+	 * carried the `/` command list and its menu stayed empty until the first
+	 * message started one. The list is backend-static, so the previous init is
+	 * a good answer and `_sendStaticConfig` replays it on attach.
+	 */
+	private static readonly _capabilities = new Map<string, {
+		slashCommands?: readonly string[];
+		skills?: readonly string[];
+		agents?: readonly string[];
+	}>();
 
 	constructor(
 		private readonly _socket: WebSocket,
@@ -317,6 +330,7 @@ class AgentConnection {
 	private _sendStaticConfig(): void {
 		const driver = this._driver();
 		const choice = choiceForSession(undefined, driver.id);
+		const capabilities = AgentConnection._capabilities.get(driver.id);
 		this._sendConfig({
 			agent: driver.id,
 			agents: this._options.registry.list(),
@@ -324,6 +338,12 @@ class AgentConnection {
 			permissionModes: driver.permissionModes,
 			model: this._entry?.model ?? this._pendingModel ?? pickModel(driver, choice.model),
 			permissionMode: this._entry?.permissionMode ?? this._pendingMode ?? pickMode(driver, choice.permissionMode),
+			// `subagents`, not `agents`: the latter already means the backend list.
+			...(capabilities ? {
+				slashCommands: capabilities.slashCommands,
+				skills: capabilities.skills,
+				subagents: capabilities.agents,
+			} : {}),
 		});
 	}
 
@@ -334,6 +354,10 @@ class AgentConnection {
 		permissionModes?: readonly string[];
 		agent?: string;
 		agents?: readonly AgentInfo[];
+		slashCommands?: readonly string[];
+		skills?: readonly string[];
+		/** Subagent types, i.e. the `system` event's `agents` field. */
+		subagents?: readonly string[];
 	}): void {
 		this._send({ type: 'config', ...patch });
 	}
@@ -710,6 +734,13 @@ class AgentConnection {
 				entry.slashCommands = event.slashCommands;
 				entry.skills = event.skills;
 				entry.agents = event.agents;
+				if (event.slashCommands || event.skills || event.agents) {
+					AgentConnection._capabilities.set(entry.agentId, {
+						slashCommands: entry.slashCommands,
+						skills: entry.skills,
+						agents: entry.agents,
+					});
+				}
 				this._live.set(event.sessionId, entry);
 				void rememberSessionChoice(event.sessionId, requested);
 				this._log(`system model=${event.model} mode=${event.permissionMode} session=${event.sessionId.slice(0, 8)}`);

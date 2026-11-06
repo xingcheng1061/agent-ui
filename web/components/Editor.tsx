@@ -131,6 +131,9 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 			tabSize: 4,
 		});
 		editorRef.current = editor;
+		// Semantic tokens are only painted when this switch is on; the theme
+		// picks the colours, but it does not enable the feature by itself.
+		editor.updateOptions({ 'semanticHighlighting.enabled': true } as unknown as monaco.editor.IEditorOptions);
 		editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
 			void save();
 		});

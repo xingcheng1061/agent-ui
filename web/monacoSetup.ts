@@ -96,9 +96,62 @@ export function modelUri(root: string, relativePath: string): monaco.Uri {
 	return monaco.Uri.parse(`file:///${absolute.replace(/^\/+/, '')}`);
 }
 
+/**
+ * Semantic-token colours, close to VS Code's Dark+/Light+ palettes: without
+ * them a semantic token falls back to the default foreground, so clangd's
+ * answers arrive but a function name looks like every other identifier.
+ * Monaco matches semantic tokens by their type name.
+ */
+const DARK_RULES: monaco.editor.ITokenThemeRule[] = [
+	{ token: 'namespace', foreground: '4EC9B0' },
+	{ token: 'type', foreground: '4EC9B0' },
+	{ token: 'class', foreground: '4EC9B0' },
+	{ token: 'struct', foreground: '4EC9B0' },
+	{ token: 'enum', foreground: '4EC9B0' },
+	{ token: 'enumMember', foreground: '4FC1FF' },
+	{ token: 'typeParameter', foreground: '4EC9B0' },
+	{ token: 'interface', foreground: '4EC9B0' },
+	{ token: 'function', foreground: 'DCDCAA' },
+	{ token: 'method', foreground: 'DCDCAA' },
+	{ token: 'macro', foreground: 'BD93F9' },
+	{ token: 'variable', foreground: '9CDCFE' },
+	{ token: 'parameter', foreground: '9CDCFE' },
+	{ token: 'property', foreground: '9CDCFE' },
+	{ token: 'keyword', foreground: '569CD6' },
+	{ token: 'comment', foreground: '6A9955' },
+	{ token: 'string', foreground: 'CE9178' },
+	{ token: 'number', foreground: 'B5CEA8' },
+	{ token: 'operator', foreground: 'D4D4D4' },
+];
+
+const LIGHT_RULES: monaco.editor.ITokenThemeRule[] = [
+	{ token: 'namespace', foreground: '267F99' },
+	{ token: 'type', foreground: '267F99' },
+	{ token: 'class', foreground: '267F99' },
+	{ token: 'struct', foreground: '267F99' },
+	{ token: 'enum', foreground: '267F99' },
+	{ token: 'enumMember', foreground: '0070C1' },
+	{ token: 'typeParameter', foreground: '267F99' },
+	{ token: 'interface', foreground: '267F99' },
+	{ token: 'function', foreground: '795E26' },
+	{ token: 'method', foreground: '795E26' },
+	{ token: 'macro', foreground: '0000FF' },
+	{ token: 'variable', foreground: '001080' },
+	{ token: 'parameter', foreground: '001080' },
+	{ token: 'property', foreground: '001080' },
+	{ token: 'keyword', foreground: '0000FF' },
+	{ token: 'comment', foreground: '008000' },
+	{ token: 'string', foreground: 'A31515' },
+	{ token: 'number', foreground: '098658' },
+	{ token: 'operator', foreground: '000000' },
+];
+
+monaco.editor.defineTheme('agentui-dark', { base: 'vs-dark', inherit: true, rules: DARK_RULES, colors: {} });
+monaco.editor.defineTheme('agentui-light', { base: 'vs', inherit: true, rules: LIGHT_RULES, colors: {} });
+
 /** Monaco ships both palettes; `setTheme` repaints every live editor at once. */
 export function applyMonacoTheme(theme: 'dark' | 'light'): void {
-	monaco.editor.setTheme(theme === 'light' ? 'vs' : 'vs-dark');
+	monaco.editor.setTheme(theme === 'light' ? 'agentui-light' : 'agentui-dark');
 }
 
 applyMonacoTheme(getTheme());

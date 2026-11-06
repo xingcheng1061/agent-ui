@@ -11,7 +11,7 @@
  * ours — `registerEditorOpener` intercepts the jump, so the file lands in a
  * workspace tab and keeps the project lookup and "moved file" fallbacks.
  */
-import { closeLspDocument, lspDefinition, lspHover, syncLspDocument } from '../api';
+import { closeLspDocument, lspDefinition, lspHover, lspSemanticTokens, syncLspDocument, type LspDiagnostic } from '../api';
 import { modelUri, monaco } from '../monacoSetup';
 
 interface DocumentOwner {
@@ -39,6 +39,42 @@ let installed = false;
 let lastNotice = '';
 
 const SYNC_DELAY_MS = 400;
+
+/**
+ * Legend shared with `server/lsp.ts`. clangd encodes each token as an index
+ * into these arrays, so the order has to match the server exactly.
+ */
+const SEMANTIC_TOKEN_TYPES = [
+	'namespace', 'type', 'class', 'enum', 'interface', 'struct', 'typeParameter',
+	'parameter', 'variable', 'property', 'enumMember', 'event', 'function', 'method',
+	'macro', 'keyword', 'modifier', 'comment', 'string', 'number', 'regexp', 'operator', 'decorator',
+];
+
+const SEMANTIC_TOKEN_MODIFIERS = [
+	'declaration', 'definition', 'readonly', 'static', 'deprecated', 'abstract', 'async',
+	'modification', 'documentation', 'defaultLibrary',
+];
+
+/** LSP severity (1..4) -> Monaco marker severity. */
+const MARKER_SEVERITY: Record<number, monaco.MarkerSeverity> = {
+	1: monaco.MarkerSeverity.Error,
+	2: monaco.MarkerSeverity.Warning,
+	3: monaco.MarkerSeverity.Info,
+	4: monaco.MarkerSeverity.Hint,
+};
+
+/** Paints clangd's diagnostics as the editor's squiggles. */
+function applyDiagnostics(model: monaco.editor.ITextModel, items: readonly LspDiagnostic[]): void {
+	monaco.editor.setModelMarkers(model, 'clangd', items.map(item => ({
+		severity: MARKER_SEVERITY[item.severity] ?? monaco.MarkerSeverity.Error,
+		message: item.message,
+		source: item.source ?? 'clangd',
+		startLineNumber: item.line,
+		startColumn: item.column,
+		endLineNumber: item.endLine,
+		endColumn: item.endColumn,
+	})));
+}
 
 function keyOf(root: string, filePath: string): string {
 	return modelUri(root, filePath).toString();
@@ -76,7 +112,14 @@ function notifyFailure(error: unknown): void {
 }
 
 function push(root: string, filePath: string, text: string): void {
-	void syncLspDocument(root, filePath, text).catch(notifyFailure);
+	void syncLspDocument(root, filePath, text)
+		.then(result => {
+			const model = monaco.editor.getModel(modelUri(root, filePath));
+			if (model) {
+				applyDiagnostics(model, result.diagnostics ?? []);
+			}
+		})
+		.catch(notifyFailure);
 }
 
 /**
@@ -96,6 +139,29 @@ export function attachLsp(next: LspBridge): void {
 		monaco.languages.registerDefinitionProvider(language, { provideDefinition });
 		monaco.languages.registerHoverProvider(language, { provideHover });
 	}
+	monaco.languages.registerDocumentSemanticTokensProvider(['c', 'cpp'], {
+		getLegend: () => ({
+			tokenTypes: [...SEMANTIC_TOKEN_TYPES],
+			tokenModifiers: [...SEMANTIC_TOKEN_MODIFIERS],
+		}),
+		provideDocumentSemanticTokens: async (model, _lastResultId) => {
+			const owner = owners.get(model.uri.toString());
+			if (!owner) {
+				return null;
+			}
+			try {
+				const result = await lspSemanticTokens(owner.root, owner.path, model.getValue());
+				if (result.data.length === 0) {
+					return null;
+				}
+				// LSP's relative 5-tuple encoding is exactly what Monaco decodes.
+				return { resultId: result.resultId, data: new Uint32Array(result.data) };
+			} catch {
+				return null;
+			}
+		},
+		releaseDocumentSemanticTokens: () => undefined,
+	});
 	monaco.editor.registerEditorOpener({
 		openCodeEditor(_source, resource, selectionOrPosition) {
 			const position = positionOf(selectionOrPosition);

@@ -70,6 +70,11 @@ export type AgentServerPayload =
 		readonly permissionModes?: readonly string[];
 		readonly agent?: string;
 		readonly agents?: readonly AgentInfo[];
+		/** Cached init command lists, so a new session's `/` menu works at once. */
+		readonly slashCommands?: readonly string[];
+		readonly skills?: readonly string[];
+		/** Subagent types; `agents` above is the backend list. */
+		readonly subagents?: readonly string[];
 	}
 	/** `lastSeq` locates the stream; there is no server-side buffer any more. */
 	| {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
-import { createEntry, deleteEntry, listDirectory, renameEntry, searchFiles, type FileEntry } from '../api';
+import { createEntry, deleteEntry, listDirectory, renameEntry, searchEntries, type FileEntry } from '../api';
 
 interface DirectoryState {
 	readonly open: boolean;
@@ -74,6 +74,7 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 	/** Filter box: a flat list of matches instead of the tree. */
 	const [query, setQuery] = useState('');
 	const [results, setResults] = useState<readonly string[]>([]);
+	const [dirResults, setDirResults] = useState<readonly string[]>([]);
 	const [searching, setSearching] = useState(false);
 	const trimmedQuery = query.trim();
 
@@ -135,22 +136,25 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 	useEffect(() => {
 		if (trimmedQuery === '') {
 			setResults([]);
+			setDirResults([]);
 			setSearching(false);
 			return;
 		}
 		let cancelled = false;
 		setSearching(true);
 		const timer = window.setTimeout(() => {
-			searchFiles(root, trimmedQuery)
-				.then(files => {
+			searchEntries(root, trimmedQuery)
+				.then(result => {
 					if (!cancelled) {
-						setResults(files);
+						setResults(result.files);
+						setDirResults(result.dirs);
 						setSearching(false);
 					}
 				})
 				.catch(() => {
 					if (!cancelled) {
 						setResults([]);
+						setDirResults([]);
 						setSearching(false);
 					}
 				});
@@ -241,6 +245,19 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 			}
 		} catch (error) {
 			setActionError(String(error));
+		}
+	};
+
+	/**
+	 * Expands every ancestor of a directory found by search, so the tree shows
+	 * where it lives instead of clearing the query into nothing.
+	 */
+	const revealDirectory = async (directory: string) => {
+		setQuery('');
+		let current = '';
+		for (const segment of directory.split('/')) {
+			current = current ? `${current}/${segment}` : segment;
+			await load(current);
 		}
 	};
 
@@ -369,9 +386,13 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 					value={query}
 					onChange={event => setQuery(event.target.value)}
 					onKeyDown={event => {
-						// Enter opens the best match; Esc goes back to the tree.
-						if (event.key === 'Enter' && results.length > 0) {
-							onOpenFile(results[0]!);
+						// Enter takes the best match: a directory expands, a file opens.
+						if (event.key === 'Enter') {
+							if (dirResults.length > 0) {
+								void revealDirectory(dirResults[0]!);
+							} else if (results.length > 0) {
+								onOpenFile(results[0]!);
+							}
 						}
 						if (event.key === 'Escape') {
 							setQuery('');
@@ -393,7 +414,33 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 				: (
 					<>
 						{searching && <div className="tree-hint">搜索中…</div>}
-						{!searching && results.length === 0 && <div className="tree-hint">没有匹配「{trimmedQuery}」的文件</div>}
+						{!searching && results.length === 0 && dirResults.length === 0 && (
+							<div className="tree-hint">没有匹配「{trimmedQuery}」的文件或目录</div>
+						)}
+						{dirResults.map(dirPath => (
+							<div
+								key={`dir:${dirPath}`}
+								className="tree-row"
+								style={{ paddingLeft: 8 }}
+								title={dirPath}
+								onClick={() => {
+									if (!window.getSelection()?.toString()) {
+										void revealDirectory(dirPath);
+									}
+								}}
+								role="treeitem"
+								tabIndex={0}
+								onKeyDown={event => {
+									if (event.key === 'Enter' || event.key === ' ') {
+										event.preventDefault();
+										void revealDirectory(dirPath);
+									}
+								}}
+							>
+								<span className="tree-icon">▸</span>
+								<span className="tree-label">{dirPath}/</span>
+							</div>
+						))}
 						{results.map(filePath => (
 							<div
 								key={filePath}

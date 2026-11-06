@@ -37,7 +37,7 @@ import {
 } from './auth.js';
 import { fsRouter } from './fsApi.js';
 import { gitFileVersions, gitStatus } from './git.js';
-import { closeDocument, definition, disposeLsp, hover, LspUnavailableError, syncDocument } from './lsp.js';
+import { closeDocument, definition, diagnostics, disposeLsp, hover, lspStatus, LspUnavailableError, semanticTokens, syncDocument } from './lsp.js';
 import { resolveModels } from './models.js';
 import { BadRequestError, PathOutsideRootError, readStringQuery, resolveRoot, shouldIgnore, toAbsolute } from './paths.js';
 import { addPersistedRoot } from './projectStore.js';
@@ -478,8 +478,10 @@ app.post('/api/lsp/sync', async (req, res) => {
 		throw new BadRequestError('`root`, `path` and `text` must be strings.');
 	}
 	const root = await resolveRoot(body.root);
-	await syncDocument(root, toAbsolute(root, body.path), body.text);
-	res.json({ ok: true });
+	// The response carries what clangd says about this exact buffer, so the
+	// editor does not have to poll afterwards.
+	const items = await syncDocument(root, toAbsolute(root, body.path), body.text, 350);
+	res.json({ ok: true, diagnostics: items });
 });
 
 app.post('/api/lsp/close', async (req, res) => {
@@ -504,6 +506,29 @@ app.post('/api/lsp/hover', async (req, res) => {
 	const root = await resolveRoot(caret.root);
 	const absolute = toAbsolute(root, caret.absolute);
 	res.json({ contents: await hover(root, absolute, caret.line, caret.column, caret.text) });
+});
+
+/** Debug view: is clangd up for this root, and which database does it use? */
+app.get('/api/lsp/status', async (req, res) => {
+	const root = await resolveRoot(readStringQuery(req.query['root'], 'root'));
+	res.json(lspStatus(root));
+});
+
+/** The latest pushed diagnostics for one file; kept for debugging. */
+app.post('/api/lsp/diagnostics', async (req, res) => {
+	const body = req.body as { root?: unknown; path?: unknown } | undefined;
+	if (typeof body?.root !== 'string' || typeof body.path !== 'string') {
+		throw new BadRequestError('`root` and `path` must be strings.');
+	}
+	const root = await resolveRoot(body.root);
+	res.json({ diagnostics: diagnostics(root, toAbsolute(root, body.path)) });
+});
+
+app.post('/api/lsp/semantic-tokens', async (req, res) => {
+	const caret = lspCaret(req.body);
+	const root = await resolveRoot(caret.root);
+	const absolute = toAbsolute(root, caret.absolute);
+	res.json(await semanticTokens(root, absolute, caret.text));
 });
 
 app.use('/api/fs', fsRouter);

@@ -194,6 +194,12 @@ const WEB_TOOLS: ReadonlySet<string> = new Set(['WebFetch', 'WebSearch']);
 /** Cap per task so a chatty background shell cannot blow up the DOM. */
 const MAX_TASK_LOG = 200_000;
 
+/**
+ * A skill is injected into the conversation as a whole document; past this
+ * length a user-side bubble folds itself instead of pushing the rest away.
+ */
+const LONG_USER_TEXT = 1200;
+
 /** Fallback until the backend sends its advertised modes. */
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'] as const;
 
@@ -587,6 +593,11 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						permissionMode: event.permissionMode ?? previous.permissionMode,
 						permissionModes: event.permissionModes ?? previous.permissionModes,
 						models: event.models ?? previous.models,
+						// Cached from the backend's last init: the `/` menu is ready
+						// before this conversation's own process says anything.
+						slashCommands: event.slashCommands ?? previous.slashCommands,
+						skills: event.skills ?? previous.skills,
+						agents: event.subagents ?? previous.agents,
 					}));
 					return;
 				case 'session_state':
@@ -1575,7 +1586,9 @@ function ChatItemView({ item, childrenOf, outputOf, live = false }: {
 			return (
 				<div className={`msg user${item.queued ? ' queued' : ''}`}>
 					{item.queued && <span className="msg-tag" title="本轮执行中插入，未单独成轮">插话</span>}
-					{item.text}
+					{item.text.length > LONG_USER_TEXT
+						? <LongUserMessage text={item.text} />
+						: item.text}
 				</div>
 			);
 		case 'assistant':
@@ -1604,6 +1617,58 @@ function ChatItemView({ item, childrenOf, outputOf, live = false }: {
 		case 'error':
 			return <div className="msg error">{item.text}</div>;
 	}
+}
+
+/**
+ * A message longer than the transcript can afford — typically the document a
+ * skill injects — starts folded, with its first line as the summary.
+ */
+function LongUserMessage({ text }: { readonly text: string }) {
+	const preview = truncateLine(text, 180);
+	const lines = text.split('\n').length;
+	return (
+		<details className="msg-long">
+			<summary className="msg-long-summary">
+				<span className="msg-long-preview">{preview}</span>
+				<span className="msg-long-meta">{lines} 行 · 点击展开</span>
+			</summary>
+			<div className="msg-long-body">{text}</div>
+		</details>
+	);
+}
+
+/**
+ * Loading a skill: the result is the skill's own document, so the card starts
+ * folded and the body scrolls inside a fixed height.
+ */
+function SkillCard({ item }: { readonly item: Extract<Item, { kind: 'tool' }> }) {
+	const record = (item.input ?? {}) as Record<string, unknown>;
+	const name = ['skill', 'name', 'skill_name', 'command']
+		.map(key => record[key])
+		.find(value => typeof value === 'string' && value.trim() !== '') as string | undefined;
+	const body = item.result?.content ?? '';
+	const state = item.result?.isError ? 'failed' : item.result ? 'done' : 'running';
+	const [open, setOpen] = useState(false);
+	return (
+		<details
+			className={`tool-card skill-card ${state}`}
+			open={open}
+			onToggle={event => setOpen(event.currentTarget.open)}
+		>
+			<summary className="tool-head">
+				<span className={`tool-dot ${state}`} />
+				<span className="tool-name">skill</span>
+				<span className="tool-file" title={name}>{name ?? '加载技能'}</span>
+				{body !== '' && <span className="tool-tag">{body.split('\n').length} 行</span>}
+				{!item.result && <span className="tool-tag running">加载中</span>}
+			</summary>
+			<div className="tool-body">
+				{item.result?.isError
+					? <pre className="tool-result failed">{truncate(toolErrorText(body), 2000)}</pre>
+					: body !== '' && <pre className="skill-body">{truncate(body, 20000)}</pre>}
+			</div>
+		</details>
+	);
 }
 
 /**
@@ -1903,6 +1968,11 @@ function toolCardFor(
 	childrenOf: (id: string) => readonly Item[],
 	outputOf: (taskId: string) => string | undefined,
 ) {
+	// Loading a skill prints its whole document; a dedicated, folded card keeps
+	// it out of the conversation until it is asked for.
+	if (/skill/i.test(item.name)) {
+		return <SkillCard item={item} />;
+	}
 	// Shell calls get their own control: `PowerShell` is what the CLI emits on
 	// Windows, so matching only `Bash` hid half of them.
 	if (SHELL_TOOLS.has(item.name)) {

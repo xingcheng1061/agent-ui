@@ -158,11 +158,21 @@ export function reportClientLog(payload: Readonly<Record<string, unknown>>): voi
 	}).catch(() => undefined);
 }
 
-/** Path search for the `@` mention picker. */
-export async function searchFiles(root: string, query: string): Promise<readonly string[]> {
-	const result = await requestJson<{ files: string[] }>(
+export interface SearchResult {
+	readonly files: readonly string[];
+	readonly dirs: readonly string[];
+}
+
+/** Path search: files and directories are returned separately. */
+export async function searchEntries(root: string, query: string): Promise<SearchResult> {
+	return requestJson<SearchResult>(
 		`/api/fs/search?root=${encodeURIComponent(root)}&q=${encodeURIComponent(query)}`,
 	);
+}
+
+/** Path search for the `@` mention picker, which only wants files. */
+export async function searchFiles(root: string, query: string): Promise<readonly string[]> {
+	const result = await searchEntries(root, query);
 	return result.files;
 }
 
@@ -192,7 +202,11 @@ export interface DefinitionTarget {
  * jump target point at the line the file had on disk — which is the line above
  * whatever was just typed.
  */
-export function syncLspDocument(root: string, filePath: string, text: string): Promise<{ ok: boolean }> {
+export function syncLspDocument(
+	root: string,
+	filePath: string,
+	text: string,
+): Promise<{ ok: boolean; diagnostics: readonly LspDiagnostic[] }> {
 	return requestJson('/api/lsp/sync', {
 		method: 'POST',
 		body: JSON.stringify({ root, path: filePath, text }),
@@ -236,6 +250,38 @@ export async function lspHover(
 		body: JSON.stringify({ root, path: filePath, line, column, text }),
 	});
 	return result.contents;
+}
+
+/** A clangd diagnostic, translated to 1-based lines/columns for Monaco. */
+export interface LspDiagnostic {
+	readonly line: number;
+	readonly column: number;
+	readonly endLine: number;
+	readonly endColumn: number;
+	/** LSP severity: 1 error, 2 warning, 3 information, 4 hint. */
+	readonly severity: number;
+	readonly message: string;
+	readonly source?: string;
+}
+
+export async function lspDiagnostics(root: string, filePath: string): Promise<readonly LspDiagnostic[]> {
+	const result = await requestJson<{ diagnostics: LspDiagnostic[] }>('/api/lsp/diagnostics', {
+		method: 'POST',
+		body: JSON.stringify({ root, path: filePath }),
+	});
+	return result.diagnostics;
+}
+
+/** Relative 5-tuple token data, which is exactly Monaco's encoding. */
+export async function lspSemanticTokens(
+	root: string,
+	filePath: string,
+	text?: string,
+): Promise<{ resultId?: string; data: readonly number[] }> {
+	return requestJson('/api/lsp/semantic-tokens', {
+		method: 'POST',
+		body: JSON.stringify({ root, path: filePath, text }),
+	});
 }
 
 /** Creates an empty file or a directory; an existing path is refused. */

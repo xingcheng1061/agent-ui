@@ -40,6 +40,14 @@ interface LspRange {
 	readonly end: { readonly line: number; readonly character: number };
 }
 
+/** The subset of `textDocument/publishDiagnostics` the editor needs. */
+interface RawDiagnostic {
+	readonly range: LspRange;
+	readonly severity?: number;
+	readonly message: string;
+	readonly source?: string;
+}
+
 interface RpcMessage {
 	readonly id?: number | string;
 	readonly method?: string;
@@ -57,9 +65,16 @@ interface Pending {
 interface Session {
 	readonly root: string;
 	readonly proc: ChildProcessWithoutNullStreams;
+	readonly executable: string;
+	/** Resolved `--compile-commands-dir`, when one was configured. */
+	readonly compileCommandsDir?: string;
 	readonly pending: Map<number, Pending>;
 	/** uri -> version, for the documents clangd currently has open. */
 	readonly documents: Map<string, number>;
+	/** uri -> last diagnostics clangd pushed for it. */
+	readonly diagnostics: Map<string, readonly RawDiagnostic[]>;
+	/** uri -> syncs blocked on the next `publishDiagnostics` for that file. */
+	readonly diagnosticWaiters: Map<string, Array<() => void>>;
 	nextId: number;
 	/** Bytes of a frame not yet complete: a chunk can split anywhere. */
 	buffer: Buffer;
@@ -70,6 +85,21 @@ interface Session {
 /** A clangd start can index a large project; a request is expected to be quick. */
 const INITIALIZE_TIMEOUT_MS = 20 * 1000;
 const REQUEST_TIMEOUT_MS = 15 * 1000;
+
+/**
+ * Legend shared with the browser: clangd indexes into these arrays, and the
+ * editor has to declare the exact same order to decode the token stream.
+ */
+export const SEMANTIC_TOKEN_TYPES = [
+	'namespace', 'type', 'class', 'enum', 'interface', 'struct', 'typeParameter',
+	'parameter', 'variable', 'property', 'enumMember', 'event', 'function', 'method',
+	'macro', 'keyword', 'modifier', 'comment', 'string', 'number', 'regexp', 'operator', 'decorator',
+] as const;
+
+export const SEMANTIC_TOKEN_MODIFIERS = [
+	'declaration', 'definition', 'readonly', 'static', 'deprecated', 'abstract', 'async',
+	'modification', 'documentation', 'defaultLibrary',
+] as const;
 /** A directory left alone keeps its process (and its index) for this long. */
 const IDLE_MS = 30 * 60 * 1000;
 const REAP_INTERVAL_MS = 60 * 1000;
@@ -157,7 +187,23 @@ function answerClientRequest(session: Session, message: RpcMessage): void {
 function handleMessage(session: Session, message: RpcMessage): void {
 	if (typeof message.method === 'string') {
 		if (message.id === undefined) {
-			// publishDiagnostics and friends: the bridge is request/response only.
+			// clangd pushes diagnostics after every didOpen/didChange; keeping the
+			// latest per file is what lets the editor paint squiggles without a
+			// second connection.
+			if (message.method === 'textDocument/publishDiagnostics') {
+				const params = message.params as { uri?: unknown; diagnostics?: unknown } | undefined;
+				if (typeof params?.uri === 'string' && Array.isArray(params.diagnostics)) {
+					session.diagnostics.set(params.uri, params.diagnostics as readonly RawDiagnostic[]);
+					// A sync request is waiting for exactly this push.
+					const waiters = session.diagnosticWaiters.get(params.uri);
+					if (waiters) {
+						session.diagnosticWaiters.delete(params.uri);
+						for (const wake of waiters) {
+							wake();
+						}
+					}
+				}
+			}
 			return;
 		}
 		answerClientRequest(session, message);
@@ -237,10 +283,16 @@ async function startSession(root: string): Promise<Session> {
 	if (!executable) {
 		throw new LspUnavailableError('找不到 clangd 可执行文件，请安装 LLVM/clangd 或用 AGENT_UI_CLANGD 指定路径');
 	}
-	const args = ['--log=error', '--enable-config', '--header-insertion=never'];
+	// `AGENT_UI_CLANGD_LOG=verbose` makes clangd print which compilation
+	// database it loaded, which is the quickest way to check a setup.
+	const logLevel = process.env['AGENT_UI_CLANGD_LOG'] ?? 'error';
+	const args = [`--log=${logLevel}`, '--enable-config', '--header-insertion=never'];
 	const compileCommandsDir = process.env['AGENT_UI_COMPILE_COMMANDS_DIR'];
-	if (compileCommandsDir && compileCommandsDir.trim() !== '') {
-		args.push(`--compile-commands-dir=${path.resolve(root, compileCommandsDir.trim())}`);
+	const resolvedCompileCommandsDir = compileCommandsDir && compileCommandsDir.trim() !== ''
+		? path.resolve(root, compileCommandsDir.trim())
+		: undefined;
+	if (resolvedCompileCommandsDir) {
+		args.push(`--compile-commands-dir=${resolvedCompileCommandsDir}`);
 	}
 	const proc = spawn(executable, args, {
 		cwd: root,
@@ -250,8 +302,12 @@ async function startSession(root: string): Promise<Session> {
 	const session: Session = {
 		root,
 		proc,
+		executable,
+		compileCommandsDir: resolvedCompileCommandsDir,
 		pending: new Map(),
 		documents: new Map(),
+		diagnostics: new Map(),
+		diagnosticWaiters: new Map(),
 		nextId: 1,
 		buffer: Buffer.alloc(0),
 		lastUsed: Date.now(),
@@ -259,7 +315,9 @@ async function startSession(root: string): Promise<Session> {
 	};
 	proc.stdout.on('data', (chunk: Buffer) => readFrames(session, chunk));
 	proc.stderr.on('data', (chunk: Buffer) => {
-		if (DEBUG) {
+		// A requested log level would print nothing without this, and the whole
+		// point of raising it is to watch clangd find its database.
+		if (DEBUG || process.env['AGENT_UI_CLANGD_LOG']) {
 			process.stderr.write(`[agent-ui:clangd:${label(session)}] ${chunk.toString('utf8')}`);
 		}
 	});
@@ -280,7 +338,13 @@ async function startSession(root: string): Promise<Session> {
 			// on the start of the signature (or a leading comment) and looks
 			// like it missed.
 			definition: { linkSupport: true },
-				hover: { contentFormat: ['markdown', 'plaintext'] },
+			hover: { contentFormat: ['markdown', 'plaintext'] },
+			semanticTokens: {
+				requests: { full: true },
+				tokenTypes: [...SEMANTIC_TOKEN_TYPES],
+				tokenModifiers: [...SEMANTIC_TOKEN_MODIFIERS],
+				formats: ['relative'],
+			},
 			},
 			workspace: { workspaceFolders: true, configuration: true },
 			window: { workDoneProgress: true },
@@ -350,6 +414,32 @@ function pushDocument(session: Session, absolutePath: string, text: string): voi
 		});
 	}
 	session.documents.set(uri, version);
+}
+
+/**
+ * Waits for clangd's next `publishDiagnostics` for one file.
+ *
+ * Pushing the document is a notification, so there is nothing to await on the
+ * LSP side; this is the missing edge. It resolves on the first push or on the
+ * timeout, because clangd stays silent when the diagnostic set did not change.
+ */
+function waitForDiagnostics(session: Session, uri: string, timeoutMs: number): Promise<void> {
+	return new Promise(resolve => {
+		const waiters = session.diagnosticWaiters.get(uri) ?? [];
+		let settled = false;
+		const finish = () => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			clearTimeout(timer);
+			resolve();
+		};
+		const timer = setTimeout(finish, timeoutMs);
+		timer.unref();
+		waiters.push(finish);
+		session.diagnosticWaiters.set(uri, waiters);
+	});
 }
 
 /** A request about a file clangd has never seen needs its content first. */
@@ -429,9 +519,25 @@ function hoverMarkdown(result: unknown): string | undefined {
  * Called on open and (debounced, by the client) on every edit; without this
  * the answers describe whatever was last on disk, and jump targets drift.
  */
-export async function syncDocument(root: string, absolutePath: string, text: string): Promise<void> {
+export async function syncDocument(
+	root: string,
+	absolutePath: string,
+	text: string,
+	waitMs = 0,
+): Promise<readonly LspDiagnostic[]> {
 	const session = await sessionFor(root);
+	const uri = pathToFileURL(absolutePath).href;
 	pushDocument(session, absolutePath, text);
+	if (waitMs > 0) {
+		await waitForDiagnostics(session, uri, waitMs);
+		// The first open of a translation unit may still be building its
+		// preamble; clangd publishes again when it is ready, so an empty first
+		// window gets a second one instead of looking like "no errors".
+		if (!session.diagnostics.has(uri)) {
+			await waitForDiagnostics(session, uri, waitMs * 3);
+		}
+	}
+	return diagnostics(root, absolutePath);
 }
 
 export async function closeDocument(root: string, absolutePath: string): Promise<void> {
@@ -475,6 +581,61 @@ export async function hover(root: string, absolutePath: string, line: number, co
 	return hoverMarkdown(result);
 }
 
+/** One marker for the editor, 1-based like everything the client hands Monaco. */
+export interface LspDiagnostic {
+	readonly line: number;
+	readonly column: number;
+	readonly endLine: number;
+	readonly endColumn: number;
+	readonly severity: number;
+	readonly message: string;
+	readonly source?: string;
+}
+
+/**
+ * The diagnostics clangd last pushed for a file.
+ *
+ * Push, not pull: clangd sends them after didOpen/didChange, and the editor
+ * polls this snapshot instead of holding an LSP connection open in the tab.
+ */
+export function diagnostics(root: string, absolutePath: string): readonly LspDiagnostic[] {
+	const session = sessions.get(normalizeRoot(root));
+	if (!session || session.closed) {
+		return [];
+	}
+	const raw = session.diagnostics.get(pathToFileURL(absolutePath).href) ?? [];
+	return raw.map(item => ({
+		line: item.range.start.line + 1,
+		column: item.range.start.character + 1,
+		endLine: item.range.end.line + 1,
+		endColumn: item.range.end.character + 1,
+		severity: item.severity ?? 1,
+		message: item.message,
+		source: item.source,
+	}));
+}
+
+/**
+ * Semantic tokens for the whole document, in LSP's relative 5-tuple encoding —
+ * the same layout Monaco's provider wants, so the array is passed through.
+ */
+export async function semanticTokens(
+	root: string,
+	absolutePath: string,
+	text?: string,
+): Promise<{ resultId?: string; data: readonly number[] }> {
+	const session = await sessionFor(root);
+	if (text === undefined) {
+		await ensureDocument(session, absolutePath);
+	} else {
+		pushDocument(session, absolutePath, text);
+	}
+	const result = await request(session, 'textDocument/semanticTokens/full', {
+		textDocument: { uri: pathToFileURL(absolutePath).href },
+	}) as { resultId?: string; data?: number[] } | null;
+	return { resultId: result?.resultId, data: result?.data ?? [] };
+}
+
 /** Startup cost paid before the first click: handshake only, no indexing wait. */
 export async function warmLsp(root: string): Promise<boolean> {
 	if (!clangdExecutable()) {
@@ -482,6 +643,33 @@ export async function warmLsp(root: string): Promise<boolean> {
 	}
 	await sessionFor(root);
 	return true;
+}
+
+export interface LspStatus {
+	readonly running: boolean;
+	readonly pid?: number;
+	readonly root: string;
+	readonly clangd?: string;
+	readonly compileCommandsDir?: string;
+	readonly documents: number;
+	readonly filesWithDiagnostics: number;
+}
+
+/** What the server knows about the clangd backing one project root. */
+export function lspStatus(root: string): LspStatus {
+	const session = sessions.get(normalizeRoot(root));
+	if (!session || session.closed) {
+		return { running: false, root, documents: 0, filesWithDiagnostics: 0 };
+	}
+	return {
+		running: true,
+		pid: session.proc.pid,
+		root: session.root,
+		clangd: session.executable,
+		compileCommandsDir: session.compileCommandsDir,
+		documents: session.documents.size,
+		filesWithDiagnostics: session.diagnostics.size,
+	};
 }
 
 export function disposeLsp(): void {

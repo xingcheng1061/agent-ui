@@ -170,7 +170,7 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 										go(hits[0]!.path);
 									}
 								}}
-								placeholder="搜索该目录下的子目录（至少 2 个字）"
+								placeholder="搜索当前目录及其子目录（至少 2 个字）"
 								spellCheck={false}
 							/>
 						</div>
@@ -187,7 +187,9 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 									<>
 										{hitsLoading && <div className="rail-empty">搜索中…</div>}
 										{!hitsLoading && hits.length === 0 && (
-											<div className="rail-empty">这里及其子目录没有匹配的目录</div>
+											<div className="rail-empty">
+												当前目录及子目录里没有匹配的目录；可以回到上层目录再搜
+											</div>
 										)}
 										{hits.map(hit => (
 											<button

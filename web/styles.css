@@ -990,6 +990,49 @@ button {
 	color: var(--danger-text);
 }
 
+/* ---------- long user messages / skill documents ---------- */
+
+.msg-long-summary {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	cursor: pointer;
+	color: var(--fg-muted);
+}
+
+.msg-long-preview {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.msg-long-meta {
+	flex: none;
+	font-size: 10.5px;
+	color: var(--fg-dim);
+}
+
+.msg-long-body {
+	max-height: 360px;
+	overflow: auto;
+	overscroll-behavior: contain;
+	margin-top: 6px;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+/* The folded skill document: its own scroller, so expanding it cannot push
+   the conversation away. */
+.skill-body {
+	margin: 0;
+	max-height: 320px;
+	overflow: auto;
+	overscroll-behavior: contain;
+	white-space: pre-wrap;
+	word-break: break-word;
+	color: var(--fg-muted);
+}
+
 .tool-pending {
 	color: var(--fg-dim);
 	margin-top: 4px;
@@ -1281,8 +1324,44 @@ button {
 	border-bottom: 1px solid var(--border);
 }
 
-.diff-labels span {
+.diff-labels > span:not(.diff-actions) {
 	flex: 1;
+}
+
+.diff-actions {
+	flex: none;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.diff-actions button {
+	width: 22px;
+	height: 20px;
+	padding: 0;
+	background: var(--bg);
+	border: 1px solid var(--border);
+	border-radius: 3px;
+	color: var(--fg-muted);
+	font-size: 11px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.diff-actions button:hover:not(:disabled) {
+	background: var(--bg-hover);
+	color: var(--fg);
+}
+
+.diff-actions button:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
+.diff-count {
+	margin-right: 2px;
+	font-size: 10.5px;
+	color: var(--fg-dim);
 }
 
 .diff-host {
@@ -2104,6 +2183,19 @@ button {
    permission: the answers become the tool's input. */
 .question-card {
 	gap: 8px;
+	/* A round with many questions used to grow until it covered the transcript.
+	   Cap the card and scroll inside, so the conversation and the composer stay
+	   in view while it is answered. */
+	max-height: min(46vh, 460px);
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+
+.question-card .permission-actions {
+	position: sticky;
+	bottom: 0;
+	padding: 8px 0 2px;
+	background: var(--warn-bg);
 }
 
 .question-title-head {
