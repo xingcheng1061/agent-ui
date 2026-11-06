@@ -1398,6 +1398,9 @@ button {
 .tree-label {
 	overflow: hidden;
 	text-overflow: ellipsis;
+	/* The row disables selection so a click target stays steady; the name
+	   itself is still text worth selecting and copying. */
+	user-select: text;
 }
 
 .tree-hint {

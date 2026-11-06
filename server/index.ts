@@ -450,8 +450,8 @@ app.delete('/api/sessions/:id', async (req, res) => {
  * rule on this side, where they can be tested without a browser.
  */
 /** A definition/hover body: where the file is, and where in it the caret sat. */
-function lspCaret(body: unknown): { root: string; absolute: string; line: number; column: number } {
-	const fields = body as { root?: unknown; path?: unknown; line?: unknown; column?: unknown } | undefined;
+function lspCaret(body: unknown): { root: string; absolute: string; line: number; column: number; text?: string } {
+	const fields = body as { root?: unknown; path?: unknown; line?: unknown; column?: unknown; text?: unknown } | undefined;
 	if (typeof fields?.root !== 'string' || typeof fields.path !== 'string') {
 		throw new BadRequestError('`root` and `path` must be strings.');
 	}
@@ -460,7 +460,10 @@ function lspCaret(body: unknown): { root: string; absolute: string; line: number
 	if (!Number.isInteger(line) || !Number.isInteger(column) || line < 1 || column < 1) {
 		throw new BadRequestError('`line` and `column` must be positive integers (1-based).');
 	}
-	return { root: fields.root, absolute: fields.path, line, column };
+	// `text` is optional so an old client keeps working; when present it is the
+	// buffer exactly as the editor holds it, which is what makes a jump right
+	// after an edit land on the symbol instead of the previous line.
+	return { root: fields.root, absolute: fields.path, line, column, text: typeof fields.text === 'string' ? fields.text : undefined };
 }
 
 /**
@@ -493,14 +496,14 @@ app.post('/api/lsp/definition', async (req, res) => {
 	const caret = lspCaret(req.body);
 	const root = await resolveRoot(caret.root);
 	const absolute = toAbsolute(root, caret.absolute);
-	res.json({ locations: await definition(root, absolute, caret.line, caret.column) });
+	res.json({ locations: await definition(root, absolute, caret.line, caret.column, caret.text) });
 });
 
 app.post('/api/lsp/hover', async (req, res) => {
 	const caret = lspCaret(req.body);
 	const root = await resolveRoot(caret.root);
 	const absolute = toAbsolute(root, caret.absolute);
-	res.json({ contents: await hover(root, absolute, caret.line, caret.column) });
+	res.json({ contents: await hover(root, absolute, caret.line, caret.column, caret.text) });
 });
 
 app.use('/api/fs', fsRouter);

@@ -158,6 +158,63 @@ fsRouter.post('/create', async (req, res) => {
 	res.json({ ok: true, path: toRelative(resolvedRoot, absolute), type });
 });
 
+/**
+ * Rename or move one entry inside the root.
+ *
+ * `to` is a full relative path rather than just a name: the inline input edits
+ * the last segment today, and a future "move to…" action sends another folder.
+ * A directory cannot be renamed into its own subtree — `fs.rename` fails with
+ * an opaque EINVAL there, so it is refused up front.
+ */
+fsRouter.post('/rename', async (req, res) => {
+	const body: unknown = req.body;
+	if (typeof body !== 'object' || body === null) {
+		throw new BadRequestError('Expected a JSON body.');
+	}
+	const { root, from, to } = body as { root?: unknown; from?: unknown; to?: unknown };
+	if (typeof root !== 'string' || typeof from !== 'string' || typeof to !== 'string') {
+		throw new BadRequestError('`root`, `from` and `to` must be strings.');
+	}
+	if (from.trim() === '' || to.trim() === '') {
+		throw new BadRequestError('`from` and `to` are required.');
+	}
+
+	const resolvedRoot = await resolveRoot(root);
+	const source = toAbsolute(resolvedRoot, from.trim());
+	const target = toAbsolute(resolvedRoot, to.trim());
+	if (source === resolvedRoot || target === resolvedRoot) {
+		throw new BadRequestError('不能重命名项目根目录。');
+	}
+	if (source === target) {
+		res.json({ ok: true, path: toRelative(resolvedRoot, target) });
+		return;
+	}
+	if (target.startsWith(source + path.sep)) {
+		throw new BadRequestError('不能把目录移动到它自己里面。');
+	}
+
+	const parent = path.dirname(target);
+	const parentStat = await fs.stat(parent).catch(() => undefined);
+	if (!parentStat?.isDirectory()) {
+		throw new BadRequestError(`目录不存在：${toRelative(resolvedRoot, parent)}`);
+	}
+	// Renaming onto an existing name would silently replace it on some
+	// platforms; the tree's inline input must not be a way to lose a file.
+	const existing = await fs.stat(target).catch(() => undefined);
+	if (existing) {
+		res.status(409).json({ error: `同名文件或目录已存在：${toRelative(resolvedRoot, target)}` });
+		return;
+	}
+	const stat = await fs.stat(source).catch(() => undefined);
+	if (!stat) {
+		res.status(404).json({ error: `不存在：${from}` });
+		return;
+	}
+
+	await fs.rename(source, target);
+	res.json({ ok: true, path: toRelative(resolvedRoot, target) });
+});
+
 /** Deletes one entry from the tree; a directory goes with everything inside it. */
 fsRouter.delete('/delete', async (req, res) => {
 	const body: unknown = req.body;

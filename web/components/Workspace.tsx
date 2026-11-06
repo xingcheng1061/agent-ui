@@ -353,6 +353,23 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 							selectedPath={selectedFile}
 							reloadToken={treeReload}
 							onOpenFile={filePath => openFileFrom({ root, path: filePath })}
+							onPathRenamed={(from, to) => {
+								// A rename keeps the tab open: it is the same file that
+								// moved, and reopening it would lose caret and scroll.
+								const remap = (filePath: string) => filePath === from
+									? to
+									: filePath.startsWith(`${from}/`) ? `${to}${filePath.slice(from.length)}` : filePath;
+								const current = openedRef.current;
+								if (current && sameRoot(current.root, root)
+									&& (current.path === from || current.path.startsWith(`${from}/`))) {
+									const next = { ...current, path: remap(current.path) };
+									setOpened(next);
+									writeOpenFile(root, next.path);
+								}
+								if (diffPath === from || diffPath?.startsWith(`${from}/`)) {
+									setDiffPath(remap(diffPath));
+								}
+							}}
 							onPathDeleted={deletedPath => {
 								// The open file may be the deleted one, or live inside a
 								// deleted directory: either way the tab has nothing to show.

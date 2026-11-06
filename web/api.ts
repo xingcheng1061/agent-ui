@@ -206,18 +206,34 @@ export function closeLspDocument(root: string, filePath: string): Promise<{ ok: 
 	});
 }
 
-export async function lspDefinition(root: string, filePath: string, line: number, column: number): Promise<readonly DefinitionTarget[]> {
+/**
+ * `text` is the buffer as the editor holds it. Sending it makes the answer
+ * describe what is on screen right now, not the last debounced sync.
+ */
+export async function lspDefinition(
+	root: string,
+	filePath: string,
+	line: number,
+	column: number,
+	text?: string,
+): Promise<readonly DefinitionTarget[]> {
 	const result = await requestJson<{ locations: DefinitionTarget[] }>('/api/lsp/definition', {
 		method: 'POST',
-		body: JSON.stringify({ root, path: filePath, line, column }),
+		body: JSON.stringify({ root, path: filePath, line, column, text }),
 	});
 	return result.locations;
 }
 
-export async function lspHover(root: string, filePath: string, line: number, column: number): Promise<string | undefined> {
+export async function lspHover(
+	root: string,
+	filePath: string,
+	line: number,
+	column: number,
+	text?: string,
+): Promise<string | undefined> {
 	const result = await requestJson<{ contents?: string }>('/api/lsp/hover', {
 		method: 'POST',
-		body: JSON.stringify({ root, path: filePath, line, column }),
+		body: JSON.stringify({ root, path: filePath, line, column, text }),
 	});
 	return result.contents;
 }
@@ -237,6 +253,15 @@ export function deleteEntry(root: string, filePath: string): Promise<{ ok: boole
 		method: 'DELETE',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ root, path: filePath }),
+	});
+}
+
+/** Renames (or moves) an entry; `to` is a full path relative to the root. */
+export function renameEntry(root: string, from: string, to: string): Promise<{ ok: boolean; path: string }> {
+	return requestJson('/api/fs/rename', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ root, from, to }),
 	});
 }
 

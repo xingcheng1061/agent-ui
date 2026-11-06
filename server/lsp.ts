@@ -275,7 +275,11 @@ async function startSession(root: string): Promise<Session> {
 		capabilities: {
 			textDocument: {
 				synchronization: { dynamicRegistration: false, didSave: false, willSave: false },
-				definition: { linkSupport: false },
+				// LocationLink carries `targetSelectionRange`, i.e. the identifier
+			// itself rather than the whole declaration. Without it a jump lands
+			// on the start of the signature (or a leading comment) and looks
+			// like it missed.
+			definition: { linkSupport: true },
 				hover: { contentFormat: ['markdown', 'plaintext'] },
 			},
 			workspace: { workspaceFolders: true, configuration: true },
@@ -440,9 +444,16 @@ export async function closeDocument(root: string, absolutePath: string): Promise
 	notify(session, 'textDocument/didClose', { textDocument: { uri } });
 }
 
-export async function definition(root: string, absolutePath: string, line: number, column: number): Promise<readonly DefinitionTarget[]> {
+export async function definition(root: string, absolutePath: string, line: number, column: number, text?: string): Promise<readonly DefinitionTarget[]> {
 	const session = await sessionFor(root);
-	await ensureDocument(session, absolutePath);
+	// A click right after typing must not be answered about the previous
+	// buffer: the editor's current text wins over both the file on disk and a
+	// debounced sync that has not fired yet.
+	if (text === undefined) {
+		await ensureDocument(session, absolutePath);
+	} else {
+		pushDocument(session, absolutePath, text);
+	}
 	const result = await request(session, 'textDocument/definition', {
 		textDocument: { uri: pathToFileURL(absolutePath).href },
 		position: { line: Math.max(0, line - 1), character: Math.max(0, column - 1) },
@@ -450,9 +461,13 @@ export async function definition(root: string, absolutePath: string, line: numbe
 	return locationsFrom(result);
 }
 
-export async function hover(root: string, absolutePath: string, line: number, column: number): Promise<string | undefined> {
+export async function hover(root: string, absolutePath: string, line: number, column: number, text?: string): Promise<string | undefined> {
 	const session = await sessionFor(root);
-	await ensureDocument(session, absolutePath);
+	if (text === undefined) {
+		await ensureDocument(session, absolutePath);
+	} else {
+		pushDocument(session, absolutePath, text);
+	}
 	const result = await request(session, 'textDocument/hover', {
 		textDocument: { uri: pathToFileURL(absolutePath).href },
 		position: { line: Math.max(0, line - 1), character: Math.max(0, column - 1) },

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
-import { createEntry, deleteEntry, listDirectory, searchFiles, type FileEntry } from '../api';
+import { createEntry, deleteEntry, listDirectory, renameEntry, searchFiles, type FileEntry } from '../api';
 
 interface DirectoryState {
 	readonly open: boolean;
@@ -14,6 +14,8 @@ interface FileTreeProps {
 	readonly onOpenFile: (filePath: string) => void;
 	/** Called with the deleted path so the pane can close a tab underneath it. */
 	readonly onPathDeleted?: (filePath: string) => void;
+	/** Called after a rename so open tabs can follow the file. */
+	readonly onPathRenamed?: (from: string, to: string) => void;
 	/**
 	 * Bumped when the listing should be re-read: a finished agent turn may have
 	 * added or deleted files, and the tree only ever loads a directory once.
@@ -28,18 +30,45 @@ function parentOf(filePath: string): string {
 }
 
 /**
+ * Writes to the clipboard from a click handler.
+ *
+ * The async API needs a secure context (https or localhost); this workbench is
+ * commonly served over plain http on a LAN, where `navigator.clipboard` is
+ * missing. The textarea fallback is the only thing that works there.
+ */
+async function copyText(text: string): Promise<void> {
+	try {
+		await navigator.clipboard.writeText(text);
+	} catch {
+		const area = document.createElement('textarea');
+		area.value = text;
+		area.style.position = 'fixed';
+		area.style.top = '-1000px';
+		area.style.opacity = '0';
+		document.body.appendChild(area);
+		area.select();
+		document.execCommand('copy');
+		area.remove();
+	}
+}
+
+/**
  * The project's files, one directory at a time.
  *
  * New file / new folder / delete live on a context menu, as in VS Code: the tree
  * is a dense list of clickable rows, and permanent actions do not belong on
  * something a stray click hits.
  */
-export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, reloadToken = 0 }: FileTreeProps) {
+export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPathRenamed, reloadToken = 0 }: FileTreeProps) {
 	const [directories, setDirectories] = useState<Record<string, DirectoryState>>({});
 	/** Right-click menu: where it opened, and on what (nothing = empty space). */
 	const [menu, setMenu] = useState<{ x: number; y: number; directory: string; entry?: FileEntry } | undefined>(undefined);
-	/** The inline name input, one at a time, like VS Code's explorer. */
-	const [draft, setDraft] = useState<{ directory: string; type: 'file' | 'dir' } | undefined>(undefined);
+	/**
+	 * The inline name input, one at a time, like VS Code's explorer. A rename
+	 * reuses it with `rename` set, so both actions share the validation and the
+	 * Enter/Escape handling.
+	 */
+	const [draft, setDraft] = useState<{ directory: string; type: 'file' | 'dir'; rename?: FileEntry } | undefined>(undefined);
 	const [draftName, setDraftName] = useState('');
 	const [actionError, setActionError] = useState<string | undefined>(undefined);
 	/** Filter box: a flat list of matches instead of the tree. */
@@ -169,6 +198,13 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, reload
 		}
 	};
 
+	const startRename = (entry: FileEntry) => {
+		setMenu(undefined);
+		setActionError(undefined);
+		setDraft({ directory: parentOf(entry.path), type: entry.type, rename: entry });
+		setDraftName(entry.name);
+	};
+
 	const submitDraft = async () => {
 		const target = draft;
 		if (!target) {
@@ -179,14 +215,29 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, reload
 			setDraft(undefined);
 			return;
 		}
-		const entryPath = target.directory ? `${target.directory}/${name}` : name;
+		const parent = target.rename ? parentOf(target.rename.path) : target.directory;
+		const nextPath = parent ? `${parent}/${name}` : name;
 		try {
-			await createEntry(root, entryPath, target.type);
+			if (target.rename) {
+				if (nextPath === target.rename.path) {
+					setDraft(undefined);
+					return;
+				}
+				await renameEntry(root, target.rename.path, nextPath);
+				setDraft(undefined);
+				setDraftName('');
+				// The pane keeps its tab on the old path otherwise, and the
+				// editor would reopen a file that no longer exists.
+				onPathRenamed?.(target.rename.path, nextPath);
+				await load(parent);
+				return;
+			}
+			await createEntry(root, nextPath, target.type);
 			setDraft(undefined);
 			setDraftName('');
-			await load(target.directory);
+			await load(parent);
 			if (target.type === 'file') {
-				onOpenFile(entryPath);
+				onOpenFile(nextPath);
 			}
 		} catch (error) {
 			setActionError(String(error));
@@ -208,49 +259,82 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, reload
 		}
 	};
 
+	const draftRow = (key: string, depth: number, icon: string, placeholder: string) => (
+		<div className="tree-row" key={key} style={{ paddingLeft: 8 + depth * 12 }}>
+			<span className="tree-icon">{icon}</span>
+			<input
+				className="tree-input"
+				autoFocus
+				value={draftName}
+				placeholder={placeholder}
+				spellCheck={false}
+				onChange={event => setDraftName(event.target.value)}
+				onKeyDown={event => {
+					if (event.key === 'Enter') {
+						event.preventDefault();
+						void submitDraft();
+					}
+					if (event.key === 'Escape') {
+						event.stopPropagation();
+						setDraft(undefined);
+					}
+				}}
+				onBlur={() => setDraft(undefined)}
+			/>
+		</div>
+	);
+
 	const renderDirectory = (directory: string, depth: number): JSX.Element[] => {
 		const state = directories[directory];
 		const rows: JSX.Element[] = [];
-		if (draft?.directory === directory) {
-			rows.push(
-				<div className="tree-row" key={`draft:${directory}`} style={{ paddingLeft: 8 + depth * 12 }}>
-					<span className="tree-icon">{draft.type === 'dir' ? '▸' : '·'}</span>
-					<input
-						className="tree-input"
-						autoFocus
-						value={draftName}
-						placeholder={draft.type === 'dir' ? '新目录名' : '新文件名'}
-						spellCheck={false}
-						onChange={event => setDraftName(event.target.value)}
-						onKeyDown={event => {
-							if (event.key === 'Enter') {
-								event.preventDefault();
-								void submitDraft();
-							}
-							if (event.key === 'Escape') {
-								event.stopPropagation();
-								setDraft(undefined);
-							}
-						}}
-						onBlur={() => setDraft(undefined)}
-					/>
-				</div>,
-			);
+		// A create input sits at the top of its directory; a rename input takes
+		// the place of the row it renames (inside the loop below).
+		if (draft?.directory === directory && !draft.rename) {
+			rows.push(draftRow(
+				`draft:${directory}`,
+				depth,
+				draft.type === 'dir' ? '▸' : '·',
+				draft.type === 'dir' ? '新目录名' : '新文件名',
+			));
 		}
 		if (state?.open && state.entries) {
 			for (const entry of state.entries) {
+				if (draft?.rename?.path === entry.path) {
+					// While a directory is being renamed its children stay hidden:
+					// every path under it is about to change.
+					rows.push(draftRow(`rename:${entry.path}`, depth, entry.type === 'dir' ? '▸' : '·', '新名称'));
+					continue;
+				}
 				const isSelected = entry.type === 'file' && entry.path === selectedPath;
 				rows.push(
 					<div
 						key={entry.path}
 						className={`tree-row${isSelected ? ' selected' : ''}`}
 						style={{ paddingLeft: 8 + depth * 12 }}
-						onClick={() => toggle(entry)}
+						onClick={() => {
+							// Dragging across a name is a copy gesture; opening the file
+							// under the mouse would make it impossible to finish.
+							if (window.getSelection()?.toString()) {
+								return;
+							}
+							toggle(entry);
+						}}
 						onContextMenu={event => openMenu(event, entry.type === 'dir' ? entry.path : parentOf(entry.path), entry)}
 						role="treeitem"
 						aria-expanded={entry.type === 'dir' ? Boolean(directories[entry.path]?.open) : undefined}
 						tabIndex={0}
 						onKeyDown={event => {
+							if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+								event.preventDefault();
+								void copyText(entry.path);
+								return;
+							}
+							// F2 is what the explorer uses for rename.
+							if (event.key === 'F2') {
+								event.preventDefault();
+								startRename(entry);
+								return;
+							}
 							if (event.key === 'Enter' || event.key === ' ') {
 								event.preventDefault();
 								toggle(entry);
@@ -316,10 +400,34 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, reload
 								className={`tree-row${filePath === selectedPath ? ' selected' : ''}`}
 								style={{ paddingLeft: 8 }}
 								title={filePath}
-								onClick={() => onOpenFile(filePath)}
+								onClick={() => {
+									if (window.getSelection()?.toString()) {
+										return;
+									}
+									onOpenFile(filePath);
+								}}
+								onContextMenu={event => openMenu(event, parentOf(filePath), {
+									name: filePath.split('/').pop() ?? filePath,
+									path: filePath,
+									type: 'file',
+								})}
 								role="treeitem"
 								tabIndex={0}
 								onKeyDown={event => {
+									if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+										event.preventDefault();
+										void copyText(filePath);
+										return;
+									}
+									if (event.key === 'F2') {
+										event.preventDefault();
+										startRename({
+											name: filePath.split('/').pop() ?? filePath,
+											path: filePath,
+											type: 'file',
+										});
+										return;
+									}
 									if (event.key === 'Enter' || event.key === ' ') {
 										event.preventDefault();
 										onOpenFile(filePath);
@@ -343,6 +451,10 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, reload
 					<button type="button" onClick={() => startCreate(menu.directory, 'dir')}>新建文件夹</button>
 					{menu.entry && (
 						<>
+							<div className="tree-menu-sep" />
+							<button type="button" onClick={() => startRename(menu.entry!)}>重命名「{menu.entry.name}」</button>
+							<button type="button" onClick={() => { void copyText(menu.entry!.name); setMenu(undefined); }}>复制文件名</button>
+							<button type="button" onClick={() => { void copyText(menu.entry!.path); setMenu(undefined); }}>复制路径</button>
 							<div className="tree-menu-sep" />
 							<button
 								type="button"
