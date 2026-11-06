@@ -37,8 +37,9 @@ import {
 } from './auth.js';
 import { fsRouter } from './fsApi.js';
 import { gitFileVersions, gitStatus } from './git.js';
+import { closeDocument, definition, disposeLsp, hover, LspUnavailableError, syncDocument } from './lsp.js';
 import { resolveModels } from './models.js';
-import { BadRequestError, PathOutsideRootError, readStringQuery, resolveRoot, shouldIgnore } from './paths.js';
+import { BadRequestError, PathOutsideRootError, readStringQuery, resolveRoot, shouldIgnore, toAbsolute } from './paths.js';
 import { addPersistedRoot } from './projectStore.js';
 import { invalidateProjectsCache, listProjects, slugFor } from './projects.js';
 import { deleteSession, listAllSessions, readTranscriptById, renameSession, setSessionArchived } from './sessions.js';
@@ -438,6 +439,70 @@ app.delete('/api/sessions/:id', async (req, res) => {
 	res.json({ ok: true });
 });
 
+// ------------------------------------------------------------------ clangd
+
+/**
+ * Monaco's C++ support, brokered to clangd.
+ *
+ * Deliberately semantic rather than a JSON-RPC passthrough: the client sends a
+ * root, a path and a position, and never learns an LSP method name or a URI.
+ * That keeps the URI scheme, the frame buffering and the one-process-per-root
+ * rule on this side, where they can be tested without a browser.
+ */
+/** A definition/hover body: where the file is, and where in it the caret sat. */
+function lspCaret(body: unknown): { root: string; absolute: string; line: number; column: number } {
+	const fields = body as { root?: unknown; path?: unknown; line?: unknown; column?: unknown } | undefined;
+	if (typeof fields?.root !== 'string' || typeof fields.path !== 'string') {
+		throw new BadRequestError('`root` and `path` must be strings.');
+	}
+	const line = Number(fields.line);
+	const column = Number(fields.column);
+	if (!Number.isInteger(line) || !Number.isInteger(column) || line < 1 || column < 1) {
+		throw new BadRequestError('`line` and `column` must be positive integers (1-based).');
+	}
+	return { root: fields.root, absolute: fields.path, line, column };
+}
+
+/**
+ * The buffer as the editor holds it.
+ *
+ * Called on open and on every debounced edit: clangd answers about what was
+ * pushed, so a jump target follows unsaved edits instead of the disk.
+ */
+app.post('/api/lsp/sync', async (req, res) => {
+	const body = req.body as { root?: unknown; path?: unknown; text?: unknown } | undefined;
+	if (typeof body?.root !== 'string' || typeof body.path !== 'string' || typeof body.text !== 'string') {
+		throw new BadRequestError('`root`, `path` and `text` must be strings.');
+	}
+	const root = await resolveRoot(body.root);
+	await syncDocument(root, toAbsolute(root, body.path), body.text);
+	res.json({ ok: true });
+});
+
+app.post('/api/lsp/close', async (req, res) => {
+	const body = req.body as { root?: unknown; path?: unknown } | undefined;
+	if (typeof body?.root !== 'string' || typeof body.path !== 'string') {
+		throw new BadRequestError('`root` and `path` must be strings.');
+	}
+	const root = await resolveRoot(body.root);
+	await closeDocument(root, toAbsolute(root, body.path));
+	res.json({ ok: true });
+});
+
+app.post('/api/lsp/definition', async (req, res) => {
+	const caret = lspCaret(req.body);
+	const root = await resolveRoot(caret.root);
+	const absolute = toAbsolute(root, caret.absolute);
+	res.json({ locations: await definition(root, absolute, caret.line, caret.column) });
+});
+
+app.post('/api/lsp/hover', async (req, res) => {
+	const caret = lspCaret(req.body);
+	const root = await resolveRoot(caret.root);
+	const absolute = toAbsolute(root, caret.absolute);
+	res.json({ contents: await hover(root, absolute, caret.line, caret.column) });
+});
+
 app.use('/api/fs', fsRouter);
 
 /**
@@ -465,8 +530,11 @@ if (existsSync(path.join(webDist, 'index.html'))) {
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 	const status = error instanceof PathOutsideRootError ? 403
 		: error instanceof BadRequestError ? 400
-			: (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? 404
-				: 500;
+			// No clangd on this machine is a deployment problem, not a bug: the
+			// editor turns the message into a one-line notice and stops asking.
+			: error instanceof LspUnavailableError ? 503
+				: (error as NodeJS.ErrnoException)?.code === 'ENOENT' ? 404
+					: 500;
 	const message = error instanceof Error ? error.message : String(error);
 	if (status >= 500) {
 		console.error('[agent-ui]', error);
@@ -544,6 +612,9 @@ const shutdown = () => {
 		.finally(() => {
 			terminalServer.close();
 			agentServer.close();
+			// clangd children would outlive the server otherwise, and each holds the
+			// project's index in memory.
+			disposeLsp();
 			void disposeAgentRuntime(agents)
 				.catch(error => console.error('[agent-ui] agent runtime shutdown failed:', error))
 				.finally(() => server.close(() => process.exit(0)));

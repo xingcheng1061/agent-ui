@@ -25,6 +25,12 @@ export interface TerminalTarget {
 	readonly path: string;
 	readonly line?: number;
 	readonly column?: number;
+	/**
+	 * The screen printed a relative path, so `path` is a guess: it is only as
+	 * good as the base it was joined to. Callers use this to verify the file
+	 * exists before trusting it, and to fall back to a suffix search.
+	 */
+	readonly relative?: boolean;
 }
 
 /**
@@ -130,9 +136,14 @@ export function joinPath(base: string, relative: string): string {
 	return normalizePath(`${base.replace(/[\\/]+$/, '')}/${relative}`);
 }
 
-export function resolveTerminalTarget(token: PathToken, root: string): TerminalTarget {
-	const path = isAbsolutePath(token.text) ? normalizePath(token.text) : joinPath(root, token.text);
-	return { path, line: token.line, column: token.column };
+/**
+ * `base` is where the shell is — `cd`-tracked, not the project root — because a
+ * relative path on screen is relative to the directory the prompt shows.
+ */
+export function resolveTerminalTarget(token: PathToken, base: string): TerminalTarget {
+	const absolute = isAbsolutePath(token.text);
+	const path = absolute ? normalizePath(token.text) : joinPath(base, token.text);
+	return { path, line: token.line, column: token.column, relative: !absolute };
 }
 
 /**

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { readFile, writeFile } from '../api';
 import { languageForPath, modelUri, monaco } from '../monacoSetup';
+import { documentEdited, trackDocument, untrackDocument } from './editorLsp';
 import { Markdown } from './Markdown';
 import { readCursor, writeCursor } from './workspaceState';
 
@@ -185,6 +186,9 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 				if (previewRef.current) {
 					syncPreview(model);
 				}
+				// The language server answers about the text it was given, so an
+				// unsaved edit has to reach it too — see `editorLsp`.
+				documentEdited(model, root, target, model.getValue());
 			});
 			onDirtyChangeRef.current(false);
 
@@ -222,6 +226,10 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 				},
 			};
 
+			// clangd gets the file while it is on screen, not on the first
+			// Ctrl+click that would otherwise pay for the handshake.
+			trackDocument(root, target, model.getValue());
+
 			setLoadedToken(value => value + 1);
 			if (previewRef.current) {
 				setPreviewText(model.getValue());
@@ -235,6 +243,9 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 			if (editor && currentFileRef.current === target) {
 				saveCursor(editor);
 			}
+			// The buffer is gone from the editor, so clangd should not keep
+			// answering about it: a reopened file is pushed again from scratch.
+			untrackDocument(root, target);
 		};
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [filePath, root]);

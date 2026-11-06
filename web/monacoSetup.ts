@@ -62,7 +62,13 @@ const EXTENSION_LANGUAGES: Record<string, string> = {
 	c: 'c',
 	h: 'c',
 	cpp: 'cpp',
+	// `.cc` is the common one in Bazel/CMake trees; without it the file opened
+	// as plaintext, so the clangd providers never attached.
+	cc: 'cpp',
+	cxx: 'cpp',
+	hh: 'cpp',
 	hpp: 'cpp',
+	hxx: 'cpp',
 	cs: 'csharp',
 	sh: 'shell',
 	bash: 'shell',

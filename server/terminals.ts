@@ -53,11 +53,23 @@ export interface TerminalInfo {
 	readonly root: string;
 	readonly title: string;
 	readonly createdAt: number;
+	/**
+	 * Where the shell actually is, as reported by its own prompt.
+	 *
+	 * `root` is where it was *started*, and stays that way; a relative path
+	 * printed after `cd web/components` only makes sense against this one.
+	 * Absent when the shell never reported it (cmd, or a customised prompt).
+	 */
+	readonly cwd?: string;
 }
 
 interface LiveTerminal {
 	readonly info: TerminalInfo;
 	readonly pty: IPty;
+	/** Last directory the shell reported; `info.root` until it says otherwise. */
+	cwd: string;
+	/** Tail of an OSC 7 sequence split across two chunks, held back from the screen. */
+	pending: string;
 	/** Rolling tail of output, replayed to the next client that attaches. */
 	buffer: string;
 	/**
@@ -125,6 +137,98 @@ function preferredShell(): string {
 	return process.env['SHELL'] ?? '/bin/bash';
 }
 
+/** Start of the sequence a shell uses to report its directory (OSC 7). */
+const OSC7_PREFIX = '\x1b]7;';
+
+/**
+ * Prompt hooks that make the shell announce its directory as OSC 7.
+ *
+ * Ctrl+click on a printed path needs a base for relative paths, and the only
+ * honest source for that is the shell itself: the PTY runs in `root` forever,
+ * so once the user `cd`s, anything derived from `root` points at a file that
+ * does not exist. The sequences are stripped from the stream before it reaches
+ * the screen, so nothing visual depends on them.
+ *
+ * PowerShell is wrapped rather than replaced, so a themed prompt keeps working;
+ * `[char]92` is the backslash, spelled that way to keep the escaping in this
+ * source readable.
+ */
+const POWERSHELL_INTEGRATION = [
+	'$global:__agentUiPrompt = $function:prompt',
+	'function global:prompt {',
+	'\t$esc = [char]27',
+	'\t$dir = $PWD.Path',
+	'\tif ($dir) { [Console]::Write("$esc]7;file:///$($dir.Replace([char]92, [char]47))$([char]7)") }',
+	'\tif ($null -ne $global:__agentUiPrompt) { & $global:__agentUiPrompt } else { "PS $dir> " }',
+	'}',
+].join('\n');
+
+/** The bash/zsh half: additive, so the user's own PROMPT_COMMAND still runs. */
+const POSIX_REPORT = 'printf \'\\033]7;file://%s%s\\a\' "${HOSTNAME:-localhost}" "$PWD"';
+
+/**
+ * `OSC 7 ; file://host/path BEL`, also accepting the `ST` terminator.
+ *
+ * The path is everything up to the terminator: a directory with spaces is not
+ * percent-encoded by every shell, so the host part cannot be matched greedily.
+ */
+const OSC7 = /\x1b\]7;file:\/\/[^/\x07\x1b]*(\/[^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+
+/** How much of a half-received sequence is worth waiting for. */
+const PENDING_LIMIT = 4096;
+
+function shellIntegration(shell: string): { args: string[]; env: Record<string, string> } {
+	const env = currentEnv();
+	const name = shell.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? '';
+	if (/^pwsh(\.exe)?$/.test(name) || /^powershell(\.exe)?$/.test(name)) {
+		return { args: ['-NoLogo', '-NoExit', '-Command', POWERSHELL_INTEGRATION], env };
+	}
+	if (/^(bash|zsh)(\.exe)?$/.test(name)) {
+		const existing = env['PROMPT_COMMAND'];
+		env['PROMPT_COMMAND'] = existing ? `${POSIX_REPORT}; ${existing}` : POSIX_REPORT;
+	}
+	return { args: [], env };
+}
+
+/** `file:///E:/a/b` -> `E:\a\b`; POSIX paths are left alone. */
+function cwdFromReported(reported: string): string {
+	let decoded: string;
+	try {
+		decoded = decodeURIComponent(reported);
+	} catch {
+		decoded = reported;
+	}
+	if (/^\/[A-Za-z]:\//.test(decoded)) {
+		return decoded.slice(1).replace(/\//g, '\\');
+	}
+	return decoded;
+}
+
+/**
+ * Splits the directory reports out of one chunk of output.
+ *
+ * A PTY chunk can end in the middle of a sequence; rather than printing the
+ * fragment and losing the report, the tail is held until the next chunk.
+ */
+function scanReports(entry: LiveTerminal, chunk: string): { data: string; cwd?: string } {
+	const combined = entry.pending + chunk;
+	entry.pending = '';
+	let cwd: string | undefined;
+	const data = combined.replace(OSC7, (_match, reported: string) => {
+		cwd = cwdFromReported(reported);
+		return '';
+	});
+	const start = data.lastIndexOf(OSC7_PREFIX);
+	if (start >= 0 && data.indexOf('\x07', start) < 0 && data.indexOf('\x1b\\', start) < 0) {
+		const partial = data.slice(start);
+		if (partial.length <= PENDING_LIMIT) {
+			entry.pending = partial;
+			return { data: data.slice(0, start), cwd };
+		}
+	}
+	return { data, cwd };
+}
+
 function send(socket: WebSocket | undefined, message: unknown): void {
 	if (socket?.readyState === WebSocket.OPEN) {
 		socket.send(JSON.stringify(message));
@@ -184,7 +288,12 @@ export async function preloadTerminals(): Promise<void> {
 }
 
 export async function listTerminals(): Promise<readonly TerminalInfo[]> {
-	return store.snapshot.terminals;
+	// `cwd` is live state, not something the store keeps: a shell that has
+	// never started must not look like it is sitting in the project root.
+	return store.snapshot.terminals.map(info => {
+		const entry = live.get(info.id);
+		return entry ? { ...info, cwd: entry.cwd } : info;
+	});
 }
 
 /** Spawns the shell right away so the terminal exists before anyone attaches. */
@@ -265,14 +374,16 @@ function spawn(info: TerminalInfo): void {
 	if (live.has(info.id)) {
 		return;
 	}
+	const shell = preferredShell();
+	const integration = shellIntegration(shell);
 	let pty: IPty;
 	try {
-		pty = nodePty().spawn(preferredShell(), [], {
+		pty = nodePty().spawn(shell, integration.args, {
 			name: 'xterm-256color',
 			cols: 80,
 			rows: 24,
 			cwd: info.root,
-			env: currentEnv(),
+			env: integration.env,
 		});
 	} catch (error) {
 		console.error(`[agent-ui] terminal ${info.id.slice(0, 8)} failed to start:`, error);
@@ -292,6 +403,8 @@ function spawn(info: TerminalInfo): void {
 	const entry: LiveTerminal = {
 		info,
 		pty,
+		cwd: info.cwd ?? info.root,
+		pending: '',
 		buffer: remembered
 			? `${remembered}\r\n\x1b[2m[agent-ui] 后端已重启，以上为此前输出；此前的进程不再运行。\x1b[0m\r\n`
 			: '',
@@ -299,7 +412,18 @@ function spawn(info: TerminalInfo): void {
 	};
 	live.set(info.id, entry);
 
-	pty.onData(data => {
+	pty.onData(chunk => {
+		const scanned = scanReports(entry, chunk);
+		if (scanned.cwd && scanned.cwd !== entry.cwd) {
+			entry.cwd = scanned.cwd;
+			// Sent separately from the output so a client that only cares about
+			// ctrl+click never has to parse the screen.
+			broadcast(entry, { type: 'cwd', cwd: entry.cwd });
+		}
+		const data = scanned.data;
+		if (data.length === 0) {
+			return;
+		}
 		entry.buffer = (entry.buffer + data).slice(-MAX_BUFFER);
 		markTailDirty(entry);
 		broadcast(entry, { type: 'output', data });
@@ -374,6 +498,9 @@ export async function attachTerminal(id: string, socket: WebSocket): Promise<boo
 	// gets its own snapshot, so a second client joining does not disturb the
 	// first one's screen. Trimmed to a few screens — see `SNAPSHOT_LIMIT`.
 	send(socket, { type: 'snapshot', data: snapshotOf(entry) });
+	// Before the next prompt reports again: a client attaching between two
+	// prompts must not fall back to the project root for its relative paths.
+	send(socket, { type: 'cwd', cwd: entry.cwd });
 
 	socket.on('message', raw => {
 		let message: ClientMessage;

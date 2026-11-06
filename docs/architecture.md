@@ -273,6 +273,26 @@ WS /terminal?id=xxx ──attach──┘   （无客户端 1 小时后回收）
 
 终端按**项目根目录**共享，不按会话：一个项目里开了几个终端，切走再切回来还是那几个（`listTerminals()` 按 root 过滤）。同一个终端可以被多个客户端同时观看（`LiveTerminal.sockets` 是集合，`onData` 广播给全部），这在「同一个项目开两个浏览器标签」时是必需的——早先是单引用，后 attach 的会把前一个顶掉，前一个标签画面冻结却仍能往 shell 里敲字。唯一保留的竞争是 `resize`：两边窗口大小不同会互相覆盖，最后调用的赢。
 
+**相对路径的基准是 shell 自己报的 cwd，不是项目根。** `ctrl+单击` 把屏幕上的路径变成「哪个文件」，相对路径必须先有个基准。基准原来是终端创建时的项目根：`cd web/components` 之后屏幕上那个 `Terminal.tsx` 会被拼成 `<root>\Terminal.tsx`，文件不存在，表现就是「点了没反应」——而绝对路径不依赖基准，于是看起来只有绝对路径能跳。
+
+现在 shell 启动时注入一小段集成：PowerShell 用 `-NoExit -Command` **包住**已有 `prompt`（不替换，主题化提示符照旧生效），每次出提示符前用 OSC 7 报一次 `$PWD`；bash/zsh 把 `printf '\033]7;…'` 前置到 `PROMPT_COMMAND`，不覆盖用户自己那条。服务端在 `terminals.ts` 的 `scanReports()` 里把 `ESC]7;file://…` 从流中剥掉（序列被拆到两个 chunk 时先留着，绝不打印半截转义），更新 `LiveTerminal.cwd`、通过 WS 推 `{type:'cwd'}`，`listTerminals()` 也带上它（只在存活时读，不落盘）。前端 `_cwd` 优先，拿不到才退回项目根。
+
+**兜底：后缀唯一匹配。** 上报不是万能的——`cmd`、不显示路径的提示符、在程序内部 `chdir` 都拿不到——所以相对路径先 `readFile` 验一次：不存在就在项目里按文件名搜，唯一命中就打开并提示「按文件名定位：…」，多个命中则列出前三个让人自己挑。猜一个比报错更糟，所以绝不自动选。
+
+## C++ 跳转：clangd 桥
+
+Monaco 只带语法着色，`Ctrl+单击` 一个函数名要跳到定义，就得有一个真的 C++ 前端和这个项目的编译参数。clangd 正是这个，而且它不需要扩展宿主——一个项目根一个进程，由服务端驱动（`server/lsp.ts`）。
+
+**LSP 在服务端收口。** 前端只发 `root + path + position`（`/api/lsp/definition`、`/api/lsp/hover`），从不接触 LSP 方法名和 URI。服务端负责 stdio 上的 `Content-Length` 帧、请求 id 配对，以及 clangd 反问的 `workspace/configuration`——一律答 `null` 让它用默认值，不答会把它后面的请求卡住。好处是跳转能力可以脱离浏览器验证：`npx tsx` 直接调 `definition()` 就能看到真 clangd 的答案。
+
+**编译数据库是前提。** clangd 自己从项目根向上找 `compile_commands.json`。Bazel 不生成它，所以 `reports/cpp-demo` 里手写了一份：`clang++` 风格的命令，`-isystem` 直接指向 MSVC 与 Windows SDK 的 include，不依赖 `--query-driver`。要换位置就设 `AGENT_UI_COMPILE_COMMANDS_DIR`；clangd 本体用 `AGENT_UI_CLANGD` 指定，找不到时接口返回 503，编辑器把这句话显示在状态栏一次而不是每次点击都喊。
+
+**缓冲区以编辑器为准。** 打开文件时和每次编辑（400ms 防抖）都把全文推给 clangd：它回答的是「收到的那份文本」，不同步的话未保存的编辑会让跳转落到上一行。
+
+**跳转不交给 Monaco。** provider 拿到位置后调用工作区已有的 `openFromTerminal`（和终端里点路径同一个入口），然后返回 `null`。交给 Monaco 自己处理会开一个游离的只读编辑器：丢掉项目归属，也绕过了「文件被移动」时的后缀兜底。
+
+v1 只做 definition 和 hover。诊断、补全、语义高亮走同一条桥，各自缺的是 UI 而不是协议。
+
 ## 鉴权：为什么用文件而不是数据库
 
 账号量级是「几个人」，读写频率是「登录时」。一个 JSON 文件 + 原子写足够，而且 `~/.agent-ui/users.json` 可以直接查看、可以直接备份、重置就是删文件。引入 SQLite 或 Postgres 只会多一个需要迁移和备份的组件。

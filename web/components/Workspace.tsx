@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { closeTerminal, createTerminal, listTerminals, readFile, renameTerminal, type ProjectInfo, type TerminalInfo } from '../api';
+import { closeTerminal, createTerminal, listTerminals, readFile, renameTerminal, searchFiles, type ProjectInfo, type TerminalInfo } from '../api';
 import { ChangesList } from './ChangesList';
 import { DiffView } from './DiffView';
 import { Editor } from './Editor';
+import { attachLsp } from './editorLsp';
 import { FileTree } from './FileTree';
 import { Splitter, clamp, usePersistedSize } from './Splitter';
 import { TerminalView } from './Terminal';
@@ -247,11 +248,81 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 			.sort((left, right) => right.length - left.length)[0];
 		const relative = owner === undefined ? undefined : relativeToRoot(owner, target.path);
 		if (owner === undefined || relative === undefined || relative === '') {
+			// A relative path joined to a base that turned out to be wrong can land
+			// outside every project — `cd` into a subdirectory, then print `../x`
+			// while the base is still the project root. The tail of the path is the
+			// part a wrong base cannot corrupt, so it gets one lookup.
+			if (target.relative) {
+				const segments = target.path.split(/[\\/]+/).filter(Boolean);
+				void openBySuffix(root, segments.slice(-2).join('/'), target);
+				return;
+			}
 			setStatus(`不在任何已打开的项目里：${target.path}`);
 			return;
 		}
-		openFileFrom({ root: owner, path: relative, line: target.line, column: target.column });
+		void openTerminalPath(owner, relative, target);
 	};
+
+	/**
+	 * Opens the file a terminal printed, verifying the guess when it was relative.
+	 *
+	 * A relative path is joined to the shell's reported directory, and that base
+	 * is only as good as the report: `cmd`, a shell inside a shell, or a program
+	 * that changed directory behind the shell's back all leave it wrong — which
+	 * is why the click used to do nothing at all.
+	 */
+	const openTerminalPath = async (owner: string, relative: string, target: TerminalTarget) => {
+		const open = (path: string) => openFileFrom({ root: owner, path, line: target.line, column: target.column });
+		if (!target.relative) {
+			open(relative);
+			return;
+		}
+		const exists = await readFile(owner, relative).then(() => true, () => false);
+		if (exists) {
+			open(relative);
+			return;
+		}
+		await openBySuffix(owner, relative, target);
+	};
+
+	/**
+	 * Last resort: treat what was printed as the tail of a real path.
+	 *
+	 * Covers the bare file names `dir` prints, and the `./x` / `../x` forms whose
+	 * base was wrong. One hit opens, several are listed — picking one would be a
+	 * coin flip, and opening the wrong file silently is worse than not opening.
+	 */
+	const openBySuffix = async (owner: string, guess: string, target: TerminalTarget) => {
+		const name = guess.split(/[\\/]+/).pop() ?? guess;
+		const matches = (await searchFiles(owner, name).catch(() => []))
+			.filter(candidate => candidate === guess
+				|| candidate.endsWith(`/${guess}`)
+				|| candidate.split('/').pop() === name);
+		if (matches.length === 1) {
+			setStatus(`按文件名定位：${matches[0]}`);
+			openFileFrom({ root: owner, path: matches[0]!, line: target.line, column: target.column });
+			return;
+		}
+		setStatus(matches.length === 0
+			? `找不到文件：${target.path}`
+			: `有 ${matches.length} 个同名文件，无法确定：${matches.slice(0, 3).join('、')}`);
+	};
+
+	/**
+	 * Monaco's definition/hover providers are registered globally and survive
+	 * this component, so they are handed a bridge that forwards into whatever
+	 * the current render's file opening does. A clangd answer is an absolute
+	 * path, exactly like a path printed in the terminal — so it takes the same
+	 * route, and inherits the project lookup and the "moved file" fallbacks.
+	 */
+	const openFromClangdRef = useRef(openFromTerminal);
+	openFromClangdRef.current = openFromTerminal;
+	useEffect(() => {
+		attachLsp({
+			open: target => openFromClangdRef.current(target),
+			notice: message => setStatus(message),
+		});
+	}, []);
 
 	return (
 		<div className="workspace" style={{ gridTemplateColumns: `${treeWidth}px 5px 1fr` }}>

@@ -178,6 +178,50 @@ export function writeFile(root: string, filePath: string, content: string): Prom
 	});
 }
 
+/** Where clangd says a symbol lives: absolute, 1-based on both axes. */
+export interface DefinitionTarget {
+	readonly path: string;
+	readonly line: number;
+	readonly column: number;
+}
+
+/**
+ * Hands clangd the buffer as the editor holds it, edits included.
+ *
+ * clangd answers about the text it was last given, so skipping this makes a
+ * jump target point at the line the file had on disk — which is the line above
+ * whatever was just typed.
+ */
+export function syncLspDocument(root: string, filePath: string, text: string): Promise<{ ok: boolean }> {
+	return requestJson('/api/lsp/sync', {
+		method: 'POST',
+		body: JSON.stringify({ root, path: filePath, text }),
+	});
+}
+
+export function closeLspDocument(root: string, filePath: string): Promise<{ ok: boolean }> {
+	return requestJson('/api/lsp/close', {
+		method: 'POST',
+		body: JSON.stringify({ root, path: filePath }),
+	});
+}
+
+export async function lspDefinition(root: string, filePath: string, line: number, column: number): Promise<readonly DefinitionTarget[]> {
+	const result = await requestJson<{ locations: DefinitionTarget[] }>('/api/lsp/definition', {
+		method: 'POST',
+		body: JSON.stringify({ root, path: filePath, line, column }),
+	});
+	return result.locations;
+}
+
+export async function lspHover(root: string, filePath: string, line: number, column: number): Promise<string | undefined> {
+	const result = await requestJson<{ contents?: string }>('/api/lsp/hover', {
+		method: 'POST',
+		body: JSON.stringify({ root, path: filePath, line, column }),
+	});
+	return result.contents;
+}
+
 /** Creates an empty file or a directory; an existing path is refused. */
 export function createEntry(root: string, filePath: string, type: 'file' | 'dir'): Promise<{ ok: boolean }> {
 	return requestJson('/api/fs/create', {
@@ -327,6 +371,8 @@ export interface TerminalInfo {
 	readonly root: string;
 	readonly title: string;
 	readonly createdAt: number;
+	/** Where the shell reported itself, once its prompt has spoken. */
+	readonly cwd?: string;
 }
 
 export async function listTerminals(): Promise<readonly TerminalInfo[]> {

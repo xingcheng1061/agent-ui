@@ -28,10 +28,12 @@ import { findPathTokens, resolveTerminalTarget, type TerminalTarget } from './te
 export type TerminalState = 'connecting' | 'open' | 'closed';
 
 interface ServerMessage {
-	readonly type: 'output' | 'error' | 'exit' | 'snapshot';
+	readonly type: 'output' | 'error' | 'exit' | 'snapshot' | 'cwd';
 	readonly data?: string;
 	readonly message?: string;
 	readonly code?: number;
+	/** Live shell directory, for the `cwd` message. */
+	readonly cwd?: string;
 }
 
 /**
@@ -83,8 +85,9 @@ export interface TerminalSession {
 	/** After the fallback overlay appeared: try again without a reload. */
 	reconnect(): void;
 	/**
-	 * Where ctrl+click on a path goes. `root` is the base for relative paths;
-	 * pass `undefined` as the handler when no code pane is showing the screen.
+	 * Where ctrl+click on a path goes. `root` is only the fallback base for
+	 * relative paths — the shell's own reported cwd wins once it has one. Pass
+	 * `undefined` as the handler when no code pane is showing the screen.
 	 */
 	setOpenTargetHandler(root: string, handler: ((target: TerminalTarget) => void) | undefined): void;
 }
@@ -124,8 +127,16 @@ class LiveScreen implements TerminalSession {
 	private _sentRows = 0;
 	/** Set by the view: ctrl+click on a printed path opens it in the code pane. */
 	private _openTarget: ((target: TerminalTarget) => void) | undefined;
-	/** Base for relative paths — the terminal's project root. */
+	/** Fallback base for relative paths: the project the terminal belongs to. */
 	private _openRoot = '';
+	/**
+	 * Where the shell says it is, reported by its prompt.
+	 *
+	 * `_openRoot` is where the shell was *started*, so after a `cd` a relative
+	 * path on screen no longer means "relative to the project root" — this is
+	 * what keeps ctrl+click pointing at the file the user is looking at.
+	 */
+	private _cwd = '';
 	/** The insecure-context paste notice is worth saying once, not per keystroke. */
 	private _pasteHintShown = false;
 
@@ -251,7 +262,10 @@ class LiveScreen implements TerminalSession {
 	 * on click, in the workspace.
 	 */
 	private _linksAt(bufferLineNumber: number): ILink[] | undefined {
-		if (!this._openTarget || !this._openRoot) {
+		// The live directory wins over the project root; without either there is
+		// nothing to resolve a relative path against.
+		const base = this._cwd || this._openRoot;
+		if (!this._openTarget || !base) {
 			return undefined;
 		}
 		const line = this._term.buffer.active.getLine(bufferLineNumber - 1);
@@ -274,7 +288,10 @@ class LiveScreen implements TerminalSession {
 				if (!event.ctrlKey && !event.metaKey) {
 					return;
 				}
-				this._openTarget?.(resolveTerminalTarget(token, this._openRoot));
+				// `base` is the directory the row was painted under, which is the one
+				// the line was printed in. Resolving at click time instead would use
+				// wherever the shell is *now* — wrong for anything above the prompt.
+				this._openTarget?.(resolveTerminalTarget(token, base));
 			},
 		}));
 	}
@@ -429,6 +446,8 @@ class LiveScreen implements TerminalSession {
 			}
 		} else if (message.type === 'output' && typeof message.data === 'string') {
 			this._term.write(message.data);
+		} else if (message.type === 'cwd' && typeof message.cwd === 'string' && message.cwd !== '') {
+			this._cwd = message.cwd;
 		} else if (message.type === 'error') {
 			this._term.write(`\r\n\x1b[31m${message.message ?? 'terminal error'}\x1b[0m\r\n`);
 		} else if (message.type === 'exit') {
