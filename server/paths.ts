@@ -1,8 +1,13 @@
 import path from 'node:path';
 import { getAllowedRoots, normalizeRoot } from './projects.js';
 
-/** Names never listed in the file tree. */
-const IGNORED_NAMES = new Set(['.git', 'node_modules', 'dist', 'out', '.next', '.cache']);
+/**
+ * Names never listed in the file tree, and never descended into by a search.
+ *
+ * Exported because the native `find` / PowerShell path has to prune exactly
+ * the same directories; two lists would drift.
+ */
+export const IGNORED_NAMES = new Set(['.git', 'node_modules', 'dist', 'out', '.next', '.cache']);
 
 export class PathOutsideRootError extends Error {
 	constructor(requested: string) {

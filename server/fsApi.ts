@@ -1,9 +1,10 @@
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Router } from 'express';
 import { MAX_FILE_SIZE } from './config.js';
-import { BadRequestError, readStringQuery, resolveRoot, shouldIgnore, toAbsolute, toRelative } from './paths.js';
+import { BadRequestError, IGNORED_NAMES, readStringQuery, resolveRoot, shouldIgnore, toAbsolute, toRelative } from './paths.js';
 
 export const fsRouter = Router();
 
@@ -252,12 +253,128 @@ fsRouter.delete('/delete', async (req, res) => {
 	res.json({ ok: true });
 });
 
+/** Deep enough for a monorepo module, bounded so a huge tree cannot stall. */
+const FIND_DIRS_MAX_DEPTH = 20;
+/** Entries the in-process fallback may read before it gives up. */
+const FIND_DIRS_MAX_SCANNED = 500_000;
+const FIND_DIRS_MAX_RESULTS = 100;
+/** Wall clock for the walk: an entry budget alone does not bound a slow disk. */
+const FIND_DIRS_BUDGET_MS = 10_000;
+/** A native search that has not answered by now is worse than the walk. */
+const NATIVE_SEARCH_TIMEOUT_MS = 8_000;
+const NATIVE_SEARCH_MAX_BUFFER = 8 * 1024 * 1024;
+
+/**
+ * Runs one search binary and returns its stdout.
+ *
+ * No shell: every argument is its own argv element, so a query containing
+ * quotes or `;` cannot turn into a command.
+ */
+function runSearchCommand(
+	file: string,
+	args: readonly string[],
+	options: { cwd?: string; env?: NodeJS.ProcessEnv },
+): Promise<string> {
+	return new Promise((resolve, reject) => {
+		execFile(file, [...args], {
+			...options,
+			timeout: NATIVE_SEARCH_TIMEOUT_MS,
+			maxBuffer: NATIVE_SEARCH_MAX_BUFFER,
+			windowsHide: true,
+		}, (error, stdout) => {
+			if (error) {
+				reject(error);
+				return;
+			}
+			resolve(stdout);
+		});
+	});
+}
+
+/** `find -ipath` matches a glob, so a literal `*`, `?` or `[` has to be escaped. */
+function escapeFindGlob(query: string): string {
+	return query.replace(/[*?[\\]/g, character => `\\${character}`);
+}
+
+/**
+ * `find` on POSIX, PowerShell on Windows; `undefined` when neither can run.
+ *
+ * Results are absolute paths, and the caller re-applies the same filters the
+ * walk uses — an over-eager native predicate can cost time, never correctness.
+ */
+async function nativeDirectorySearch(start: string, query: string, maxDepth: number): Promise<string[] | undefined> {
+	try {
+		if (process.platform === 'win32') {
+			// The query travels in the environment, not inside the script: no
+			// quoting rules, no interpolation, nothing to escape.
+			//
+			// `Get-ChildItem -Recurse` cannot prune, so the ignored directories
+			// are filtered out of the result instead of being skipped: they still
+			// cost a walk, but they no longer eat the result cap.
+			const prunedPattern = [...IGNORED_NAMES]
+				.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+				.join('|');
+			const script = [
+				'$ErrorActionPreference = "SilentlyContinue"',
+				'Get-ChildItem -LiteralPath $env:AGENT_UI_DIR_START -Directory -Recurse -Depth ([int]$env:AGENT_UI_DIR_DEPTH) |',
+				`Where-Object { $_.FullName -notmatch '[\\\\/](?:${prunedPattern})[\\\\/]' } |`,
+				'Where-Object { $_.FullName.IndexOf($env:AGENT_UI_DIR_QUERY, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |',
+				'Select-Object -First 400 -ExpandProperty FullName',
+			].join('\n');
+			const stdout = await runSearchCommand('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+				env: {
+					...process.env,
+					AGENT_UI_DIR_START: start,
+					AGENT_UI_DIR_QUERY: query,
+					AGENT_UI_DIR_DEPTH: String(maxDepth),
+				},
+			});
+			return stdout.split(/\r?\n/).filter(line => line !== '');
+		}
+		// `.` and the search root as cwd: `-ipath` matches the printed path, and
+		// matching the absolute one lets the root's own name match everything.
+		const prunedNames = [...IGNORED_NAMES].filter(name => !name.startsWith('.'));
+		const args = [
+			'.',
+			'-maxdepth', String(maxDepth),
+			'(',
+			// `.?*` and not `.*`: the latter also matches `.`, the start path
+			// itself, so `-prune` would stop at the root and find nothing.
+			'-name', '.?*',
+			...prunedNames.flatMap(name => ['-o', '-name', name]),
+			')',
+			'-prune',
+			'-o', '-type', 'd', '-ipath', `*${escapeFindGlob(query)}*`, '-print',
+		];
+		const stdout = await runSearchCommand('find', args, { cwd: start });
+		return stdout
+			.split('\n')
+			.filter(line => line !== '' && line !== '.')
+			.map(line => path.resolve(start, line));
+	} catch {
+		// No binary, an old `find` without `-ipath`, or a timeout: walk instead.
+		return undefined;
+	}
+}
+
 /**
  * Directory search for the project picker.
  *
  * Typing `agent` should find a nested checkout, not only a child of whichever
- * directory the picker happens to be showing, so this walks downwards from the
- * current one. Bounded like the file search: depth, scanned entries, results.
+ * directory the picker happens to be showing, so this looks downwards from the
+ * current one.
+ *
+ * Two strategies, one answer:
+ *
+ * 1. `find` on POSIX, PowerShell on Windows. They prune the ignored names
+ *    before descending and need no `readdir` per directory, which is the
+ *    difference between a fraction of a second and a stall on a tree with tens
+ *    of thousands of directories.
+ * 2. The in-process walk, breadth first, for a platform without the binary or
+ *    a `find` too old for `-ipath`. Level by level on purpose: the budget is
+ *    finite, and a depth-first walk spends all of it inside the first big
+ *    subtree it enters — searching `~/mail` for `mmbizwxverify` (two levels
+ *    down) came back empty that way.
  */
 fsRouter.get('/find-dirs', async (req, res) => {
 	const requested = typeof req.query['path'] === 'string' ? req.query['path'] : '';
@@ -269,11 +386,36 @@ fsRouter.get('/find-dirs', async (req, res) => {
 	}
 
 	const directories: { name: string; path: string }[] = [];
-	let scanned = 0;
-	/** Deep enough for a monorepo module, bounded so a huge tree cannot stall. */
-	const MAX_DEPTH = 20;
-	const MAX_SCANNED = 100_000;
-	const MAX_RESULTS = 100;
+	const seen = new Set<string>();
+
+	/**
+	 * Adds one hit, re-checked against the rules the walk applies.
+	 *
+	 * The native tools match on the absolute path, which contains the search
+	 * root too: searching under `~/mail` for `mail` would otherwise match every
+	 * directory below it. Matching the relative path here keeps both strategies
+	 * answering the same question.
+	 */
+	const add = (absolute: string): void => {
+		if (directories.length >= FIND_DIRS_MAX_RESULTS) {
+			return;
+		}
+		const name = path.basename(absolute);
+		const relative = path.relative(start, absolute).split(path.sep).join('/');
+		if (relative === '' || relative.startsWith('..') || seen.has(absolute)) {
+			return;
+		}
+		// Hidden directories (`.git`, `.venv`, `.cache`, …) are never a project
+		// root worth offering, and skipping them keeps the walk fast.
+		if (relative.split('/').some(segment => segment.startsWith('.') || shouldIgnore(segment))) {
+			return;
+		}
+		if (!relative.toLowerCase().includes(query) && !name.toLowerCase().includes(query)) {
+			return;
+		}
+		seen.add(absolute);
+		directories.push({ name, path: absolute });
+	};
 
 	// The directory on screen counts as a hit: "it is right here" is the most
 	// common reason a search looks broken.
@@ -281,34 +423,53 @@ fsRouter.get('/find-dirs', async (req, res) => {
 		directories.push({ name: path.basename(start), path: start });
 	}
 
-	const walk = async (directory: string, depth: number): Promise<void> => {
-		if (depth > MAX_DEPTH || scanned > MAX_SCANNED || directories.length >= MAX_RESULTS) {
-			return;
+	const native = await nativeDirectorySearch(start, query, FIND_DIRS_MAX_DEPTH);
+	let truncated = false;
+	if (native) {
+		for (const entry of native) {
+			add(entry);
 		}
-		const dirents = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
-		for (const dirent of dirents) {
-			if (scanned++ > MAX_SCANNED || directories.length >= MAX_RESULTS) {
-				return;
+		truncated = directories.length >= FIND_DIRS_MAX_RESULTS;
+	} else {
+		let scanned = 0;
+		const beganAt = Date.now();
+		// A queue plus a head index: `shift()` on a level of a million entries is
+		// the kind of quadratic cost that turns a bounded walk into a stall.
+		const queue: { directory: string; depth: number }[] = [{ directory: start, depth: 0 }];
+		for (let head = 0; head < queue.length; head += 1) {
+			if (
+				scanned > FIND_DIRS_MAX_SCANNED
+				|| directories.length >= FIND_DIRS_MAX_RESULTS
+				|| Date.now() - beganAt > FIND_DIRS_BUDGET_MS
+			) {
+				break;
 			}
-			// Hidden directories (`.git`, `.venv`, `.cache`, …) are never a
-			// project root worth offering, and skipping them keeps the walk fast.
-			if (!dirent.isDirectory() || shouldIgnore(dirent.name) || dirent.name.startsWith('.')) {
+			const current = queue[head] as { directory: string; depth: number };
+			if (current.depth > FIND_DIRS_MAX_DEPTH) {
 				continue;
 			}
-			const absolute = path.join(directory, dirent.name);
-			// Match the path relative to the search root, so `services/foo`
-			// finds a nested folder and not only a direct child by that name.
-			const relative = path.relative(start, absolute).split(path.sep).join('/');
-			if (relative.toLowerCase().includes(query) || dirent.name.toLowerCase().includes(query)) {
-				directories.push({ name: dirent.name, path: absolute });
+			const dirents = await fs.readdir(current.directory, { withFileTypes: true }).catch(() => []);
+			// Sorted so two searches of an unchanged tree agree on what came first.
+			dirents.sort((a, b) => a.name.localeCompare(b.name));
+			for (const dirent of dirents) {
+				if (scanned++ > FIND_DIRS_MAX_SCANNED || directories.length >= FIND_DIRS_MAX_RESULTS) {
+					break;
+				}
+				if (!dirent.isDirectory() || shouldIgnore(dirent.name) || dirent.name.startsWith('.')) {
+					continue;
+				}
+				const absolute = path.join(current.directory, dirent.name);
+				add(absolute);
+				queue.push({ directory: absolute, depth: current.depth + 1 });
 			}
-			await walk(absolute, depth + 1);
 		}
-	};
+		truncated = directories.length >= FIND_DIRS_MAX_RESULTS
+			|| scanned > FIND_DIRS_MAX_SCANNED
+			|| Date.now() - beganAt > FIND_DIRS_BUDGET_MS;
+	}
 
-	await walk(start, 0);
 	// Prefix matches read as "the one I meant"; the rest by depth then name.
 	const rank = (entry: { name: string }) => entry.name.toLowerCase().startsWith(query) ? 0 : 1;
 	directories.sort((a, b) => rank(a) - rank(b) || a.path.length - b.path.length || a.name.localeCompare(b.name));
-	res.json({ path: start, directories, truncated: directories.length >= MAX_RESULTS });
+	res.json({ path: start, directories, truncated });
 });

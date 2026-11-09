@@ -102,7 +102,7 @@ Monaco 的 model 是**按 URI 缓存**的：文件第一次打开时从磁盘读
 
 视图记忆放在 `workspaceState.ts`（localStorage，`agentui.workspace`，root 归一化后作 key）：打开的文件、左栏页签、每个文件的光标行列与滚动位置。`Workspace` 以 `key={root}` 挂载，切项目必重挂，所以这些状态只能落在组件外；恢复打开文件前会先 `readFile` 探活，文件已被删除就清掉记忆而不是开一个报错页。
 
-文件树与变更列表可以就地操作，全部经过 `toAbsolute` 的 root 守卫（`server/fsApi.ts`）：右键行 → 新建文件 / 新建文件夹 / 删除（`Delete` 键同效），新建是 VS Code 式的内联输入框，同名路径返回 409 而不是覆盖。文件树每个目录只加载一次，所以 `Workspace.revision` 变化（一轮结束）与左栏的 ↻ 都会 bump `reloadToken` 重读已展开的目录——否则 agent 新建的文件要等切项目才出现。两个面板顶部各有一个过滤框：文件树走 `GET /api/fs/search` 在整个项目里找文件（扁平结果，Enter 打开第一个），变更列表在本地按路径过滤（顶部显示 `3 / 12 个文件`）。新建会话对话框同理：已有项目按名称/路径过滤，"选择目录"里输入 ≥2 个字符会在当前目录下按名字搜子目录（`GET /api/fs/find-dirs`，深度、扫描量和结果数都有上限）。
+文件树与变更列表可以就地操作，全部经过 `toAbsolute` 的 root 守卫（`server/fsApi.ts`）：右键行 → 新建文件 / 新建文件夹 / 删除（`Delete` 键同效），新建是 VS Code 式的内联输入框，同名路径返回 409 而不是覆盖。文件树每个目录只加载一次，所以 `Workspace.revision` 变化（一轮结束）与左栏的 ↻ 都会 bump `reloadToken` 重读已展开的目录——否则 agent 新建的文件要等切项目才出现。两个面板顶部各有一个过滤框：文件树走 `GET /api/fs/search` 在整个项目里找文件（扁平结果，Enter 打开第一个），变更列表在本地按路径过滤（顶部显示 `3 / 12 个文件`）。新建会话对话框同理：已有项目按名称/路径过滤，"选择目录"里输入 ≥2 个字符会在当前目录下搜子目录（`GET /api/fs/find-dirs`）。它优先调平台自己的工具——POSIX 的 `find -ipath`、Windows 的 PowerShell `Get-ChildItem`——两者都在遍历前剪掉 `node_modules`/`.git` 这类目录；工具缺失或太老（没有 `-ipath`）、超时 8s 时，退回进程内的广度优先遍历（深度 20、50 万条、10 秒封顶），两条路径用同一套过滤与排序，所以结果一致。
 
 ## 终端：复制粘贴与路径链接
 
