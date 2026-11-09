@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { reportClientLog } from './api';
 import { App } from './App';
 import './monacoSetup';
+import { installTypeScriptDiagnostics } from './components/tsDiagnostics';
 // Utilities for streamdown's markdown output. Loaded before the app styles;
 // Tailwind's rules are layered, so `styles.css` keeps the final say.
 import './tailwind.css';
@@ -56,6 +57,9 @@ window.addEventListener('error', event => {
 window.addEventListener('unhandledrejection', event => {
 	reportClientLog({ event: 'unhandled-rejection', message: String(event.reason) });
 });
+
+// Markers for `.ts` / `.js` are pulled from the TS worker here; see the module.
+installTypeScriptDiagnostics();
 
 const container = document.getElementById('root');
 if (!container) {

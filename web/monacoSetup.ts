@@ -28,15 +28,32 @@ const environment: monaco.Environment = {
 
 // Cross-file "go to definition" inside the TypeScript worker: models created for
 // project files resolve their imports against each other without a language server.
-monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
+const COMPILER_OPTIONS: monaco.languages.typescript.CompilerOptions = {
 	allowNonTsExtensions: true,
 	target: monaco.languages.typescript.ScriptTarget.ESNext,
 	module: monaco.languages.typescript.ModuleKind.ESNext,
 	moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
 	jsx: monaco.languages.typescript.JsxEmit.ReactJSX,
 	allowJs: true,
-	checkJs: false,
+	// `.js` gets the same treatment as `.ts`; with `checkJs` off it had syntax
+	// colouring and nothing else, so a typo in a plain script looked clean.
+	checkJs: true,
 	noEmit: true,
+};
+
+monaco.languages.typescript.typescriptDefaults.setCompilerOptions(COMPILER_OPTIONS);
+monaco.languages.typescript.javascriptDefaults.setCompilerOptions(COMPILER_OPTIONS);
+
+// Squiggles come from `components/tsDiagnostics`, which pulls the diagnostics
+// for the buffer on screen. Leaving Monaco's own publisher on paints a second
+// copy of every problem, so it is switched off here rather than filtered later.
+monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+	noSemanticValidation: true,
+	noSyntaxValidation: true,
+});
+monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+	noSemanticValidation: true,
+	noSyntaxValidation: true,
 });
 
 const EXTENSION_LANGUAGES: Record<string, string> = {

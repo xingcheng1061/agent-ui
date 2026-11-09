@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { readFile, writeFile } from '../api';
 import { languageForPath, modelUri, monaco } from '../monacoSetup';
+import { getTheme } from '../theme';
 import { documentEdited, trackDocument, untrackDocument } from './editorLsp';
 import { Markdown } from './Markdown';
 import { readCursor, writeCursor } from './workspaceState';
@@ -121,7 +122,9 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 			return;
 		}
 		const editor = monaco.editor.create(container, {
-			theme: 'vs-dark',
+			// `editor.create` sets the global theme, so this has to name ours:
+			// `vs-dark` threw away the semantic rules `monacoSetup` installed.
+			theme: getTheme() === 'light' ? 'agentui-light' : 'agentui-dark',
 			automaticLayout: true,
 			fontSize: 13,
 			minimap: { enabled: false },
