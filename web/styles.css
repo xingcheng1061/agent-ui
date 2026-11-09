@@ -1057,6 +1057,10 @@ button {
 
 .chat-composer textarea {
 	resize: none;
+	/* The height comes from the splitter above it; this only stops a dragged
+	 * height from swallowing the transcript on a short window. */
+	min-height: 60px;
+	max-height: 55vh;
 	background: var(--bg-elevated);
 	color: var(--fg);
 	border: 1px solid var(--border);

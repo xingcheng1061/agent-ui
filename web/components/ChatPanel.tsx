@@ -4,8 +4,10 @@ import { getTranscript, reportClientLog, searchFiles, type TranscriptItem } from
 import { clearAttention, requestAttention } from '../attention';
 import { acquireAgentConnection, type AgentConnectionHandle } from './agentConnections';
 import { CodeHighlight, guessLanguage } from './CodeHighlight';
+import { draftKey, readDraft, writeDraft } from './composerDrafts';
 import { deleteLiveTurn, pruneLiveTurns, readLiveTurn } from './liveTurnStore';
 import { Markdown } from './Markdown';
+import { Splitter, clamp, usePersistedSize } from './Splitter';
 
 interface ToolResultInfo {
 	readonly content: string;
@@ -299,7 +301,31 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		setAnswerPicks({});
 		setFreeform('');
 	}, [permission?.requestId]);
-	const [draft, setDraft] = useState('');
+	/** Height of the input, dragged from its top edge and remembered. */
+	const [composerHeight, setComposerHeight] = usePersistedSize('agentui.composer.height', 88);
+	/**
+	 * Drafts are per conversation. Switching away and back used to lose whatever
+	 * had been typed without sending, because `draft` was plain state and the
+	 * panel is remounted or re-targeted on every switch.
+	 */
+	const draftScopeRef = useRef(draftKey(root, sessionId));
+	const [draft, setDraft] = useState(() => readDraft(draftScopeRef.current));
+	const draftRef = useRef(draft);
+	const draftSaveTimerRef = useRef<number | undefined>(undefined);
+
+	/**
+	 * The one way `draft` changes.
+	 *
+	 * Typing, mention completion and clearing on send all go through here, so
+	 * the stored copy cannot drift from what is on screen. The write is
+	 * debounced: a burst of keystrokes should not hit localStorage every time.
+	 */
+	const changeDraft = (next: string) => {
+		draftRef.current = next;
+		setDraft(next);
+		window.clearTimeout(draftSaveTimerRef.current);
+		draftSaveTimerRef.current = window.setTimeout(() => writeDraft(draftScopeRef.current, next), 300);
+	};
 	const [connection, setConnection] = useState<'connecting' | 'open' | 'closed'>('connecting');
 	const [meta, setMeta] = useState<{
 		agent?: string;
@@ -976,6 +1002,29 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		connectionRef.current?.follow(sessionId);
 	}, [sessionId]);
 
+	// Switching conversation without a remount (same project, another session)
+	// swaps the draft as well: the old one is stashed, the new one restored.
+	useEffect(() => {
+		const next = draftKey(root, sessionId);
+		if (next === draftScopeRef.current) {
+			return;
+		}
+		window.clearTimeout(draftSaveTimerRef.current);
+		writeDraft(draftScopeRef.current, draftRef.current);
+		draftScopeRef.current = next;
+		const restored = readDraft(next);
+		draftRef.current = restored;
+		setDraft(restored);
+		setCursor(restored.length);
+	}, [root, sessionId]);
+
+	// Unmounting (project switch, agent switch, reload) is the last chance to
+	// save; the debounce above would otherwise drop the last keystrokes.
+	useEffect(() => () => {
+		window.clearTimeout(draftSaveTimerRef.current);
+		writeDraft(draftScopeRef.current, draftRef.current);
+	}, []);
+
 	const submitText = (text: string, immediate = false) => {
 		// Sending while a turn runs is a queue, not an error: the server holds it
 		// and writes it to stdin once the turn ends, so it becomes a turn of its
@@ -994,7 +1043,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		// Sending a message drops a pending approval on the server side.
 		setPermission(undefined);
 		clearAttention();
-		setDraft('');
+		changeDraft('');
 		setCursor(0);
 		setPicker(undefined);
 		setMenuDismissed(false);
@@ -1187,7 +1236,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	const applyMention = (file: string) => {
 		const replaced = beforeCursor.replace(/@([^\s@]*)$/, `@${file} `);
 		const next = replaced + draft.slice(cursor);
-		setDraft(next);
+		changeDraft(next);
 		setCursor(replaced.length);
 		setMenuDismissed(false);
 		requestAnimationFrame(() => {
@@ -1238,7 +1287,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						setMenuDismissed(true);
 						if (command.action) {
 							setPicker(command.action);
-							setDraft('');
+							changeDraft('');
 							setCursor(0);
 						} else {
 							submitText(`/${command.name}`);
@@ -1444,13 +1493,19 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						))}
 					</div>
 				)}
+				{/* The input is a pane: drag its top edge to make room for a long prompt. */}
+				<Splitter
+					axis="y"
+					onResize={delta => setComposerHeight(clamp(composerHeight - delta, 60, 480))}
+				/>
 				<textarea
 					ref={inputRef}
 					value={draft}
 					placeholder="描述任务；Enter 发送 / Shift+Enter 换行；/ 调命令，@ 引用文件"
 					rows={3}
+					style={{ height: composerHeight }}
 					onChange={event => {
-						setDraft(event.target.value);
+						changeDraft(event.target.value);
 						setCursor(event.target.selectionStart ?? 0);
 						setMenuDismissed(false);
 					}}
