@@ -37,7 +37,7 @@ import {
 } from './auth.js';
 import { fsRouter } from './fsApi.js';
 import { gitFileVersions, gitStatus } from './git.js';
-import { closeDocument, definition, diagnostics, disposeLsp, hover, lspStatus, LspUnavailableError, semanticTokens, syncDocument } from './lsp.js';
+import { closeDocument, definition, diagnostics, disposeLsp, hover, lspStatus, LspUnavailableError, semanticTokens, syncDocument, warmLsp } from './lsp.js';
 import { resolveModels } from './models.js';
 import { BadRequestError, PathOutsideRootError, readStringQuery, resolveRoot, shouldIgnore, toAbsolute } from './paths.js';
 import { addPersistedRoot } from './projectStore.js';
@@ -508,6 +508,25 @@ app.post('/api/lsp/hover', async (req, res) => {
 	res.json({ contents: await hover(root, absolute, caret.line, caret.column, caret.text) });
 });
 
+/**
+ * Pay the clangd handshake while the user is still reading the tree.
+ *
+ * Fire and forget: a start can take seconds on a large database, and nothing in
+ * the response depends on it — the first click either finds a warm session or
+ * joins the start that is already in flight.
+ */
+app.post('/api/lsp/warm', async (req, res) => {
+	const body = req.body as { root?: unknown } | undefined;
+	if (typeof body?.root !== 'string') {
+		throw new BadRequestError('`root` must be a string.');
+	}
+	const root = await resolveRoot(body.root);
+	void warmLsp(root).catch(error => {
+		console.warn(`[agent-ui] clangd warm-up skipped for ${root}:`, error instanceof Error ? error.message : error);
+	});
+	res.json({ warming: true });
+});
+
 /** Debug view: is clangd up for this root, and which database does it use? */
 app.get('/api/lsp/status', async (req, res) => {
 	const root = await resolveRoot(readStringQuery(req.query['root'], 'root'));
@@ -525,10 +544,15 @@ app.post('/api/lsp/diagnostics', async (req, res) => {
 });
 
 app.post('/api/lsp/semantic-tokens', async (req, res) => {
-	const caret = lspCaret(req.body);
-	const root = await resolveRoot(caret.root);
-	const absolute = toAbsolute(root, caret.absolute);
-	res.json(await semanticTokens(root, absolute, caret.text));
+	// Whole-document request: there is no caret, so the shape differs from
+	// definition/hover and must not go through `lspCaret`.
+	const body = req.body as { root?: unknown; path?: unknown; text?: unknown } | undefined;
+	if (typeof body?.root !== 'string' || typeof body.path !== 'string') {
+		throw new BadRequestError('`root` and `path` must be strings.');
+	}
+	const root = await resolveRoot(body.root);
+	const absolute = toAbsolute(root, body.path);
+	res.json(await semanticTokens(root, absolute, typeof body.text === 'string' ? body.text : undefined));
 });
 
 app.use('/api/fs', fsRouter);

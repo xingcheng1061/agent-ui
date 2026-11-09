@@ -272,6 +272,20 @@ export async function lspDiagnostics(root: string, filePath: string): Promise<re
 	return result.diagnostics;
 }
 
+/**
+ * Asks for the clangd process to be started now.
+ *
+ * Deliberately not awaited by callers: the server answers as soon as the start
+ * is scheduled, because the handshake is exactly what we are hiding.
+ */
+export async function lspWarm(root: string): Promise<boolean> {
+	const result = await requestJson<{ warming?: boolean }>('/api/lsp/warm', {
+		method: 'POST',
+		body: JSON.stringify({ root }),
+	});
+	return result.warming === true;
+}
+
 /** Relative 5-tuple token data, which is exactly Monaco's encoding. */
 export async function lspSemanticTokens(
 	root: string,

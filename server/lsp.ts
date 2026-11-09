@@ -62,15 +62,28 @@ interface Pending {
 	timer: NodeJS.Timeout;
 }
 
+/** The `semanticTokensProvider.legend` from clangd's initialize reply. */
+interface SemanticLegend {
+	readonly tokenTypes: readonly string[];
+	readonly tokenModifiers: readonly string[];
+}
+
 interface Session {
 	readonly root: string;
 	readonly proc: ChildProcessWithoutNullStreams;
 	readonly executable: string;
 	/** Resolved `--compile-commands-dir`, when one was configured. */
 	readonly compileCommandsDir?: string;
+	/**
+	 * The legend clangd answered with. It does not have to match the one we
+	 * declared, and its token types are what the data indexes into.
+	 */
+	legend?: SemanticLegend;
 	readonly pending: Map<number, Pending>;
 	/** uri -> version, for the documents clangd currently has open. */
 	readonly documents: Map<string, number>;
+	/** uri -> the text last pushed, so identical pushes can be skipped. */
+	readonly texts: Map<string, string>;
 	/** uri -> last diagnostics clangd pushed for it. */
 	readonly diagnostics: Map<string, readonly RawDiagnostic[]>;
 	/** uri -> syncs blocked on the next `publishDiagnostics` for that file. */
@@ -85,6 +98,13 @@ interface Session {
 /** A clangd start can index a large project; a request is expected to be quick. */
 const INITIALIZE_TIMEOUT_MS = 20 * 1000;
 const REQUEST_TIMEOUT_MS = 15 * 1000;
+/**
+ * clangd handles one request at a time, so a hover queued behind the first
+ * parse of a large translation unit waits much longer than a definition on an
+ * already parsed file. Failing at 15 s only throws away work that was about to
+ * finish; the tooltip the user asked for is worth the wait.
+ */
+const HOVER_TIMEOUT_MS = 60 * 1000;
 
 /**
  * Legend shared with the browser: clangd indexes into these arrays, and the
@@ -100,8 +120,70 @@ export const SEMANTIC_TOKEN_MODIFIERS = [
 	'declaration', 'definition', 'readonly', 'static', 'deprecated', 'abstract', 'async',
 	'modification', 'documentation', 'defaultLibrary',
 ] as const;
-/** A directory left alone keeps its process (and its index) for this long. */
-const IDLE_MS = 30 * 60 * 1000;
+
+/** Token types clangd may send that our legend has no slot for. */
+const FALLBACK_TOKEN_TYPES: Record<string, string> = {
+	unknown: 'variable',
+	concept: 'type',
+	bracket: 'operator',
+	label: 'variable',
+};
+
+/**
+ * Rewrites the token type and modifier indexes from clangd's legend into ours.
+ *
+ * The arrays declared in `initialize` are a capability, not a promise: clangd
+ * answers with its own legend and indexes the data into that, so `3` means its
+ * third type (`function`), not ours (`enum`). Positions and lengths are left
+ * untouched — the relative encoding does not depend on the legend at all.
+ */
+function remapLegend(session: Session, data: readonly number[]): readonly number[] {
+	const legend = session.legend;
+	if (!legend) {
+		return data;
+	}
+	const ours = SEMANTIC_TOKEN_TYPES as readonly string[];
+	const ourModifiers = SEMANTIC_TOKEN_MODIFIERS as readonly string[];
+	const fallbackType = ours.indexOf('variable');
+	const typeIndexes = legend.tokenTypes.map(name => {
+		const index = ours.indexOf(name);
+		if (index >= 0) {
+			return index;
+		}
+		const fallback = FALLBACK_TOKEN_TYPES[name];
+		return fallback === undefined ? fallbackType : ours.indexOf(fallback);
+	});
+	const modifierIndexes = legend.tokenModifiers.map(name => ourModifiers.indexOf(name));
+
+	const out: number[] = [];
+	for (let offset = 0; offset + 4 < data.length; offset += 5) {
+		const mappedType = typeIndexes[data[offset + 3] ?? -1];
+		let modifiers = 0;
+		const bits = data[offset + 4] ?? 0;
+		for (let bit = 0; bit < modifierIndexes.length; bit += 1) {
+			if ((bits & (1 << bit)) !== 0) {
+				const target = modifierIndexes[bit];
+				if (target !== undefined && target >= 0) {
+					modifiers |= 1 << target;
+				}
+			}
+		}
+		out.push(data[offset] ?? 0, data[offset + 1] ?? 0, data[offset + 2] ?? 0, mappedType ?? fallbackType, modifiers);
+	}
+	return out;
+}
+
+/**
+ * A directory left alone keeps its process (and its index) for this long.
+ *
+ * Three hours by default: a cold start on a large compilation database costs
+ * minutes of CPU and churns the index cache, which is worse than the memory an
+ * idle process holds. `AGENT_UI_LSP_IDLE_MINUTES` adjusts it either way.
+ */
+const IDLE_MS = (() => {
+	const minutes = Number(process.env['AGENT_UI_LSP_IDLE_MINUTES'] ?? '');
+	return Number.isFinite(minutes) && minutes > 0 ? minutes * 60 * 1000 : 180 * 60 * 1000;
+})();
 const REAP_INTERVAL_MS = 60 * 1000;
 
 const sessions = new Map<string, Session>();
@@ -274,9 +356,14 @@ function teardown(session: Session, reason: string): void {
 /**
  * Start clangd for one root and complete the handshake.
  *
- * `compile_commands.json` is found by clangd itself, walking up from the root.
- * `AGENT_UI_COMPILE_COMMANDS_DIR` overrides it for build systems that put the
- * database somewhere else (Bazel: the output base, unless you copy it out).
+ * `compile_commands.json` is normally found by clangd itself, walking up from
+ * each file. That walk leaves the project: in a worktree, a header belonging to
+ * the main checkout resolves the main repository's database, which for a
+ * monorepo is hundreds of megabytes and tens of thousands of translation units,
+ * re-read on every start. When the root has a database of its own we pin it, so
+ * the walk never happens. `AGENT_UI_COMPILE_COMMANDS_DIR` overrides the location
+ * for build systems that put the database somewhere else (Bazel: the output
+ * base, unless you copy it out).
  */
 async function startSession(root: string): Promise<Session> {
 	const executable = clangdExecutable();
@@ -286,13 +373,19 @@ async function startSession(root: string): Promise<Session> {
 	// `AGENT_UI_CLANGD_LOG=verbose` makes clangd print which compilation
 	// database it loaded, which is the quickest way to check a setup.
 	const logLevel = process.env['AGENT_UI_CLANGD_LOG'] ?? 'error';
-	const args = [`--log=${logLevel}`, '--enable-config', '--header-insertion=never'];
+	// Extra flags, space-separated. `--background-index=0` is the usual one for
+	// a huge shared compilation database: jump-to-definition and diagnostics
+	// still work, but clangd stops indexing every TU up front.
+	const extraArgs = (process.env['AGENT_UI_CLANGD_ARGS'] ?? '').split(/\s+/).filter(Boolean);
+	const args = [`--log=${logLevel}`, '--enable-config', '--header-insertion=never', ...extraArgs];
 	const compileCommandsDir = process.env['AGENT_UI_COMPILE_COMMANDS_DIR'];
-	const resolvedCompileCommandsDir = compileCommandsDir && compileCommandsDir.trim() !== ''
+	const configuredCompileCommandsDir = compileCommandsDir && compileCommandsDir.trim() !== ''
 		? path.resolve(root, compileCommandsDir.trim())
 		: undefined;
-	if (resolvedCompileCommandsDir) {
-		args.push(`--compile-commands-dir=${resolvedCompileCommandsDir}`);
+	const pinnedCompileCommandsDir = configuredCompileCommandsDir
+		?? (existsSync(path.join(root, 'compile_commands.json')) ? root : undefined);
+	if (pinnedCompileCommandsDir) {
+		args.push(`--compile-commands-dir=${pinnedCompileCommandsDir}`);
 	}
 	const proc = spawn(executable, args, {
 		cwd: root,
@@ -303,9 +396,10 @@ async function startSession(root: string): Promise<Session> {
 		root,
 		proc,
 		executable,
-		compileCommandsDir: resolvedCompileCommandsDir,
+		compileCommandsDir: pinnedCompileCommandsDir,
 		pending: new Map(),
 		documents: new Map(),
+		texts: new Map(),
 		diagnostics: new Map(),
 		diagnosticWaiters: new Map(),
 		nextId: 1,
@@ -325,7 +419,7 @@ async function startSession(root: string): Promise<Session> {
 	proc.on('exit', (code, signal) => teardown(session, signal ?? String(code)));
 
 	const rootUri = pathToFileURL(root).href;
-	await request(session, 'initialize', {
+	const initialized = await request(session, 'initialize', {
 		processId: process.pid,
 		clientInfo: { name: 'agent-ui' },
 		rootUri,
@@ -350,6 +444,20 @@ async function startSession(root: string): Promise<Session> {
 			window: { workDoneProgress: true },
 		},
 	}, INITIALIZE_TIMEOUT_MS);
+	// clangd's own legend, not the one we asked for: a token type index in the
+	// data refers to this array, so `remapLegend` needs it to translate.
+	const advertised = (initialized as {
+		capabilities?: { semanticTokensProvider?: { legend?: unknown } };
+	} | null)?.capabilities?.semanticTokensProvider?.legend;
+	if (advertised && typeof advertised === 'object') {
+		const candidate = advertised as { tokenTypes?: unknown; tokenModifiers?: unknown };
+		if (Array.isArray(candidate.tokenTypes) && Array.isArray(candidate.tokenModifiers)) {
+			session.legend = {
+				tokenTypes: candidate.tokenTypes.filter((item): item is string => typeof item === 'string'),
+				tokenModifiers: candidate.tokenModifiers.filter((item): item is string => typeof item === 'string'),
+			};
+		}
+	}
 	notify(session, 'initialized', {});
 
 	if (!reaper) {
@@ -402,9 +510,17 @@ function languageIdFor(filePath: string): string {
  * Full-text sync only: the client sends the whole buffer, which is what a
  * 200 kB source file costs anyway, and it removes every reason for the two
  * sides to disagree about what the file contains.
+ *
+ * Identical text is dropped instead of re-sent. Every caret-driven request
+ * carries the buffer, so opening a file used to push `didOpen` and then an
+ * identical `didChange` from the first semantic-token request: a new version,
+ * a discarded AST, a full re-parse before anything was painted.
  */
 function pushDocument(session: Session, absolutePath: string, text: string): void {
 	const uri = pathToFileURL(absolutePath).href;
+	if (session.documents.has(uri) && session.texts.get(uri) === text) {
+		return;
+	}
 	const version = (session.documents.get(uri) ?? 0) + 1;
 	if (session.documents.has(uri)) {
 		notify(session, 'textDocument/didChange', { textDocument: { uri, version }, contentChanges: [{ text }] });
@@ -414,6 +530,7 @@ function pushDocument(session: Session, absolutePath: string, text: string): voi
 		});
 	}
 	session.documents.set(uri, version);
+	session.texts.set(uri, text);
 }
 
 /**
@@ -547,6 +664,7 @@ export async function closeDocument(root: string, absolutePath: string): Promise
 		return;
 	}
 	session.documents.delete(uri);
+	session.texts.delete(uri);
 	notify(session, 'textDocument/didClose', { textDocument: { uri } });
 }
 
@@ -577,7 +695,7 @@ export async function hover(root: string, absolutePath: string, line: number, co
 	const result = await request(session, 'textDocument/hover', {
 		textDocument: { uri: pathToFileURL(absolutePath).href },
 		position: { line: Math.max(0, line - 1), character: Math.max(0, column - 1) },
-	});
+	}, HOVER_TIMEOUT_MS);
 	return hoverMarkdown(result);
 }
 
@@ -633,12 +751,31 @@ export async function semanticTokens(
 	const result = await request(session, 'textDocument/semanticTokens/full', {
 		textDocument: { uri: pathToFileURL(absolutePath).href },
 	}) as { resultId?: string; data?: number[] } | null;
-	return { resultId: result?.resultId, data: result?.data ?? [] };
+	return { resultId: result?.resultId, data: remapLegend(session, result?.data ?? []) };
+}
+
+/**
+ * Whether a directory is worth a clangd process at all.
+ *
+ * Warming every project would spawn a C++ front end for repositories that have
+ * no C++ in them; a build file or a source file in the root is the cheap test.
+ */
+async function looksLikeCppProject(root: string): Promise<boolean> {
+	for (const marker of ['compile_commands.json', 'CMakeLists.txt', 'build.ninja', 'meson.build']) {
+		if (existsSync(path.join(root, marker))) {
+			return true;
+		}
+	}
+	const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+	return entries.some(entry => entry.isFile() && /\.(?:c|cc|cpp|cxx|h|hh|hpp)$/i.test(entry.name));
 }
 
 /** Startup cost paid before the first click: handshake only, no indexing wait. */
 export async function warmLsp(root: string): Promise<boolean> {
 	if (!clangdExecutable()) {
+		return false;
+	}
+	if (!(await looksLikeCppProject(root))) {
 		return false;
 	}
 	await sessionFor(root);

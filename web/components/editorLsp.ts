@@ -41,6 +41,15 @@ let lastNotice = '';
 const SYNC_DELAY_MS = 400;
 
 /**
+ * How long to wait before asking for semantic tokens a second time.
+ *
+ * clangd answers with an empty array when the document arrives before the
+ * first parse finished, and Monaco takes that as "nothing to colour" rather
+ * than asking again — the file stayed plain until the next keystroke.
+ */
+const TOKEN_RETRY_MS = 900;
+
+/**
  * Legend shared with `server/lsp.ts`. clangd encodes each token as an index
  * into these arrays, so the order has to match the server exactly.
  */
@@ -111,6 +120,53 @@ function notifyFailure(error: unknown): void {
 	bridge?.notice(`clangd: ${message}`);
 }
 
+/**
+ * The whole document's tokens, with one retry for the "not parsed yet" answer.
+ *
+ * LSP's relative 5-tuple encoding is exactly what Monaco decodes, so the array
+ * only has to be handed over as `Uint32Array`.
+ */
+async function requestTokens(
+	root: string,
+	filePath: string,
+	text: string,
+): Promise<{ resultId?: string; data: Uint32Array } | null> {
+	const first = await lspSemanticTokens(root, filePath, text);
+	if (first.data.length > 0) {
+		return { resultId: first.resultId, data: new Uint32Array(first.data) };
+	}
+	await new Promise<void>(resolve => {
+		window.setTimeout(resolve, TOKEN_RETRY_MS);
+	});
+	const second = await lspSemanticTokens(root, filePath, text);
+	if (second.data.length === 0) {
+		return null;
+	}
+	return { resultId: second.resultId, data: new Uint32Array(second.data) };
+}
+
+/**
+ * Hover, deduplicated while in flight.
+ *
+ * Monaco asks on every mouse move over a symbol, and clangd answers one
+ * request at a time: the same tooltip queued three times pushes everything
+ * behind it past the timeout. Only concurrent calls are shared — a cached
+ * answer would be wrong as soon as the buffer changes.
+ */
+const hoversInFlight = new Map<string, Promise<string | undefined>>();
+
+function hoverAt(root: string, filePath: string, line: number, column: number, text: string): Promise<string | undefined> {
+	const key = `${root}\u0000${filePath}\u0000${line}\u0000${column}`;
+	const pending = hoversInFlight.get(key);
+	if (pending) {
+		return pending;
+	}
+	const started = lspHover(root, filePath, line, column, text)
+		.finally(() => hoversInFlight.delete(key));
+	hoversInFlight.set(key, started);
+	return started;
+}
+
 function push(root: string, filePath: string, text: string): void {
 	void syncLspDocument(root, filePath, text)
 		.then(result => {
@@ -150,12 +206,7 @@ export function attachLsp(next: LspBridge): void {
 				return null;
 			}
 			try {
-				const result = await lspSemanticTokens(owner.root, owner.path, model.getValue());
-				if (result.data.length === 0) {
-					return null;
-				}
-				// LSP's relative 5-tuple encoding is exactly what Monaco decodes.
-				return { resultId: result.resultId, data: new Uint32Array(result.data) };
+				return await requestTokens(owner.root, owner.path, model.getValue());
 			} catch {
 				return null;
 			}
@@ -213,7 +264,7 @@ async function provideHover(
 		return null;
 	}
 	try {
-		const contents = await lspHover(owner.root, owner.path, position.lineNumber, position.column, model.getValue());
+		const contents = await hoverAt(owner.root, owner.path, position.lineNumber, position.column, model.getValue());
 		return contents ? { contents: [{ value: contents }] } : null;
 	} catch (error) {
 		notifyFailure(error);

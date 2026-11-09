@@ -285,13 +285,15 @@ Monaco 只带语法着色，`Ctrl+单击` 一个函数名要跳到定义，就�
 
 **LSP 在服务端收口。** 前端只发 `root + path + position`（`/api/lsp/definition`、`/api/lsp/hover`），从不接触 LSP 方法名和 URI。服务端负责 stdio 上的 `Content-Length` 帧、请求 id 配对，以及 clangd 反问的 `workspace/configuration`——一律答 `null` 让它用默认值，不答会把它后面的请求卡住。好处是跳转能力可以脱离浏览器验证：`npx tsx` 直接调 `definition()` 就能看到真 clangd 的答案。
 
-**编译数据库是前提。** clangd 自己从项目根向上找 `compile_commands.json`。Bazel 不生成它，所以 `reports/cpp-demo` 里手写了一份：`clang++` 风格的命令，`-isystem` 直接指向 MSVC 与 Windows SDK 的 include，不依赖 `--query-driver`。要换位置就设 `AGENT_UI_COMPILE_COMMANDS_DIR`；clangd 本体用 `AGENT_UI_CLANGD` 指定，找不到时接口返回 503，编辑器把这句话显示在状态栏一次而不是每次点击都喊。
+**编译数据库是前提。** clangd 自己从每个文件向上找 `compile_commands.json`。Bazel 不生成它，所以 `reports/cpp-demo` 里手写了一份：`clang++` 风格的命令，`-isystem` 直接指向 MSVC 与 Windows SDK 的 include，不依赖 `--query-driver`。根目录自带数据库时服务端会固定 `--compile-commands-dir=<root>`，否则 worktree 里的头文件会一路向上解析到主仓库那份（动辄几百 MB、上万个 TU，每次启动都要重读）。要换位置就设 `AGENT_UI_COMPILE_COMMANDS_DIR`；clangd 本体用 `AGENT_UI_CLANGD` 指定，找不到时接口返回 503，编辑器把这句话显示在状态栏一次而不是每次点击都喊。额外开关（如大工程用的 `--background-index=0`）走 `AGENT_UI_CLANGD_ARGS`。
 
 **缓冲区以编辑器为准。** 打开文件时和每次编辑（400ms 防抖）都把全文推给 clangd：它回答的是「收到的那份文本」，不同步的话未保存的编辑会让跳转落到上一行。
 
 **跳转不交给 Monaco。** provider 拿到位置后调用工作区已有的 `openFromTerminal`（和终端里点路径同一个入口），然后返回 `null`。交给 Monaco 自己处理会开一个游离的只读编辑器：丢掉项目归属，也绕过了「文件被移动」时的后缀兜底。
 
-v1 只做 definition 和 hover。诊断、补全、语义高亮走同一条桥，各自缺的是 UI 而不是协议。
+**冷启动摊到别处。** 打开项目时前端就 `POST /api/lsp/warm`，把 spawn 和 handshake 提前付掉；根目录没有 C/C++ 迹象（`compile_commands.json`、`CMakeLists.txt` 或根下的源文件）则不起进程。空闲进程按 root 回收，默认 3 小时，`AGENT_UI_LSP_IDLE_MINUTES` 可以改——数据库大的机器上，冷启动比那点内存贵。clangd 串行处理请求，所以 hover 单独给了 60s 超时，前端对同一位置的在途 hover 做去重。
+
+语义高亮和诊断也走同一条桥：`legend` 以 clangd `initialize` 的答复为准（客户端声明只是能力协商），服务端把它重映射到我们声明的 23 项再给 Monaco。补全仍未接。
 
 ## 鉴权：为什么用文件而不是数据库
 

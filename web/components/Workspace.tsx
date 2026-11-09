@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { closeTerminal, createTerminal, listTerminals, readFile, renameTerminal, searchFiles, type ProjectInfo, type TerminalInfo } from '../api';
+import { closeTerminal, createTerminal, listTerminals, lspWarm, readFile, renameTerminal, searchFiles, type ProjectInfo, type TerminalInfo } from '../api';
 import { ChangesList } from './ChangesList';
 import { DiffView } from './DiffView';
 import { Editor } from './Editor';
@@ -92,6 +92,10 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 	// Reopen whatever this project had open. The panel is keyed by root, so the
 	// selection used to be lost on every switch and every reload.
 	useEffect(() => {
+		// The clangd handshake is paid here rather than on the first Ctrl+click:
+		// a start takes seconds on a large project, and by then the user is
+		// already in a file. The server skips roots with no C/C++ in them.
+		void lspWarm(root).catch(() => undefined);
 		const remembered = readOpenFile(root);
 		if (!remembered) {
 			return;
