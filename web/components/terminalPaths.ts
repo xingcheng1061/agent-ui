@@ -57,10 +57,12 @@ export function isAbsolutePath(value: string): boolean {
 /**
  * Every path-looking token on one rendered line.
  *
- * A token has to end in a file name with an extension: directories are not
- * openable, and without that rule every dotted word in prose becomes a link.
- * Bare file names (`README.md`) need a two-letter-or-longer extension, which
- * is what keeps `e.g` and `1.2.3` out.
+ * A token normally ends in a name with an extension, which is what keeps most
+ * prose out. Extension-less names are far more often words (`and/or`) than
+ * files, so they only qualify when the token is structured: `./x`, `../x`, or
+ * at least two directory separators (`a/b/test_poi`). Bare one-word names stay
+ * unclickable even with an extension of one letter, where `e.g` would be a
+ * false positive.
  */
 export function findPathTokens(line: string): PathToken[] {
 	const tokens: PathToken[] = [];
@@ -94,7 +96,8 @@ function looksLikePath(candidate: string): boolean {
 		// A home-relative path: only the server knows where that is.
 		return false;
 	}
-	if (!/^[A-Za-z0-9_.@+\-:/\\]+$/.test(candidate)) {
+	// `\p{L}\p{N}` rather than A-Z: paths routinely contain Chinese here.
+	if (!/^[\p{L}\p{N}_.@+\-:/\\]+$/u.test(candidate)) {
 		return false;
 	}
 	const segments = candidate.split(/[\\/]+/).filter(segment => segment.length > 0);
@@ -103,7 +106,15 @@ function looksLikePath(candidate: string): boolean {
 		return false;
 	}
 	if (!/\.[A-Za-z][A-Za-z0-9]{0,7}$/.test(last)) {
-		return false;
+		// A bare name without an extension is far more often prose (`e.g`,
+		// `and/or`) than a file, so only structured paths qualify: `./x`,
+		// `../x`, or at least two directory separators.
+		const separators = (candidate.match(/[\\/]/g) ?? []).length;
+		const prefixed = candidate.startsWith('./') || candidate.startsWith('../');
+		if (!prefixed && separators < 2) {
+			return false;
+		}
+		return true;
 	}
 	// Single-letter extensions (`main.c`) are a real thing, but only accept them
 	// when the token also has a directory part, where `e.g` cannot be mistaken.
