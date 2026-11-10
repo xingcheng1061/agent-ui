@@ -108,6 +108,18 @@ export function SessionSidebar({
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [renamingId]);
 
+	// Two checkouts can share a basename; the label carries the parent only then,
+	// and the row's tooltip is the absolute path on top of that.
+	//
+	// Both live above the early return below: a hook after a conditional return
+	// changes the hook count between renders, and React then refuses to render
+	// the whole rail — which is what took the project filter down with it.
+	const labels = useMemo(() => projectLabels(projects), [projects]);
+	const projectById = useMemo(
+		() => new Map(projects.map(project => [project.id, project] as const)),
+		[projects],
+	);
+
 	if (projects.length === 0) {
 		return (
 			<div className="session-rail">
@@ -123,13 +135,6 @@ export function SessionSidebar({
 	const activeSessions = scoped.filter(session => !session.archived);
 	const archivedSessions = scoped.filter(session => session.archived);
 	const archivedTotal = sessions.filter(session => session.archived).length;
-	// Two checkouts can share a basename; the label carries the parent only then,
-	// and the row's tooltip is the absolute path on top of that.
-	const labels = useMemo(() => projectLabels(projects), [projects]);
-	const projectById = useMemo(
-		() => new Map(projects.map(project => [project.id, project] as const)),
-		[projects],
-	);
 	const projectName = (projectId: string) => labels.get(projectId) ?? projectId;
 
 	const beginRename = (session: SessionEntry) => {
