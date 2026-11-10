@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ProjectInfo, SessionEntry } from '../api';
+import { projectLabels } from '../projectNames';
 
 interface SessionSidebarProps {
 	readonly projects: readonly ProjectInfo[];
@@ -122,7 +123,14 @@ export function SessionSidebar({
 	const activeSessions = scoped.filter(session => !session.archived);
 	const archivedSessions = scoped.filter(session => session.archived);
 	const archivedTotal = sessions.filter(session => session.archived).length;
-	const projectName = (projectId: string) => projects.find(project => project.id === projectId)?.name ?? projectId;
+	// Two checkouts can share a basename; the label carries the parent only then,
+	// and the row's tooltip is the absolute path on top of that.
+	const labels = useMemo(() => projectLabels(projects), [projects]);
+	const projectById = useMemo(
+		() => new Map(projects.map(project => [project.id, project] as const)),
+		[projects],
+	);
+	const projectName = (projectId: string) => labels.get(projectId) ?? projectId;
 
 	const beginRename = (session: SessionEntry) => {
 		renamingRef.current = session;
@@ -152,7 +160,7 @@ export function SessionSidebar({
 				>
 					<option value={ALL}>全部项目（{sessions.length}）</option>
 					{projects.map(project => (
-						<option key={project.id} value={project.id}>{project.name}（{project.sessionCount}）</option>
+						<option key={project.id} value={project.id}>{labels.get(project.id) ?? project.name}（{project.sessionCount}）</option>
 					))}
 				</select>
 				<label className="rail-check" title="归档的会话仍保留记录，只是默认不在这里列出">
@@ -225,7 +233,7 @@ export function SessionSidebar({
 													{pendingTool && <span className="session-badge">待审批</span>}
 												</span>
 												<span className="session-meta">
-													<span className="session-project">{projectName(session.projectId)}</span>
+													<span className="session-project" title={projectById.get(session.projectId)?.cwd}>{projectName(session.projectId)}</span>
 													<span className="session-time">{formatTime(session.updatedAt)}</span>
 												</span>
 											</button>
