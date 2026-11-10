@@ -162,8 +162,13 @@ export function SessionSidebar({
 					value={filter}
 					onChange={event => setFilter(event.target.value)}
 					aria-label="按项目筛选"
+					title={`${projects.length} 个项目，共 ${sessions.length} 条会话`}
 				>
-					<option value={ALL}>全部项目（{sessions.length}）</option>
+					{/*
+					 * Projects, not sessions: the rows under this option are projects,
+					 * and a session total here read as "the list is truncated".
+					 */}
+					<option value={ALL}>全部项目（{projects.length}）</option>
 					{projects.map(project => (
 						<option key={project.id} value={project.id}>{labels.get(project.id) ?? project.name}（{project.sessionCount}）</option>
 					))}
