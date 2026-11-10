@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import fs from 'node:fs/promises';
+import fs, { type FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Router } from 'express';
@@ -7,6 +7,61 @@ import { MAX_FILE_SIZE } from './config.js';
 import { BadRequestError, IGNORED_NAMES, readStringQuery, resolveRoot, shouldIgnore, toAbsolute, toRelative } from './paths.js';
 
 export const fsRouter = Router();
+
+/** One decimal place: this shows up in a status bar, not in a parser. */
+function megabytes(bytes: number): string {
+	return (bytes / (1024 * 1024)).toFixed(1);
+}
+
+/** How much of a big file one `?offset=` request brings back. */
+const READ_CHUNK_BYTES = 512 * 1024;
+/**
+ * Room to reach the next newline after a chunk. A file with one enormous line
+ * (a minified bundle, a JSON dump) must not make this read the whole thing.
+ */
+const READ_LINE_SLACK = 4 * 1024 * 1024;
+/** Largest file the viewer pages through at all; past this a browser tab dies. */
+const MAX_VIEW_SIZE = 64 * 1024 * 1024;
+
+interface FileChunk {
+	readonly content: string;
+	/** Byte offset just past `content`. */
+	readonly next: number;
+}
+
+/**
+ * One chunk, cut on a line boundary when possible.
+ *
+ * Byte offsets only line up with characters if the cut is at a newline, so the
+ * read runs past the chunk until it finds one; only a line longer than the
+ * slack budget forces a mid-line cut, and then the cut is pulled back to a
+ * UTF-8 character boundary rather than emitting a replacement character.
+ */
+async function readChunk(handle: FileHandle, size: number, offset: number): Promise<FileChunk> {
+	const capacity = Math.min(size - offset, READ_CHUNK_BYTES + READ_LINE_SLACK);
+	const buffer = Buffer.alloc(capacity);
+	const { bytesRead } = await handle.read(buffer, 0, capacity, offset);
+	if (bytesRead === 0) {
+		return { content: '', next: size };
+	}
+
+	// Aim for one chunk, then run to the next newline so a line is never split
+	// across two responses. When the remaining bytes are shorter than a chunk,
+	// they are the last response, newline or not.
+	let end = Math.min(READ_CHUNK_BYTES, bytesRead);
+	if (offset + end < size) {
+		const newline = buffer.subarray(end, bytesRead).indexOf(0x0a);
+		end = newline >= 0 ? end + newline + 1 : bytesRead;
+		if ((buffer[end - 1] ?? 0) !== 0x0a) {
+			// A line longer than the slack budget has to be cut mid-line; step
+			// back over trailing continuation bytes rather than emit U+FFFD.
+			while (end > 0 && ((buffer[end] ?? 0) & 0xc0) === 0x80) {
+				end -= 1;
+			}
+		}
+	}
+	return { content: buffer.subarray(0, end).toString('utf8'), next: offset + end };
+}
 
 /** One directory level; the client expands directories lazily. */
 fsRouter.get('/list', async (req, res) => {
@@ -76,6 +131,14 @@ fsRouter.get('/search', async (req, res) => {
 	res.json({ files, dirs, truncated: full() });
 });
 
+/**
+ * One file, or one slice of it.
+ *
+ * A file under the editable size comes back whole: paging it would only add
+ * round trips. Anything bigger is read from `?offset=` in chunks, so a 40 MB
+ * log paints its first screen immediately instead of after the whole thing has
+ * crossed the wire.
+ */
 fsRouter.get('/read', async (req, res) => {
 	const root = await resolveRoot(readStringQuery(req.query['root'], 'root'));
 	const relative = readStringQuery(req.query['path'], 'path');
@@ -84,18 +147,48 @@ fsRouter.get('/read', async (req, res) => {
 	if (!stat.isFile()) {
 		throw new BadRequestError(`Not a file: ${relative}`);
 	}
-	if (stat.size > MAX_FILE_SIZE) {
-		res.status(413).json({ error: `File is larger than ${MAX_FILE_SIZE} bytes.` });
+	if (stat.size > MAX_VIEW_SIZE) {
+		res.status(413).json({
+			error: `This file is ${megabytes(stat.size)} MB; the viewer pages through up to ${megabytes(MAX_VIEW_SIZE)} MB.`,
+		});
 		return;
 	}
 
-	const contents = await fs.readFile(absolute);
-	if (contents.includes(0)) {
-		res.status(415).json({ error: 'Binary file cannot be opened in the editor.' });
-		return;
-	}
+	const requestedOffset = Number(req.query['offset'] ?? 0);
+	const offset = Number.isFinite(requestedOffset) && requestedOffset > 0 ? Math.floor(requestedOffset) : 0;
+	const editable = stat.size <= MAX_FILE_SIZE;
 
-	res.json({ path: relative, content: contents.toString('utf8'), size: stat.size });
+	const handle = await fs.open(absolute, 'r');
+	try {
+		if (offset === 0 && editable) {
+			const contents = await handle.readFile();
+			if (contents.includes(0)) {
+				res.status(415).json({ error: 'Binary file cannot be opened in the editor.' });
+				return;
+			}
+			res.json({ path: relative, content: contents.toString('utf8'), size: stat.size, next: stat.size, eof: true, editable });
+			return;
+		}
+
+		const chunk = await readChunk(handle, stat.size, offset);
+		// Only the head of the file is checked: a NUL byte later on is data, not a
+		// sign that the whole thing is a binary the editor cannot show.
+		if (offset === 0 && chunk.content.includes('\0')) {
+			res.status(415).json({ error: 'Binary file cannot be opened in the editor.' });
+			return;
+		}
+		res.json({
+			path: relative,
+			content: chunk.content,
+			size: stat.size,
+			offset,
+			next: chunk.next,
+			eof: chunk.next >= stat.size,
+			editable,
+		});
+	} finally {
+		await handle.close();
+	}
 });
 
 fsRouter.post('/write', async (req, res) => {

@@ -76,6 +76,12 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
 		} catch {
 			// Not JSON; leave `body` undefined.
 		}
+		// The API answers `{ error }`; without this the status bar printed the
+		// JSON body itself (`Error: {"error":"..."}`), which reads like a crash.
+		const detail = (error.body as { error?: unknown } | undefined)?.error;
+		if (typeof detail === 'string') {
+			error.message = detail;
+		}
 		throw error;
 	}
 	return await response.json() as T;
@@ -176,8 +182,22 @@ export async function searchFiles(root: string, query: string): Promise<readonly
 	return result.files;
 }
 
-export function readFile(root: string, filePath: string): Promise<{ path: string; content: string; size: number }> {
-	return requestJson(`/api/fs/read?root=${encodeURIComponent(root)}&path=${encodeURIComponent(filePath)}`);
+/** One slice of a file; a file that fits the editor limit arrives whole. */
+export interface FileChunk {
+	readonly path: string;
+	readonly content: string;
+	readonly size: number;
+	/** Byte offset just past `content`; equals `size` once nothing is left. */
+	readonly next: number;
+	readonly eof: boolean;
+	/** False for a file over the editor limit: it can be read, not written. */
+	readonly editable: boolean;
+}
+
+/** `offset` continues paging a file that was too big for one response. */
+export function readFile(root: string, filePath: string, offset = 0): Promise<FileChunk> {
+	const query = `root=${encodeURIComponent(root)}&path=${encodeURIComponent(filePath)}${offset > 0 ? `&offset=${offset}` : ''}`;
+	return requestJson(`/api/fs/read?${query}`);
 }
 
 export function writeFile(root: string, filePath: string, content: string): Promise<{ ok: boolean }> {

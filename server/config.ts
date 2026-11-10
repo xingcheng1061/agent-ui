@@ -12,8 +12,24 @@ export const PORT = Number(process.env.AGENT_UI_PORT ?? 4711);
 /** Optional shared secret. When set, every API request and WS handshake must present `?token=`. */
 export const ACCESS_TOKEN = process.env.AGENT_UI_TOKEN ?? '';
 
-/** Files larger than this are not opened in the editor. */
-export const MAX_FILE_SIZE = 2 * 1024 * 1024;
+const DEFAULT_MAX_FILE_MB = 8;
+
+/**
+ * Files larger than this are not opened in the editor.
+ *
+ * 2 MB was too eager: a generated source file, a lockfile or a log in a
+ * monorepo hits it constantly, and the error named bytes rather than saying
+ * what to do. 8 MB still round-trips as JSON and fits a Monaco model without
+ * stalling the tab; `AGENT_UI_MAX_FILE_MB` moves it for people who open logs.
+ */
+export const MAX_FILE_SIZE = maxFileSize();
+
+function maxFileSize(): number {
+	const configured = Number(process.env['AGENT_UI_MAX_FILE_MB'] ?? '');
+	const megabytes = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_MAX_FILE_MB;
+	// Below 1 MB the editor is useless; above 512 MB one tab takes the page down.
+	return Math.round(Math.min(Math.max(megabytes, 1), 512) * 1024 * 1024);
+}
 
 /** Per-run secret used by the MCP approval child to reach `/internal/permission`. */
 export const INTERNAL_TOKEN = randomUUID();

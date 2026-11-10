@@ -100,6 +100,8 @@ Monaco 的 model 是**按 URI 缓存**的：文件第一次打开时从磁盘读
 
 `reloadToken` 是 Editor 唯一的外部刷新信号：只有它变化才会重读磁盘，替换时保留光标与滚动位置。
 
+**大文件分块读。** `GET /api/fs/read` 对不超过 `AGENT_UI_MAX_FILE_MB`（默认 8 MB）的文件仍然一次返回全文；更大的文件按 `?offset=` 分块，每块 512 KB 且尽量切在换行处（一整行超过 4 MB 时才在行中断开，并回退到 UTF-8 字符边界），单文件上限 64 MB。编辑器先渲染第一块，滚到距底部 600px 以内再取下一块并追加到 model。这类文件是**只读预览**：保存半截缓冲会把后面的内容截断，所以未载入完不允许编辑，完全载入后也不允许（写回同样超过编辑器上限）。分块文件也不会推给 clangd——它按收到的文本作答，截断的缓冲会让跳转和诊断全部错位。
+
 视图记忆放在 `workspaceState.ts`（localStorage，`agentui.workspace`，root 归一化后作 key）：打开的文件、左栏页签、每个文件的光标行列与滚动位置。`Workspace` 以 `key={root}` 挂载，切项目必重挂，所以这些状态只能落在组件外；恢复打开文件前会先 `readFile` 探活，文件已被删除就清掉记忆而不是开一个报错页。
 
 文件树与变更列表可以就地操作，全部经过 `toAbsolute` 的 root 守卫（`server/fsApi.ts`）：右键行 → 新建文件 / 新建文件夹 / 删除（`Delete` 键同效），新建是 VS Code 式的内联输入框，同名路径返回 409 而不是覆盖。文件树每个目录只加载一次，所以 `Workspace.revision` 变化（一轮结束）与左栏的 ↻ 都会 bump `reloadToken` 重读已展开的目录——否则 agent 新建的文件要等切项目才出现。两个面板顶部各有一个过滤框：文件树走 `GET /api/fs/search` 在整个项目里找文件（扁平结果，Enter 打开第一个），变更列表在本地按路径过滤（顶部显示 `3 / 12 个文件`）。新建会话对话框同理：已有项目按名称/路径过滤，"选择目录"里输入 ≥2 个字符会在当前目录下搜子目录（`GET /api/fs/find-dirs`）。它优先调平台自己的工具——POSIX 的 `find -ipath`、Windows 的 PowerShell `Get-ChildItem`——两者都在遍历前剪掉 `node_modules`/`.git` 这类目录；工具缺失或太老（没有 `-ipath`）、超时 8s 时，退回进程内的广度优先遍历（深度 20、50 万条、10 秒封顶），两条路径用同一套过滤与排序，所以结果一致。
@@ -115,7 +117,7 @@ xterm 接管了键盘和鼠标，浏览器的默认行为基本到不了终端�
 | macOS | 上述修饰键换成 `Cmd` |
 
 - 剪贴板**写入**在非安全上下文（http + 局域网 IP）下没有 `navigator.clipboard`，退到 `execCommand('copy')`；**读取**没有兜底，这种情况会打印一次提示，要求改用 localhost 或 HTTPS 访问。
-- 路径链接由 `registerLinkProvider` 提供：每行渲染时用正则找出「带扩展名的路径」，支持 `path:12`、`path:12:5`、`path:12-20`。只有 `Ctrl/⌘ + 单击`才激活（与 VS Code 一致，普通点击仍然只是选中文本），带行号的会 `revealLineInCenter` 跳过去。
+- 路径链接由 `registerLinkProvider` 提供：每行渲染时用正则找出「像路径的 token」——字符集是 Unicode 字母数字，中文目录名照样识别；末段带扩展名的直接认，无扩展名的只有在结构化时才认（`./x`、`../x`、至少两级目录的 `a/b/test_poi`），这样 `e.g`、`and/or`、`1.2.3` 不会被误标。支持 `path:12`、`path:12:5`、`path:12-20`。只有 `Ctrl/⌘ + 单击`才激活（与 VS Code 一致，普通点击仍然只是选中文本），带行号的会 `revealLineInCenter` 跳过去。
 - 相对路径以**终端的项目根**为基准；shell 里 `cd` 过之后不会跟随，因为没有 shell integration（OSC 633）可读。绝对路径先在已打开的项目列表里找归属，命中后按那个项目的 root 打开——服务端只允许读已知 root 下的文件，所以跨项目是「换一个 root 去读」，不是放开越权。
 
 ## 渲染管线

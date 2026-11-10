@@ -6,6 +6,11 @@ import { documentEdited, trackDocument, untrackDocument } from './editorLsp';
 import { Markdown } from './Markdown';
 import { readCursor, writeCursor } from './workspaceState';
 
+/** One decimal place: this is read in a status bar, not parsed. */
+function megabytes(bytes: number): string {
+	return (bytes / (1024 * 1024)).toFixed(1);
+}
+
 interface EditorProps {
 	readonly root: string;
 	readonly filePath: string | undefined;
@@ -43,6 +48,19 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 	/** Set while the buffer is being replaced from disk, so that is not "dirty". */
 	const applyingRef = useRef(false);
 	const saveCursorTimerRef = useRef<number | undefined>(undefined);
+	/**
+	 * How much of the file is in the model.
+	 *
+	 * A big file opens with one chunk; `loadedRef` is the byte offset just past
+	 * what is on screen, `sizeRef` the whole file. The rest arrives as it is
+	 * scrolled to, which is what makes a 40 MB log usable at all.
+	 */
+	const loadedRef = useRef(0);
+	const sizeRef = useRef(0);
+	const completeRef = useRef(true);
+	/** The server's verdict: a file over the editor limit is a read-only preview. */
+	const editableRef = useRef(true);
+	const loadingChunkRef = useRef(false);
 	const [previewText, setPreviewText] = useState('');
 	/** Bumped once a file's model is on screen, so `reveal` can be applied. */
 	const [loadedToken, setLoadedToken] = useState(0);
@@ -65,6 +83,15 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 		const model = editor?.getModel();
 		const target = currentFileRef.current;
 		if (!editor || !model || !target) {
+			return;
+		}
+		// Writing a half-loaded buffer would truncate the file at the last chunk.
+		if (!completeRef.current) {
+			onStatusRef.current('文件还没载入完，保存会截断后面的内容');
+			return;
+		}
+		if (!editableRef.current) {
+			onStatusRef.current('这个文件超过编辑器上限，只能只读预览');
 			return;
 		}
 		try {
@@ -104,6 +131,25 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 		onDirtyChangeRef.current(false);
 		if (previewRef.current) {
 			setPreviewText(content);
+		}
+	};
+
+	/**
+	 * Makes the editor match what has been loaded.
+	 *
+	 * A partly loaded buffer is read-only: saving it would write the part on
+	 * screen and drop the rest. A file over the editor limit stays read-only
+	 * even when every chunk has arrived — the write path could not take it back.
+	 */
+	const paintLoadState = (editor: monaco.editor.IStandaloneCodeEditor, target: string) => {
+		const editable = editableRef.current && completeRef.current;
+		editor.updateOptions({ readOnly: !editable });
+		if (!completeRef.current) {
+			onStatusRef.current(
+				`${target}：已载入 ${megabytes(loadedRef.current)} / ${megabytes(sizeRef.current)} MB，滚动到底部继续载入`,
+			);
+		} else if (!editableRef.current) {
+			onStatusRef.current(`${target}：共 ${megabytes(sizeRef.current)} MB，超过编辑器上限，只读预览`);
 		}
 	};
 
@@ -164,22 +210,75 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 		const target = filePath;
 		currentFileRef.current = target;
 
+		/**
+		 * Pulls the next slice of a file that did not fit in one read.
+		 *
+		 * Appending keeps the caret and the scroll position where the user left
+		 * them, and `applyingRef` keeps the append from counting as an edit.
+		 */
+		const loadNextChunk = async (model: monaco.editor.ITextModel) => {
+			if (completeRef.current || loadingChunkRef.current) {
+				return;
+			}
+			loadingChunkRef.current = true;
+			try {
+				const chunk = await readFile(root, target, loadedRef.current);
+				if (cancelled || editor.getModel() !== model) {
+					return;
+				}
+				const lastLine = model.getLineCount();
+				const lastColumn = model.getLineMaxColumn(lastLine);
+				applyingRef.current = true;
+				model.applyEdits([{
+					range: {
+						startLineNumber: lastLine,
+						startColumn: lastColumn,
+						endLineNumber: lastLine,
+						endColumn: lastColumn,
+					},
+					text: chunk.content,
+				}]);
+				applyingRef.current = false;
+				loadedRef.current = chunk.next;
+				sizeRef.current = chunk.size;
+				completeRef.current = chunk.eof;
+				paintLoadState(editor, target);
+				if (previewRef.current) {
+					setPreviewText(model.getValue());
+				}
+				// Only a complete buffer may reach clangd: it answers about the text
+				// it was given, so a truncated one would send every jump to the
+				// wrong place and report phantom errors at the cut.
+				if (chunk.eof && editableRef.current) {
+					trackDocument(root, target, model.getValue());
+				}
+			} catch (error) {
+				onStatusRef.current(String(error));
+			} finally {
+				loadingChunkRef.current = false;
+			}
+		};
+
 		void (async () => {
 			const uri = modelUri(root, target);
-			const { content } = await readFile(root, target);
+			const chunk = await readFile(root, target);
 			if (cancelled) {
 				return;
 			}
+			loadedRef.current = chunk.next;
+			sizeRef.current = chunk.size;
+			completeRef.current = chunk.eof;
+			editableRef.current = chunk.editable;
 			let model = monaco.editor.getModel(uri);
 			if (!model) {
-				model = monaco.editor.createModel(content, languageForPath(target), uri);
+				model = monaco.editor.createModel(chunk.content, languageForPath(target), uri);
 				editor.setModel(model);
 				editor.focus();
 			} else {
 				editor.setModel(model);
 				editor.focus();
-				if (model.getValue() !== content) {
-					replaceContent(editor, model, content, false);
+				if (model.getValue() !== chunk.content) {
+					replaceContent(editor, model, chunk.content, false);
 				}
 			}
 
@@ -197,6 +296,7 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 				documentEdited(model, root, target, model.getValue());
 			});
 			onDirtyChangeRef.current(false);
+			paintLoadState(editor, target);
 
 			// Where the caret was left last time; the panel is remounted on every
 			// project switch and reload, so this cannot live in component state.
@@ -219,9 +319,20 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 				window.clearTimeout(saveCursorTimerRef.current);
 				saveCursorTimerRef.current = window.setTimeout(() => saveCursor(editor), 400);
 			};
+			/** Reaching the bottom asks for the next chunk of a paged file. */
+			const loadOnScroll = () => {
+				if (completeRef.current) {
+					return;
+				}
+				const info = editor.getLayoutInfo();
+				if (editor.getScrollHeight() - (editor.getScrollTop() + info.height) < 600) {
+					void loadNextChunk(model);
+				}
+			};
 			const cursorSubscriptions = [
 				editor.onDidChangeCursorPosition(scheduleSave),
 				editor.onDidScrollChange(scheduleSave),
+				editor.onDidScrollChange(loadOnScroll),
 			];
 			cursorSubscriptionRef.current = {
 				dispose: () => {
@@ -233,8 +344,11 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 			};
 
 			// clangd gets the file while it is on screen, not on the first
-			// Ctrl+click that would otherwise pay for the handshake.
-			trackDocument(root, target, model.getValue());
+			// Ctrl+click that would otherwise pay for the handshake. A file that is
+			// still paging in waits until it is complete — see `loadNextChunk`.
+			if (completeRef.current && editableRef.current) {
+				trackDocument(root, target, model.getValue());
+			}
 
 			setLoadedToken(value => value + 1);
 			if (previewRef.current) {
@@ -288,16 +402,28 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 		let cancelled = false;
 		void (async () => {
 			try {
-				const { content } = await readFile(root, target);
+				const chunk = await readFile(root, target);
 				if (cancelled) {
 					return;
 				}
 				const model = editor.getModel();
-				if (!model || model.getValue() === content) {
+				if (!model) {
 					return;
 				}
-				replaceContent(editor, model, content, true);
-				onStatusRef.current(`已重新载入 ${target}`);
+				// A reload restarts the paging: the buffer has to match what the
+				// file is now, not what the previous version had appended to it.
+				loadedRef.current = chunk.next;
+				sizeRef.current = chunk.size;
+				completeRef.current = chunk.eof;
+				editableRef.current = chunk.editable;
+				if (model.getValue() !== chunk.content) {
+					replaceContent(editor, model, chunk.content, true);
+				}
+				paintLoadState(editor, target);
+				if (completeRef.current && editableRef.current) {
+					trackDocument(root, target, model.getValue());
+					onStatusRef.current(`已重新载入 ${target}`);
+				}
 			} catch (error) {
 				if (!cancelled) {
 					onStatusRef.current(String(error));

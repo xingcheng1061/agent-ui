@@ -14,6 +14,7 @@ import {
 	DEBUG,
 	HOST,
 	INTERNAL_TOKEN,
+	MAX_FILE_SIZE,
 	PORT,
 	PROJECT_ROOT,
 	isAuthorized,
@@ -56,7 +57,10 @@ import {
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
 const app = express();
-app.use(express.json({ limit: '16mb' }));
+// Saving goes through this parser, and JSON escaping of source text can nearly
+// double it: the body limit follows the editor's file limit instead of a magic
+// 16 MB, so raising `AGENT_UI_MAX_FILE_MB` does not produce a save that 413s.
+app.use(express.json({ limit: `${Math.ceil((MAX_FILE_SIZE * 2) / (1024 * 1024))}mb` }));
 
 /**
  * Debug trail of what actually reached this process. A browser stuck on a cached
