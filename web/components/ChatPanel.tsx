@@ -1627,6 +1627,18 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	);
 }
 
+/**
+ * Whether a message contains a complete diagram.
+ *
+ * mermaid is a megabyte of parser, loaded on demand: a conversation that never
+ * draws one must not pay for it. Only a closed fence counts — a block still
+ * arriving would be handed to mermaid half-written, and it would answer with
+ * its error box for as long as the rest of the answer takes to stream.
+ */
+function hasMermaidDiagram(text: string): boolean {
+	return /^[ \t]*```+[ \t]*mermaid\b[\s\S]*?^[ \t]*```+[ \t]*$/im.test(text);
+}
+
 function ChatItemView({ item, childrenOf, outputOf, live = false }: {
 	readonly item: Item;
 	readonly childrenOf: (id: string) => readonly Item[];
@@ -1649,7 +1661,7 @@ function ChatItemView({ item, childrenOf, outputOf, live = false }: {
 		case 'assistant':
 			return (
 				<div className="msg assistant rich">
-					<Markdown text={item.text} streaming={live} />
+					<Markdown text={item.text} streaming={live} mermaid={hasMermaidDiagram(item.text)} />
 				</div>
 			);
 		case 'thinking':
