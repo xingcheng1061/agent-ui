@@ -12,7 +12,7 @@
  * workspace tab and keeps the project lookup and "moved file" fallbacks.
  */
 import { closeLspDocument, lspDefinition, lspHover, lspSemanticTokens, syncLspDocument, type LspDiagnostic } from '../api';
-import { modelUri, monaco } from '../monacoSetup';
+import { languageForPath, modelUri, monaco } from '../monacoSetup';
 
 interface DocumentOwner {
 	readonly root: string;
@@ -272,8 +272,24 @@ async function provideHover(
 	}
 }
 
+/**
+ * Whether clangd is the right server for this file.
+ *
+ * Every opened buffer used to be pushed, so clangd parsed a `.proto` or a
+ * `.conf` as C++ and its complaints landed as squiggles on a file it has no
+ * business reading. Only the two languages whose providers are registered are
+ * allowed through; anything else never reaches the bridge.
+ */
+function isCppFile(filePath: string): boolean {
+	const language = languageForPath(filePath);
+	return language === 'c' || language === 'cpp';
+}
+
 /** The file is on screen: clangd gets its content before the first click. */
 export function trackDocument(root: string, filePath: string, text: string): void {
+	if (!isCppFile(filePath)) {
+		return;
+	}
 	const key = keyOf(root, filePath);
 	owners.set(key, { root, path: filePath });
 	pendingText.delete(key);
@@ -289,6 +305,9 @@ export function trackDocument(root: string, filePath: string, text: string): voi
  * delay is short enough that a click right after typing still lands right.
  */
 export function documentEdited(model: monaco.editor.ITextModel, root: string, filePath: string, text: string): void {
+	if (!isCppFile(filePath)) {
+		return;
+	}
 	const key = keyOf(root, filePath);
 	owners.set(key, { root, path: filePath });
 	pendingText.set(key, text);
