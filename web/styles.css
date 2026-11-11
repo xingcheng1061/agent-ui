@@ -282,7 +282,17 @@ button {
 	background: var(--primary-hover);
 }
 
-.rail-select {
+/* Searchable project filter: a `<select>` cannot be typed into, and this rail
+ * routinely holds more projects than fit on one screen. */
+.project-filter {
+	position: relative;
+}
+
+.project-filter-trigger {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
 	min-width: 0;
 	background: var(--bg);
 	color: var(--fg);
@@ -290,11 +300,108 @@ button {
 	border-radius: 4px;
 	font-size: 12px;
 	padding: 4px 6px;
+	cursor: pointer;
+	text-align: left;
+}
+
+.project-filter-trigger:hover,
+.project-filter-trigger.open {
+	border-color: var(--accent);
+}
+
+.project-filter-text {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.project-filter-caret {
+	flex: none;
+	font-size: 9px;
+	color: var(--fg-dim);
+}
+
+.project-filter-pop {
+	position: absolute;
+	top: calc(100% + 4px);
+	left: 0;
+	right: 0;
+	z-index: 30;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 6px;
+	background: var(--bg-elevated);
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	box-shadow: 0 8px 24px rgb(0 0 0 / 28%);
+}
+
+.project-filter-input {
+	width: 100%;
+	background: var(--bg);
+	color: var(--fg);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	padding: 4px 6px;
+	font-size: 12px;
 	outline: none;
 }
 
-.rail-select:focus {
+.project-filter-input:focus {
 	border-color: var(--accent);
+}
+
+.project-filter-list {
+	display: flex;
+	flex-direction: column;
+	max-height: 260px;
+	overflow: auto;
+}
+
+.project-filter-option {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	padding: 5px 6px;
+	background: transparent;
+	border: none;
+	border-radius: 4px;
+	color: var(--fg);
+	font-size: 12px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.project-filter-option.active {
+	background: var(--surface-sunken);
+}
+
+.project-filter-label {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.project-filter-label.selected {
+	color: var(--accent);
+}
+
+.project-filter-count {
+	flex: none;
+	font-size: 11px;
+	color: var(--fg-dim);
+}
+
+.project-filter-empty {
+	padding: 6px;
+	font-size: 11.5px;
+	color: var(--fg-dim);
 }
 
 .rail-list {

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ProjectInfo, SessionEntry } from '../api';
+import { t, useLang } from '../i18n';
+import { ALL, ProjectFilter } from './ProjectFilter';
 import { projectLabels } from '../projectNames';
 
 interface SessionSidebarProps {
@@ -27,7 +29,7 @@ interface SessionSidebarProps {
 	readonly approvals?: ReadonlyMap<string, string>;
 }
 
-const ALL = 'all';
+
 
 /** Sessions first: one flat, time-ordered list; the project is a label on the row. */
 export function SessionSidebar({
@@ -42,6 +44,7 @@ export function SessionSidebar({
 	running,
 	approvals,
 }: SessionSidebarProps) {
+	const lang = useLang();
 	const [filter, setFilter] = useState<string>(ALL);
 	/**
 	 * Archived conversations are hidden by default, not deleted: the CLI still
@@ -124,8 +127,9 @@ export function SessionSidebar({
 		return (
 			<div className="session-rail">
 				<div className="rail-empty">
-					没有找到项目。跑一次 claude 会话后，它的项目会自动出现在这里；
-					也可以设置 <code>AGENT_UI_ROOTS</code> 手动指定。
+					{t('没有找到项目。跑一次 claude 会话后，它的项目会自动出现在这里；')}
+					{' '}
+					{t('也可以设置')} <code>AGENT_UI_ROOTS</code> {t('手动指定。')}
 				</div>
 			</div>
 		);
@@ -147,7 +151,7 @@ export function SessionSidebar({
 	const buckets = [
 		...bucketize(activeSessions),
 		...(showArchived && archivedSessions.length > 0
-			? [{ label: `已归档（${archivedSessions.length}）`, sessions: archivedSessions }]
+			? [{ label: t('已归档（{count}）', { count: archivedSessions.length }), sessions: archivedSessions }]
 			: []),
 	];
 
@@ -155,31 +159,22 @@ export function SessionSidebar({
 		<div className="session-rail">
 			<div className="rail-toolbar">
 				<button type="button" className="rail-new" onClick={onNewSession}>
-					＋ 新建会话
+					{t('＋ 新建会话')}
 				</button>
-				<select
-					className="rail-select"
+				<ProjectFilter
+					projects={projects}
+					labels={labels}
 					value={filter}
-					onChange={event => setFilter(event.target.value)}
-					aria-label="按项目筛选"
-					title={`${projects.length} 个项目，共 ${sessions.length} 条会话`}
-				>
-					{/*
-					 * Projects, not sessions: the rows under this option are projects,
-					 * and a session total here read as "the list is truncated".
-					 */}
-					<option value={ALL}>全部项目（{projects.length}）</option>
-					{projects.map(project => (
-						<option key={project.id} value={project.id}>{labels.get(project.id) ?? project.name}（{project.sessionCount}）</option>
-					))}
-				</select>
-				<label className="rail-check" title="归档的会话仍保留记录，只是默认不在这里列出">
+					onChange={setFilter}
+					sessionTotal={sessions.length}
+				/>
+				<label className="rail-check" title={t('归档的会话仍保留记录，只是默认不在这里列出')}>
 					<input
 						type="checkbox"
 						checked={showArchived}
 						onChange={event => setShowArchived(event.target.checked)}
 					/>
-					显示已归档{archivedTotal > 0 ? `（${archivedTotal}）` : ''}
+					{t('显示已归档')}{archivedTotal > 0 ? `（${archivedTotal}）` : ''}
 				</label>
 			</div>
 
@@ -189,7 +184,7 @@ export function SessionSidebar({
 			 * so the toolbar and the scroll area are siblings now.
 			 */}
 			<div className="rail-list">
-				{activeSessions.length === 0 && !showArchived && <div className="rail-empty">这个项目还没有会话</div>}
+				{activeSessions.length === 0 && !showArchived && <div className="rail-empty">{t('这个项目还没有会话')}</div>}
 				{buckets.map(bucket => (
 					<div key={bucket.label}>
 						<div className="bucket-title">{bucket.label}</div>
@@ -235,12 +230,12 @@ export function SessionSidebar({
 											<button
 												type="button"
 												className="session-pick"
-												title={`${session.title}\n${session.cwd}${pendingTool ? `\n等待审批：${pendingTool}` : ''}${live === true ? '\n正在回答' : live === false ? '\n进程在运行，空闲' : ''}`}
+												title={`${session.title}\n${session.cwd}${pendingTool ? `\n${t('等待审批：{tool}', { tool: pendingTool })}` : ''}${live === true ? `\n${t('正在回答')}` : live === false ? `\n${t('进程在运行，空闲')}` : ''}`}
 											>
 												<span className="session-title">
 													{live !== undefined && <i className={`session-run${live ? ' busy' : ''}`} />}
 													<span className="session-text">{session.title}</span>
-													{pendingTool && <span className="session-badge">待审批</span>}
+													{pendingTool && <span className="session-badge">{t('待审批')}</span>}
 												</span>
 												<span className="session-meta">
 													<span className="session-project" title={projectById.get(session.projectId)?.cwd}>{projectName(session.projectId)}</span>
@@ -261,7 +256,7 @@ export function SessionSidebar({
 												<button
 													type="button"
 													className="session-action"
-													title="重命名（双击会话也可）"
+													title={t('重命名（双击会话也可）')}
 													onClick={() => beginRename(session)}
 												>
 													<Icon name="rename" />
@@ -269,7 +264,7 @@ export function SessionSidebar({
 												<button
 													type="button"
 													className="session-action"
-													title={session.archived ? '取消归档' : '归档（保留记录，从列表隐藏）'}
+													title={t(session.archived ? '取消归档' : '归档（保留记录，从列表隐藏）')}
 													onClick={() => onArchiveSession(session, !session.archived)}
 												>
 													<Icon name={session.archived ? 'unarchive' : 'archive'} />
@@ -277,7 +272,7 @@ export function SessionSidebar({
 												<button
 													type="button"
 													className="session-action danger"
-													title="删除会话（同时删除记录文件，不可恢复）"
+													title={t('删除会话（同时删除记录文件，不可恢复）')}
 													onClick={() => onDeleteSession(session)}
 												>
 													<Icon name="delete" />
@@ -342,10 +337,10 @@ function bucketize(sessions: readonly SessionEntry[]): readonly Bucket[] {
 	}
 
 	return [
-		{ label: '今天', sessions: today },
-		{ label: '昨天', sessions: yesterday },
-		{ label: '本周', sessions: thisWeek },
-		{ label: '更早', sessions: older },
+		{ label: t('今天'), sessions: today },
+		{ label: t('昨天'), sessions: yesterday },
+		{ label: t('本周'), sessions: thisWeek },
+		{ label: t('更早'), sessions: older },
 	].filter(bucket => bucket.sessions.length > 0);
 }
 
