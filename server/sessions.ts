@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
+import { readAgentUiConfig, underAnyRoot } from './appConfig.js';
 import { invalidateProjectsCache, listProjects, projectsDir } from './projects.js';
 import { JsonStore } from './store.js';
 
@@ -274,10 +275,18 @@ export async function listAllSessions(options: { readonly includeArchived?: bool
 		}
 	}
 
-	entries.sort((a, b) => b.updatedAt - a.updatedAt);
+	const config = await readAgentUiConfig();
+	const shown = entries.filter(entry => !underAnyRoot(entry.cwd, config.hide));
+	// A session under an `autoArchive` root is archived without writing meta, so
+	// removing the rule brings it straight back.
+	const archived = (entry: { readonly id: string; readonly projectId: string; readonly cwd: string }): boolean =>
+		meta[metaKey(entry.projectId, entry.id)]?.archivedAt !== undefined
+		|| underAnyRoot(entry.cwd, config.autoArchive);
+
+	shown.sort((a, b) => b.updatedAt - a.updatedAt);
 	const visible = options.includeArchived === true
-		? entries
-		: entries.filter(entry => meta[metaKey(entry.projectId, entry.id)]?.archivedAt === undefined);
+		? shown
+		: shown.filter(entry => !archived(entry));
 	const page = visible.slice(0, limit);
 	return Promise.all(page.map(async entry => {
 		const custom = meta[metaKey(entry.projectId, entry.id)];
@@ -289,7 +298,7 @@ export async function listAllSessions(options: { readonly includeArchived?: bool
 			title: custom?.title ?? await readTitle(entry.filePath),
 			updatedAt: entry.updatedAt,
 			size: entry.size,
-			archived: custom?.archivedAt !== undefined,
+			archived: archived(entry),
 		};
 	}));
 }

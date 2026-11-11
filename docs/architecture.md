@@ -42,6 +42,7 @@
 |---|---|---|
 | `index.ts` | HTTP 路由、WS upgrade、优雅退出 | `/api` 统一鉴权；`/internal/permission` 单独用一次性 token |
 | `config.ts` | 环境变量与超时的唯一来源 | `INTERNAL_TOKEN` 每次启动随机生成，MCP 子进程靠它回连 |
+| `appConfig.ts` | `~/.agent-ui/config.json`（运行时策略，不进仓库） | `autoArchive` 根目录下的会话按「已归档」返回、但不写 `session-meta.json`，删掉规则即恢复；`hide` 根目录下的会话完全不返回；规则只作用于会话列表，项目列表不受影响；按文件内容缓存，改完下一次请求即生效 |
 | `store.ts` | JSON 文件存储 | 临时文件 + rename 原子写；写操作串行化 |
 | `auth.ts` | 账号与会话 | scrypt 哈希、HttpOnly Cookie、30 天滑动有效期 |
 | `paths.ts` | `root` 解析、越界防护 | 所有 fs/git 接口都经过 `resolveRoot`，拒绝 `..` 逃逸 |
