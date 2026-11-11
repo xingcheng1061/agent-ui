@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { createEntry, deleteEntry, listDirectory, renameEntry, searchEntries, type FileEntry } from '../api';
+import { t } from '../i18n';
 
 interface DirectoryState {
 	readonly open: boolean;
@@ -263,8 +264,8 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 
 	const remove = async (entry: FileEntry) => {
 		setMenu(undefined);
-		const what = entry.type === 'dir' ? '目录及其中的内容' : '文件';
-		if (!window.confirm(`删除${what}「${entry.name}」？此操作不可撤销。`)) {
+		const what = entry.type === 'dir' ? t('目录及其中的内容') : t('文件');
+		if (!window.confirm(t('删除{what}「{name}」？此操作不可撤销。', { what, name: entry.name }))) {
 			return;
 		}
 		try {
@@ -311,7 +312,7 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 				`draft:${directory}`,
 				depth,
 				draft.type === 'dir' ? '▸' : '·',
-				draft.type === 'dir' ? '新目录名' : '新文件名',
+				draft.type === 'dir' ? t('新目录名') : t('新文件名'),
 			));
 		}
 		if (state?.open && state.entries) {
@@ -319,7 +320,7 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 				if (draft?.rename?.path === entry.path) {
 					// While a directory is being renamed its children stay hidden:
 					// every path under it is about to change.
-					rows.push(draftRow(`rename:${entry.path}`, depth, entry.type === 'dir' ? '▸' : '·', '新名称'));
+					rows.push(draftRow(`rename:${entry.path}`, depth, entry.type === 'dir' ? '▸' : '·', t('新名称')));
 					continue;
 				}
 				const isSelected = entry.type === 'file' && entry.path === selectedPath;
@@ -398,7 +399,7 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 							setQuery('');
 						}
 					}}
-					placeholder="搜索文件"
+					placeholder={t('搜索文件')}
 					spellCheck={false}
 				/>
 			</div>
@@ -413,9 +414,9 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 				)
 				: (
 					<>
-						{searching && <div className="tree-hint">搜索中…</div>}
+						{searching && <div className="tree-hint">{t('搜索中…')}</div>}
 						{!searching && results.length === 0 && dirResults.length === 0 && (
-							<div className="tree-hint">没有匹配「{trimmedQuery}」的文件或目录</div>
+							<div className="tree-hint">{t('没有匹配「{query}」的文件或目录', { query: trimmedQuery })}</div>
 						)}
 						{dirResults.map(dirPath => (
 							<div
@@ -494,14 +495,14 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 					onClick={event => event.stopPropagation()}
 					onContextMenu={event => event.preventDefault()}
 				>
-					<button type="button" onClick={() => startCreate(menu.directory, 'file')}>新建文件</button>
-					<button type="button" onClick={() => startCreate(menu.directory, 'dir')}>新建文件夹</button>
+					<button type="button" onClick={() => startCreate(menu.directory, 'file')}>{t('新建文件')}</button>
+					<button type="button" onClick={() => startCreate(menu.directory, 'dir')}>{t('新建文件夹')}</button>
 					{menu.entry && (
 						<>
 							<div className="tree-menu-sep" />
-							<button type="button" onClick={() => startRename(menu.entry!)}>重命名「{menu.entry.name}」</button>
-							<button type="button" onClick={() => { void copyText(menu.entry!.name); setMenu(undefined); }}>复制文件名</button>
-							<button type="button" onClick={() => { void copyText(menu.entry!.path); setMenu(undefined); }}>复制路径</button>
+							<button type="button" onClick={() => startRename(menu.entry!)}>{t('重命名「{name}」', { name: menu.entry.name })}</button>
+							<button type="button" onClick={() => { void copyText(menu.entry!.name); setMenu(undefined); }}>{t('复制文件名')}</button>
+							<button type="button" onClick={() => { void copyText(menu.entry!.path); setMenu(undefined); }}>{t('复制路径')}</button>
 							<div className="tree-menu-sep" />
 							<button
 								type="button"
@@ -512,7 +513,7 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 									}
 								}}
 							>
-								删除「{menu.entry.name}」
+								{t('删除「{name}」', { name: menu.entry.name })}
 							</button>
 						</>
 					)}

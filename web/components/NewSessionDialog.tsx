@@ -7,6 +7,7 @@ import {
 	type DirectoryHit,
 	type ProjectInfo,
 } from '../api';
+import { t } from '../i18n';
 
 interface NewSessionDialogProps {
 	readonly projects: readonly ProjectInfo[];
@@ -102,13 +103,13 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 		<div className="modal-backdrop" onClick={onClose}>
 			<div className="modal" onClick={event => event.stopPropagation()}>
 				<div className="modal-header">
-					<span>新建会话</span>
+					<span>{t('新建会话')}</span>
 					<button type="button" className="modal-close" onClick={onClose}>×</button>
 				</div>
 
 				<div className="modal-tabs">
-					<button type="button" className={`modal-tab${tab === 'projects' ? ' active' : ''}`} onClick={() => setTab('projects')}>已有项目</button>
-					<button type="button" className={`modal-tab${tab === 'browse' ? ' active' : ''}`} onClick={() => setTab('browse')}>选择目录</button>
+					<button type="button" className={`modal-tab${tab === 'projects' ? ' active' : ''}`} onClick={() => setTab('projects')}>{t('已有项目')}</button>
+					<button type="button" className={`modal-tab${tab === 'browse' ? ' active' : ''}`} onClick={() => setTab('browse')}>{t('选择目录')}</button>
 				</div>
 
 				{tab === 'projects' && (
@@ -117,14 +118,14 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 							className="modal-search"
 							value={projectQuery}
 							onChange={event => setProjectQuery(event.target.value)}
-							placeholder="搜索项目（名称或路径）"
+							placeholder={t('搜索项目（名称或路径）')}
 							spellCheck={false}
 							autoFocus
 						/>
 						<div className="modal-list">
-							{projects.length === 0 && <div className="rail-empty">还没有项目，切到"选择目录"挑一个</div>}
+							{projects.length === 0 && <div className="rail-empty">{t('还没有项目，切到"选择目录"挑一个')}</div>}
 							{projects.length > 0 && visibleProjects.length === 0 && (
-								<div className="rail-empty">没有匹配「{projectQuery.trim()}」的项目</div>
+								<div className="rail-empty">{t('没有匹配「{query}」的项目', { query: projectQuery.trim() })}</div>
 							)}
 							{visibleProjects.map(project => (
 								<button
@@ -153,10 +154,10 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 										go(pathInput);
 									}
 								}}
-								placeholder="输入绝对路径后回车"
+								placeholder={t('输入绝对路径后回车')}
 								spellCheck={false}
 							/>
-							<button type="button" className="toggle" onClick={() => go(pathInput)}>前往</button>
+							<button type="button" className="toggle" onClick={() => go(pathInput)}>{t('前往')}</button>
 						</div>
 
 						<div className="browse-search">
@@ -170,7 +171,7 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 										go(hits[0]!.path);
 									}
 								}}
-								placeholder="搜索当前目录及其子目录（至少 2 个字）"
+								placeholder={t('搜索当前目录及其子目录（至少 2 个字）')}
 								spellCheck={false}
 							/>
 						</div>
@@ -185,10 +186,10 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 							{searching
 								? (
 									<>
-										{hitsLoading && <div className="rail-empty">搜索中…</div>}
+										{hitsLoading && <div className="rail-empty">{t('搜索中…')}</div>}
 										{!hitsLoading && hits.length === 0 && (
 											<div className="rail-empty">
-												当前目录及子目录里没有匹配的目录；可以回到上层目录再搜
+												{t('当前目录及子目录里没有匹配的目录；可以回到上层目录再搜')}
 											</div>
 										)}
 										{hits.map(hit => (
@@ -220,7 +221,7 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 												<span className="modal-item-name">{directory.name}/</span>
 											</button>
 										))}
-										{browse && browse.directories.length === 0 && <div className="rail-empty">（没有子目录）</div>}
+										{browse && browse.directories.length === 0 && <div className="rail-empty">{t('（没有子目录）')}</div>}
 									</>
 								)}
 						</div>
@@ -233,7 +234,7 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 								disabled={!browse || busy}
 								onClick={() => { if (browse) { void create(browse.path); } }}
 							>
-								在此目录新建会话
+								{t('在此目录新建会话')}
 							</button>
 						</div>
 					</div>

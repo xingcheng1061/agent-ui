@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { acquireTerminalSession, peekTerminalState, type TerminalSession, type TerminalState } from './terminalSessions';
 import type { TerminalTarget } from './terminalPaths';
+import { t } from '../i18n';
 
 interface TerminalViewProps {
 	readonly terminalId: string;
@@ -58,15 +59,15 @@ export function TerminalView({ terminalId, root, onOpenTarget }: TerminalViewPro
 			<div className="terminal-host-slot" ref={slotRef} />
 			{state === 'closed' && (
 				<div className="terminal-overlay">
-					<span className="terminal-overlay-text">连接已断开，shell 仍在服务端运行</span>
+					<span className="terminal-overlay-text">{t('连接已断开，shell 仍在服务端运行')}</span>
 					<button type="button" className="primary" onClick={() => sessionRef.current?.reconnect()}>
-						重新连接
+						{t('重新连接')}
 					</button>
 				</div>
 			)}
 			{state === 'connecting' && (
 				<div className="terminal-overlay subtle">
-					<span className="terminal-overlay-text">连接中…</span>
+					<span className="terminal-overlay-text">{t('连接中…')}</span>
 				</div>
 			)}
 		</div>

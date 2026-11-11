@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { gitFile } from '../api';
 import { languageForPath, monaco } from '../monacoSetup';
 import { getTheme, onThemeChange, type ThemeName } from '../theme';
+import { t } from '../i18n';
 
 interface DiffViewProps {
 	readonly root: string;
@@ -64,7 +65,7 @@ export function DiffView({ root, filePath, revision }: DiffViewProps) {
 					return;
 				}
 				if (versions.binary) {
-					setNote('二进制文件，不显示文本 diff');
+					setNote(t('二进制文件，不显示文本 diff'));
 					return;
 				}
 				const language = languageForPath(filePath);
@@ -143,18 +144,18 @@ export function DiffView({ root, filePath, revision }: DiffViewProps) {
 		<div className="diff-wrap">
 			<div className="diff-labels">
 				<span>HEAD</span>
-				<span>工作区</span>
+				<span>{t('工作区')}</span>
 				<span className="diff-actions">
-					<span className="diff-count">{changeCount > 0 ? `${changeCount} 处变更` : '无变更'}</span>
+					<span className="diff-count">{changeCount > 0 ? t('{count} 处变更', { count: changeCount }) : t('无变更')}</span>
 					<button
 						type="button"
-						title="上一个变更"
+						title={t('上一个变更')}
 						disabled={changeCount === 0}
 						onClick={() => jump('previous')}
 					>↑</button>
 					<button
 						type="button"
-						title="下一个变更"
+						title={t('下一个变更')}
 						disabled={changeCount === 0}
 						onClick={() => jump('next')}
 					>↓</button>

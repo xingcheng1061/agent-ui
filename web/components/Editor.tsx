@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { readFile, writeFile } from '../api';
 import { languageForPath, modelUri, monaco } from '../monacoSetup';
 import { getTheme } from '../theme';
+import { t } from '../i18n';
 import { documentEdited, trackDocument, untrackDocument } from './editorLsp';
 import { Markdown } from './Markdown';
 import { readCursor, writeCursor } from './workspaceState';
@@ -87,11 +88,11 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 		}
 		// Writing a half-loaded buffer would truncate the file at the last chunk.
 		if (!completeRef.current) {
-			onStatusRef.current('文件还没载入完，保存会截断后面的内容');
+			onStatusRef.current(t('文件还没载入完，保存会截断后面的内容'));
 			return;
 		}
 		if (!editableRef.current) {
-			onStatusRef.current('这个文件超过编辑器上限，只能只读预览');
+			onStatusRef.current(t('这个文件超过编辑器上限，只能只读预览'));
 			return;
 		}
 		try {
@@ -146,10 +147,10 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 		editor.updateOptions({ readOnly: !editable });
 		if (!completeRef.current) {
 			onStatusRef.current(
-				`${target}：已载入 ${megabytes(loadedRef.current)} / ${megabytes(sizeRef.current)} MB，滚动到底部继续载入`,
+				t('{path}：已载入 {loaded} / {total} MB，滚动到底部继续载入', { path: target, loaded: megabytes(loadedRef.current), total: megabytes(sizeRef.current) }),
 			);
 		} else if (!editableRef.current) {
-			onStatusRef.current(`${target}：共 ${megabytes(sizeRef.current)} MB，超过编辑器上限，只读预览`);
+			onStatusRef.current(t('{path}：共 {size} MB，超过编辑器上限，只读预览', { path: target, size: megabytes(sizeRef.current) }));
 		}
 	};
 
@@ -422,7 +423,7 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 				paintLoadState(editor, target);
 				if (completeRef.current && editableRef.current) {
 					trackDocument(root, target, model.getValue());
-					onStatusRef.current(`已重新载入 ${target}`);
+					onStatusRef.current(t('已重新载入 {path}', { path: target }));
 				}
 			} catch (error) {
 				if (!cancelled) {

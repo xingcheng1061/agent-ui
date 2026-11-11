@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { closeTerminal, createTerminal, listTerminals, lspWarm, readFile, renameTerminal, searchFiles, type ProjectInfo, type TerminalInfo } from '../api';
+import { t } from '../i18n';
 import { ChangesList } from './ChangesList';
 import { DiffView } from './DiffView';
 import { Editor } from './Editor';
@@ -150,7 +151,7 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 		if (!target) {
 			return;
 		}
-		if (dirtyRef.current && !window.confirm(`编辑器里有未保存的修改，重新加载会丢弃它们。\n\n${target.path}`)) {
+		if (dirtyRef.current && !window.confirm(t('编辑器里有未保存的修改，重新加载会丢弃它们。\n\n{path}', { path: target.path }))) {
 			return;
 		}
 		setReloadToken(value => value + 1);
@@ -261,7 +262,7 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 				void openBySuffix(root, segments.slice(-2).join('/'), target);
 				return;
 			}
-			setStatus(`不在任何已打开的项目里：${target.path}`);
+			setStatus(t('不在任何已打开的项目里：{path}', { path: target.path }));
 			return;
 		}
 		void openTerminalPath(owner, relative, target);
@@ -303,13 +304,13 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 				|| candidate.endsWith(`/${guess}`)
 				|| candidate.split('/').pop() === name);
 		if (matches.length === 1) {
-			setStatus(`按文件名定位：${matches[0]}`);
+			setStatus(t('按文件名定位：{path}', { path: matches[0] }));
 			openFileFrom({ root: owner, path: matches[0]!, line: target.line, column: target.column });
 			return;
 		}
 		setStatus(matches.length === 0
-			? `找不到文件：${target.path}`
-			: `有 ${matches.length} 个同名文件，无法确定：${matches.slice(0, 3).join('、')}`);
+			? t('找不到文件：{path}', { path: target.path })
+			: t('有 {count} 个同名文件，无法确定：{paths}', { count: matches.length, paths: matches.slice(0, 3).join(', ') }));
 	};
 
 	/**
@@ -336,16 +337,16 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 						type="button"
 						className={`pane-tab${leftTab === 'files' ? ' active' : ''}`}
 						onClick={() => setLeftTab('files')}
-					>文件</button>
+					>{t('文件')}</button>
 					<button
 						type="button"
 						className={`pane-tab${leftTab === 'changes' ? ' active' : ''}`}
 						onClick={() => setLeftTab('changes')}
-					>变更{changeCount > 0 ? ` ${changeCount}` : ''}</button>
+					>{t('变更')}{changeCount > 0 ? ` ${changeCount}` : ''}</button>
 					<button
 						type="button"
 						className="pane-tab icon"
-						title="重新读取文件列表（agent 新建的文件会在每轮结束时自动出现）"
+						title={t('重新读取文件列表（agent 新建的文件会在每轮结束时自动出现）')}
 						onClick={() => setTreeReload(value => value + 1)}
 					>↻</button>
 				</div>
@@ -418,15 +419,15 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 									{dirty ? ' ●' : ''}
 								</span>
 							)
-							: <span className="tab empty">选择左侧文件，或看"变更"</span>}
+							: <span className="tab empty">{t('选择左侧文件，或看"变更"')}</span>}
 					<span className="spacer" />
 					<span className={`status${status.startsWith('saved') ? ' ok' : ''}`}>{status}</span>
-					{diffPath && <button type="button" className="toggle" onClick={() => setDiffPath(undefined)}>关闭 diff</button>}
+					{diffPath && <button type="button" className="toggle" onClick={() => setDiffPath(undefined)}>{t('关闭 diff')}</button>}
 					{opened && !diffPath && (
 						<button
 							type="button"
 							className="toggle"
-							title="从磁盘重新读取该文件（agent 改过会自动重载；有未保存修改时会先确认）"
+							title={t('从磁盘重新读取该文件（agent 改过会自动重载；有未保存修改时会先确认）')}
 							onClick={reloadFile}
 						>
 							重新加载
@@ -436,14 +437,14 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 						<button
 							type="button"
 							className={`toggle${preview ? ' active' : ''}`}
-							title="渲染 Markdown，mermaid 代码块会画成图"
+							title={t('渲染 Markdown，mermaid 代码块会画成图')}
 							onClick={() => setPreview(value => !value)}
 						>
-							{preview ? '源码' : '预览'}
+							{preview ? t('源码') : t('预览')}
 						</button>
 					)}
 					<button type="button" className="toggle" onClick={() => setTerminalOpen(open => !open)}>
-						{terminalOpen ? '隐藏终端' : '显示终端'}
+						{terminalOpen ? t('隐藏终端') : t('显示终端')}
 					</button>
 				</div>
 
@@ -461,7 +462,7 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 								onStatus={setStatus}
 							/>
 						)
-						: <div className="placeholder">Ctrl+S 保存 · 终端在该项目根目录启动</div>}
+						: <div className="placeholder">{t('Ctrl+S 保存 · 终端在该项目根目录启动')}</div>}
 			</div>
 
 			{/*
@@ -482,7 +483,7 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 									className={`terminal-tab${candidate.id === activeTerminal ? ' active' : ''}`}
 									onClick={() => setActiveTerminal(candidate.id)}
 									onDoubleClick={() => {
-										const next = window.prompt('终端名称', candidate.title);
+										const next = window.prompt(t('终端名称'), candidate.title);
 										if (next && next.trim()) {
 											void renameTerminal(candidate.id, next).then(updated => {
 												if (updated) {
@@ -491,7 +492,7 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 											});
 										}
 									}}
-									title={`${candidate.title}\n${candidate.root}\n双击重命名`}
+									title={t('{title}\n{root}\n双击重命名', { title: candidate.title, root: candidate.root })}
 								>
 									{candidate.title}
 									<span
@@ -506,7 +507,7 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 									>×</span>
 								</button>
 							))}
-							<button type="button" className="terminal-tab add" onClick={() => void addTerminal()} title="新建终端">+</button>
+							<button type="button" className="terminal-tab add" onClick={() => void addTerminal()} title={t('新建终端')}>+</button>
 							<span className="spacer" />
 							<span className="terminal-path">{active?.root ?? root}</span>
 						</div>

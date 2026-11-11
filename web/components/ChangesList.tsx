@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { gitStatus, type GitFileEntry, type GitStatus } from '../api';
+import { t } from '../i18n';
 
 interface ChangesListProps {
 	readonly root: string;
@@ -152,10 +153,10 @@ export function ChangesList({ root, activePath, revision, onSelect, onCountChang
 		return <div className="rail-empty">{error}</div>;
 	}
 	if (!status) {
-		return <div className="rail-empty">读取中…</div>;
+		return <div className="rail-empty">{t('读取中…')}</div>;
 	}
 	if (!status.isRepo) {
-		return <div className="rail-empty">这个目录不是 git 仓库</div>;
+		return <div className="rail-empty">{t('这个目录不是 git 仓库')}</div>;
 	}
 
 	const toggle = (path: string) => {
@@ -175,7 +176,7 @@ export function ChangesList({ root, activePath, revision, onSelect, onCountChang
 			<div className="change-branch">
 				<span>{status.branch || '(no commits yet)'}</span>
 				<span className="change-count">
-					{trimmedQuery === '' ? `${status.files.length} 个文件` : `${matches.length} / ${status.files.length} 个文件`}
+					{trimmedQuery === '' ? t('{count} 个文件', { count: status.files.length }) : t('{matched} / {total} 个文件', { matched: matches.length, total: status.files.length })}
 				</span>
 			</div>
 			<input
@@ -191,13 +192,13 @@ export function ChangesList({ root, activePath, revision, onSelect, onCountChang
 						onSelect(matches[0]!.path);
 					}
 				}}
-				placeholder="过滤变更文件"
+				placeholder={t('过滤变更文件')}
 				spellCheck={false}
 			/>
 			{trimmedQuery !== ''
 				? (
 					<>
-						{matches.length === 0 && <div className="rail-empty">没有匹配「{query.trim()}」的变更</div>}
+						{matches.length === 0 && <div className="rail-empty">{t('没有匹配「{query}」的变更', { query: query.trim() })}</div>}
 						{matches.map(file => (
 							<button
 								type="button"
@@ -219,7 +220,7 @@ export function ChangesList({ root, activePath, revision, onSelect, onCountChang
 				)
 				: (
 					<>
-						{status.files.length === 0 && <div className="rail-empty">工作区干净</div>}
+						{status.files.length === 0 && <div className="rail-empty">{t('工作区干净')}</div>}
 						<TreeRows
 							nodes={tree}
 							depth={0}
@@ -254,7 +255,7 @@ function TreeRows({ nodes, depth, folded, activePath, onToggle, onSelect }: {
 								className="change-row dir"
 								style={{ paddingLeft: 6 + depth * 11 }}
 								onClick={() => onToggle(node.path)}
-								title={`${node.path}（${node.children.length} 项）`}
+								title={t('{path}（{count} 项）', { path: node.path, count: node.children.length })}
 							>
 								<span className="change-arrow">{isFolded ? '▸' : '▾'}</span>
 								<span className="change-path">{node.name}</span>

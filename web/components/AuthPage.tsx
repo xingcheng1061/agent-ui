@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { login, setupAdmin } from '../api';
+import { t } from '../i18n';
 
 /**
  * Login, and first-run account creation.
@@ -29,7 +30,7 @@ export function AuthPage({ setupRequired, onDone }: {
 			onDone();
 		} catch (reason) {
 			const message = reason instanceof Error ? reason.message : String(reason);
-			setError(setupRequired ? `创建失败：${message}` : '用户名或密码错误。');
+			setError(setupRequired ? t('创建失败：{error}', { error: message }) : t('用户名或密码错误。'));
 		} finally {
 			setBusy(false);
 		}
@@ -46,10 +47,10 @@ export function AuthPage({ setupRequired, onDone }: {
 			>
 				<h1 className="auth-title">agent-ui</h1>
 				<p className="auth-sub">
-					{setupRequired ? '首次使用：创建管理员账号' : '登录以继续'}
+					{setupRequired ? t('首次使用：创建管理员账号') : t('登录以继续')}
 				</p>
 
-				<label className="auth-label" htmlFor="auth-username">用户名</label>
+				<label className="auth-label" htmlFor="auth-username">{t('用户名')}</label>
 				<input
 					id="auth-username"
 					className="auth-input"
@@ -58,7 +59,7 @@ export function AuthPage({ setupRequired, onDone }: {
 					onChange={event => setUsername(event.target.value)}
 				/>
 
-				<label className="auth-label" htmlFor="auth-password">密码</label>
+				<label className="auth-label" htmlFor="auth-password">{t('密码')}</label>
 				<input
 					id="auth-password"
 					className="auth-input"
@@ -71,11 +72,11 @@ export function AuthPage({ setupRequired, onDone }: {
 				{error && <div className="auth-error">{error}</div>}
 
 				<button type="submit" className="primary auth-submit" disabled={busy || !username.trim() || password.length < 6}>
-					{setupRequired ? '创建并登录' : '登录'}
+					{setupRequired ? t('创建并登录') : t('登录')}
 				</button>
 
 				{setupRequired && (
-					<p className="auth-hint">密码至少 6 位。账号保存在服务端的 ~/.agent-ui/users.json。</p>
+					<p className="auth-hint">{t('密码至少 6 位。账号保存在服务端的 ~/.agent-ui/users.json。')}</p>
 				)}
 			</form>
 		</div>

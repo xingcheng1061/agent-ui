@@ -2,6 +2,7 @@ import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { reportClientLog } from './api';
 import { App } from './App';
+import { t } from './i18n';
 import './monacoSetup';
 import { installTypeScriptDiagnostics } from './components/tsDiagnostics';
 // Utilities for streamdown's markdown output. Loaded before the app styles;
@@ -37,7 +38,7 @@ class ErrorBoundary extends Component<{ readonly children: ReactNode }, { readon
 		if (error) {
 			return (
 				<pre style={{ padding: 16, color: '#ff6b6b', whiteSpace: 'pre-wrap', font: '12px/1.5 monospace' }}>
-					{`渲染出错：${error.message}\n\n${error.stack ?? ''}`}
+					{t('渲染出错：{error}\n\n{stack}', { error: error.message, stack: error.stack ?? '' })}
 				</pre>
 			);
 		}

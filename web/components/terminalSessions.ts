@@ -2,6 +2,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { Terminal as XTerm, type ILink } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { terminalUrl } from '../api';
+import { t } from '../i18n';
 import { getTheme, onThemeChange, type ThemeName } from '../theme';
 import { findPathTokens, resolveTerminalTarget, type TerminalTarget } from './terminalPaths';
 
@@ -328,7 +329,7 @@ class LiveScreen implements TerminalSession {
 				// swallow Ctrl+V as ^V anyway — say why instead of doing nothing.
 				if (!this._pasteHintShown) {
 					this._pasteHintShown = true;
-					this._term.write('\r\n\x1b[90m[无法读取剪贴板：请通过 localhost 或 HTTPS 打开本页]\x1b[0m\r\n');
+					this._term.write('\r\n\x1b[90m' + t('[无法读取剪贴板：请通过 localhost 或 HTTPS 打开本页]') + '\x1b[0m\r\n');
 				}
 				return false;
 			}

@@ -18,6 +18,7 @@ import { PasswordDialog } from './components/PasswordDialog';
 import { SessionSidebar } from './components/SessionSidebar';
 import { Splitter, clamp, usePersistedSize } from './components/Splitter';
 import { attentionEnabled, onAttentionChange, setAttentionEnabled } from './attention';
+import { setLang, t, useLang } from './i18n';
 import { getTheme, toggleTheme } from './theme';
 import { Workspace } from './components/Workspace';
 import { disposeAllTerminalSessions } from './components/terminalSessions';
@@ -73,6 +74,9 @@ export function App() {
 	const [dialogOpen, setDialogOpen] = useState(false);
 	const [passwordOpen, setPasswordOpen] = useState(false);
 	const [revision, setRevision] = useState(0);
+	// Subscribes the whole shell to the language switch; the copies themselves
+	// re-render through their own `useLang`.
+	const lang = useLang();
 	/**
 	 * Session id → a turn is being answered right now. Polled because a
 	 * conversation can keep running in a tab that is not open here; its socket
@@ -277,18 +281,18 @@ export function App() {
 	const renameSessionEntry = (session: SessionEntry, title: string) => {
 		void renameSession(session.id, title)
 			.then(() => refresh())
-			.catch(reason => window.alert(`重命名失败：${String(reason)}`));
+			.catch(reason => window.alert(t('重命名失败：{error}', { error: String(reason) })));
 	};
 
 	const archiveSessionEntry = (session: SessionEntry, archived: boolean) => {
 		void archiveSession(session.id, archived)
 			.then(() => refresh())
-			.catch(reason => window.alert(`${archived ? '归档' : '取消归档'}失败：${String(reason)}`));
+			.catch(reason => window.alert(t(archived ? '归档失败：{error}' : '取消归档失败：{error}', { error: String(reason) })));
 	};
 
 	const deleteSessionEntry = (session: SessionEntry) => {
 		// Deleting a transcript cannot be undone, and the CLI will not regenerate it.
-		const confirmed = window.confirm(`删除会话「${session.title}」？\n\n记录文件会一并删除，无法恢复。`);
+		const confirmed = window.confirm(t('删除会话「{title}」？\n\n记录文件会一并删除，无法恢复。', { title: session.title }));
 		if (!confirmed) {
 			return;
 		}
@@ -299,7 +303,7 @@ export function App() {
 				setActive(current => current?.sessionId === session.id ? { root: current.root, agent: current.agent } : current);
 				await refresh();
 			})
-			.catch(reason => window.alert(`删除失败：${String(reason)}`));
+			.catch(reason => window.alert(t('删除失败：{error}', { error: String(reason) })));
 	};
 
 	const startSession = async (root: string) => {
@@ -327,18 +331,18 @@ export function App() {
 		return <div className="boot">loading…</div>;
 	}
 	if (error) {
-		return <div className="boot-error">无法连接后端：{error}</div>;
+		return <div className="boot-error">{t('无法连接后端：{error}', { error })}</div>;
 	}
 
 	return (
 		<div className="app">
 			<header className="topbar">
-				<span className="topbar-title">{activeSession?.title ?? '新会话'}</span>
+				<span className="topbar-title">{activeSession?.title ?? t('新会话')}</span>
 				<span className="project-chip" title={active?.root ?? ''}>{active ? baseName(active.root) : '—'}</span>
-				<span className="project-root">{active?.root ?? '未选择项目'}</span>
+				<span className="project-root">{active?.root ?? t('未选择项目')}</span>
 				<span className="account-chip" title={`${auth.username} · ${auth.role}`}>
 					{auth.username}
-					<button type="button" className="link-btn" onClick={() => setPasswordOpen(true)}>改密码</button>
+					<button type="button" className="link-btn" onClick={() => setPasswordOpen(true)}>{t('改密码')}</button>
 					<button
 						type="button"
 						className="link-btn"
@@ -351,27 +355,35 @@ export function App() {
 							});
 						}}
 					>
-						退出
+						{t('退出')}
 					</button>
 				</span>
 				<span className="spacer" />
 				<button
 					type="button"
 					className="toggle"
-					title="切换明亮 / 暗色主题"
-					onClick={() => setThemeState(toggleTheme())}
+					title={t('切换语言')}
+					onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
 				>
-					{theme === 'dark' ? '明亮主题' : '暗色主题'}
+					{lang === 'zh' ? 'EN' : '中文'}
 				</button>
 				<button
 					type="button"
 					className="toggle"
-					title="需要审批时用声音和系统通知提醒；开启会请求浏览器通知权限"
+					title={t('切换明亮 / 暗色主题')}
+					onClick={() => setThemeState(toggleTheme())}
+				>
+					{theme === 'dark' ? t('明亮主题') : t('暗色主题')}
+				</button>
+				<button
+					type="button"
+					className="toggle"
+					title={t('需要审批时用声音和系统通知提醒；开启会请求浏览器通知权限')}
 					onClick={() => { void setAttentionEnabled(!attentionOn); }}
 				>
-					{attentionOn ? '提醒：开' : '提醒：关'}
+					{attentionOn ? t('提醒：开') : t('提醒：关')}
 				</button>
-				<button type="button" className="toggle" onClick={() => { void refresh().catch(reason => setError(String(reason))); }}>刷新</button>
+				<button type="button" className="toggle" onClick={() => { void refresh().catch(reason => setError(String(reason))); }}>{t('刷新')}</button>
 			</header>
 
 			<div className="body" style={{ gridTemplateColumns: `${railWidth}px 5px 1fr` }}>
@@ -393,7 +405,7 @@ export function App() {
 					className={`main${active ? ' split' : ''}`}
 					style={active ? { gridTemplateColumns: `${chatWidth}px 5px 1fr` } : undefined}
 				>
-					{!active && <div className="placeholder">还没有任何项目会话</div>}
+					{!active && <div className="placeholder">{t('还没有任何项目会话')}</div>}
 					{active && (
 						<>
 							<ChatPanel
