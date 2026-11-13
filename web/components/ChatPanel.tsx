@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentClientCommand, AgentInfo, AgentServerEvent, AgentTaskUsage, ModelOption, QueuedMessage } from '../agentTypes';
 import { getTranscript, reportClientLog, searchFiles, type TranscriptItem } from '../api';
 import { clearAttention, requestAttention } from '../attention';
@@ -135,7 +135,19 @@ interface ChatPanelProps {
 	readonly onSessionStarted: (sessionId: string) => void;
 	/** Fired when a turn finishes, so the code panel can refresh git state. */
 	readonly onTurnEnd?: () => void;
+	/**
+	 * Opens a file a tool printed — the `path:line` grep puts in front of every
+	 * hit. Absent when there is no code pane to open it in.
+	 */
+	readonly onOpenPath?: (filePath: string, line?: number) => void;
 }
+
+/**
+ * Handed to the tool cards through context rather than through four levels of
+ * props: the search card is the only consumer, and it sits inside a nested
+ * renderer that would otherwise have to forward the callback everywhere.
+ */
+const OpenPathContext = createContext<((filePath: string, line?: number) => void) | undefined>(undefined);
 
 const TASK_STATUS_LABEL: Record<string, string> = {
 	running: '运行中',
@@ -286,7 +298,7 @@ function dropDurableDeltas(
 	});
 }
 
-export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStarted, onTurnEnd }: ChatPanelProps) {
+export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStarted, onTurnEnd, onOpenPath }: ChatPanelProps) {
 	// The `/` menu caches translated labels in a memo; see its dependency list.
 	const lang = useLang();
 	const [items, setItems] = useState<readonly Item[]>([]);
@@ -1369,15 +1381,17 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				{items.length === 0 && (
 					<div className="chat-empty">{t('输入任务，交给 agent 执行（文件改动可在"代码"页查看）')}</div>
 				)}
-				{roots.map((item, index) => (
-					<ChatItemView
-						key={item.id}
-						item={item}
-						childrenOf={childrenOf}
-						outputOf={outputOf}
-						live={streaming && index === roots.length - 1}
-					/>
-				))}
+				<OpenPathContext.Provider value={onOpenPath}>
+					{roots.map((item, index) => (
+						<ChatItemView
+							key={item.id}
+							item={item}
+							childrenOf={childrenOf}
+							outputOf={outputOf}
+							live={streaming && index === roots.length - 1}
+						/>
+					))}
+				</OpenPathContext.Provider>
 			</div>
 
 			{permission && (questions.length > 0
@@ -2187,8 +2201,28 @@ function QuestionCard({ item }: { readonly item: ToolItem }) {
 	);
 }
 
+/**
+ * Splits grep's `path:line:text` into the part that can be opened.
+ *
+ * Some tools also print a column (`path:line:column:text`); the column is
+ * dropped because the editor jump only takes a line. A token with neither a
+ * slash nor a dot is prose (`12:30:`, `a:b`), not a location.
+ */
+function splitLocation(line: string): { readonly path: string; readonly line: number; readonly rest: string } | undefined {
+	const match = /^(\S+?):(\d+)(?::\d+)?:(.*)$/.exec(line);
+	if (!match) {
+		return undefined;
+	}
+	const [, filePath, lineNumber, rest] = match;
+	if (!filePath || !/[./\\]/.test(filePath)) {
+		return undefined;
+	}
+	return { path: filePath, line: Number(lineNumber), rest: rest ?? '' };
+}
+
 /** Grep / Glob: the query plus the hits it produced. */
 function SearchCard({ item }: { readonly item: ToolItem }) {
+	const openPath = useContext(OpenPathContext);
 	const record = (item.input ?? {}) as Record<string, unknown>;
 	const pattern = typeof record['pattern'] === 'string' ? record['pattern'] as string : '';
 	const scope = typeof record['path'] === 'string' ? record['path'] as string : '';
@@ -2217,7 +2251,27 @@ function SearchCard({ item }: { readonly item: ToolItem }) {
 					? <pre className="tool-result failed">{truncate(toolErrorText(output), 2000)}</pre>
 					: shown.length > 0 && (
 						<pre className="search-result">
-							{shown.map((line, index) => <span key={index} className="search-line">{line}</span>)}
+							{shown.map((line, index) => {
+								const location = openPath ? splitLocation(line) : undefined;
+								return (
+									<span key={index} className="search-line">
+										{location
+											? (
+												<>
+													<button
+														type="button"
+														className="search-path"
+														onClick={() => openPath?.(location.path, location.line)}
+													>
+														{location.path}:{location.line}
+													</button>
+													{location.rest}
+												</>
+											)
+											: line}
+									</span>
+								);
+							})}
 						</pre>
 					)}
 				{lines.length > shown.length && <div className="diff-more">{t('还有 {count} 行未显示', { count: lines.length - shown.length })}</div>}

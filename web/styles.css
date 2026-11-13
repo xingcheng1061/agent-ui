@@ -2093,6 +2093,22 @@ button {
 	display: block;
 }
 
+/* `path:line` in front of a hit: clickable, because that is the only part of
+ * the line the editor can open. */
+.search-path {
+	padding: 0;
+	margin: 0;
+	background: none;
+	border: none;
+	color: var(--accent);
+	font: inherit;
+	cursor: pointer;
+}
+
+.search-path:hover {
+	text-decoration: underline;
+}
+
 .task-line {
 	display: flex;
 	gap: 6px;

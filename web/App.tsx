@@ -74,6 +74,8 @@ export function App() {
 	const [dialogOpen, setDialogOpen] = useState(false);
 	const [passwordOpen, setPasswordOpen] = useState(false);
 	const [revision, setRevision] = useState(0);
+	/** A `path:line` clicked in a tool result, waiting for the code pane. */
+	const [openRequest, setOpenRequest] = useState<{ readonly path: string; readonly line?: number; readonly token: number } | undefined>(undefined);
 	// Subscribes the whole shell to the language switch; the copies themselves
 	// re-render through their own `useLang`.
 	const lang = useLang();
@@ -418,6 +420,10 @@ export function App() {
 									setActive(current => current ? { ...current, sessionId } : current);
 									void refresh().catch(() => undefined);
 								}}
+								onOpenPath={(path, line) => {
+									// The token makes a second click on the same hit act again.
+									setOpenRequest(current => ({ path, line, token: (current?.token ?? 0) + 1 }));
+								}}
 								onTurnEnd={() => {
 									setRevision(value => value + 1);
 									// A finished turn flips the sidebar's marker at once
@@ -428,7 +434,7 @@ export function App() {
 								}}
 							/>
 							<Splitter axis="x" onResize={delta => setChatWidth(clamp(chatWidth + delta, 320, 1200))} />
-							<Workspace key={active.root} root={active.root} projects={projects} revision={revision} />
+							<Workspace key={active.root} root={active.root} projects={projects} revision={revision} openRequest={openRequest} />
 						</>
 					)}
 				</main>

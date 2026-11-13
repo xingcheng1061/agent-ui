@@ -47,6 +47,15 @@ const DRIVE = /^[A-Za-z]:/;
  */
 const LINE_SUFFIX = /^(.*?):(\d+)(?:-(\d+)|:(\d+))?$/;
 
+/**
+ * grep's own format: `path:line:text`, sometimes `path:line:column:text`.
+ *
+ * The match is anchored at the start and stops at the colon after the line
+ * number, so the rest of the hit (the source text, which may contain anything)
+ * is not part of the path.
+ */
+const GREP_LOCATION = /^(.+?):(\d+)(?::(\d+))?:/;
+
 /** Trailing prose punctuation: `foo.ts,` `foo.ts.` `bar:` */
 const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
 
@@ -81,6 +90,15 @@ export function findPathTokens(line: string): PathToken[] {
 			lineNumber = Number(suffix[2]);
 			// Group 3 is a range end (`:12-20`), group 4 a column (`:12:5`).
 			column = suffix[4] === undefined ? undefined : Number(suffix[4]);
+		} else {
+			// `grep -n` prints the hit on the same line, so the token is the path
+			// plus its line plus the source text; only the first part is openable.
+			const hit = GREP_LOCATION.exec(body);
+			if (hit?.[1]) {
+				body = hit[1];
+				lineNumber = Number(hit[2]);
+				column = hit[3] === undefined ? undefined : Number(hit[3]);
+			}
 		}
 		const trimmed = body.replace(TRAILING_PUNCTUATION, '');
 		if (!looksLikePath(trimmed)) {

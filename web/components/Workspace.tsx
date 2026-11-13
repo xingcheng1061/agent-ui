@@ -9,7 +9,7 @@ import { FileTree } from './FileTree';
 import { Splitter, clamp, usePersistedSize } from './Splitter';
 import { TerminalView } from './Terminal';
 import { forgetTerminalSession } from './terminalSessions';
-import { relativeToRoot, type TerminalTarget } from './terminalPaths';
+import { isAbsolutePath, relativeToRoot, type TerminalTarget } from './terminalPaths';
 import { readLeftTab, readOpenFile, writeLeftTab, writeOpenFile } from './workspaceState';
 
 interface WorkspaceProps {
@@ -18,6 +18,11 @@ interface WorkspaceProps {
 	readonly projects: readonly ProjectInfo[];
 	/** Incremented when an agent turn ends, so git state is refetched. */
 	readonly revision: number;
+	/**
+	 * A file the conversation asked to open (`path:line` in a grep hit). The
+	 * token makes the same path clickable twice in a row still act.
+	 */
+	readonly openRequest?: { readonly path: string; readonly line?: number; readonly token: number };
 }
 
 /** The file on screen, and the project it belongs to. */
@@ -60,7 +65,7 @@ function baseName(root: string): string {
  * Code side of a session: everything here is scoped to the session's project root.
  * Mount it with `key={root}` so switching project resets selection and terminal.
  */
-export function Workspace({ root, projects, revision }: WorkspaceProps) {
+export function Workspace({ root, projects, revision, openRequest }: WorkspaceProps) {
 	const [leftTab, setLeftTab] = useState<'files' | 'changes'>(() => readLeftTab(root));
 	const [opened, setOpened] = useState<OpenFile | undefined>(undefined);
 	const [diffPath, setDiffPath] = useState<string | undefined>(undefined);
@@ -237,6 +242,25 @@ export function Workspace({ root, projects, revision }: WorkspaceProps) {
 		// Only a file of this project can be the one remembered for it.
 		writeOpenFile(root, sameRoot(target.root, root) ? target.path : undefined);
 	};
+
+	// A path clicked in a tool result. grep prints project-relative paths, and
+	// an absolute one still has to be re-based onto this root before it is read.
+	useEffect(() => {
+		if (!openRequest) {
+			return;
+		}
+		const printed = openRequest.path.replace(/\\/g, '/');
+		const relative = isAbsolutePath(printed)
+			? relativeToRoot(root, printed)
+			: printed.replace(/^\.\//, '');
+		if (relative === undefined || relative === '') {
+			setStatus(t('找不到文件：{path}', { path: openRequest.path }));
+			return;
+		}
+		openFileFrom({ root, path: relative, line: openRequest.line });
+		// `openFileFrom` only sets state, so the closure going stale is harmless.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [openRequest]);
 
 	/**
 	 * A path clicked in the terminal.
