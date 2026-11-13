@@ -33,7 +33,7 @@
 
 ## 安装
 
-### 全局安装（发行版）
+### 全局安装（发行版，暂未支持，目前只支持源码安装）
 
 ```powershell
 npm install -g agent-ui
