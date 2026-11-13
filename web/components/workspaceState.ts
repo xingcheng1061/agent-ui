@@ -19,6 +19,12 @@ interface ViewState {
 	tab: 'files' | 'changes';
 	/** Keyed by the project-relative path. */
 	cursor: Record<string, CursorState>;
+	/**
+	 * Directories the tree had expanded (`''` is the root). The tree is remounted
+	 * on every project switch and reload, so without this it collapsed back to the
+	 * top level while the open file was still remembered.
+	 */
+	expanded?: string[];
 }
 
 const KEY = 'agentui.workspace';
@@ -89,6 +95,17 @@ export function readLeftTab(root: string): 'files' | 'changes' {
 
 export function writeLeftTab(root: string, tab: 'files' | 'changes'): void {
 	entry(root).tab = tab;
+	persist();
+}
+
+/** Directories expanded in the file tree, deepest last. */
+export function readExpandedDirs(root: string): readonly string[] {
+	const value = entry(root).expanded;
+	return Array.isArray(value) ? value.filter(item => typeof item === 'string') : [];
+}
+
+export function writeExpandedDirs(root: string, directories: readonly string[]): void {
+	entry(root).expanded = [...new Set(directories)];
 	persist();
 }
 

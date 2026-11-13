@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { createEntry, deleteEntry, listDirectory, renameEntry, searchEntries, type FileEntry } from '../api';
 import { t } from '../i18n';
+import { readExpandedDirs, writeExpandedDirs } from './workspaceState';
 
 interface DirectoryState {
 	readonly open: boolean;
@@ -61,7 +62,19 @@ async function copyText(text: string): Promise<void> {
  * something a stray click hits.
  */
 export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPathRenamed, reloadToken = 0 }: FileTreeProps) {
-	const [directories, setDirectories] = useState<Record<string, DirectoryState>>({});
+	/**
+	 * Seeded from storage: the directories that were open come back, marked
+	 * loading. The panel is remounted on every project switch and every reload,
+	 * so the tree used to collapse to the top level while the open file was still
+	 * remembered — the two halves of "where I was" disagreed.
+	 */
+	const [directories, setDirectories] = useState<Record<string, DirectoryState>>(() => {
+		const restored: Record<string, DirectoryState> = {};
+		for (const directory of readExpandedDirs(root)) {
+			restored[directory] = { open: true, loading: true };
+		}
+		return restored;
+	});
 	/** Right-click menu: where it opened, and on what (nothing = empty space). */
 	const [menu, setMenu] = useState<{ x: number; y: number; directory: string; entry?: FileEntry } | undefined>(undefined);
 	/**
@@ -111,9 +124,44 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 		}));
 	}, [directories, load, onOpenFile]);
 
+	// First paint: the root plus whatever was expanded last time.
 	useEffect(() => {
-		void load('');
+		const open = Object.keys(directories).filter(directory => directories[directory]?.open);
+		if (open.length === 0) {
+			void load('');
+			return;
+		}
+		for (const directory of open) {
+			void load(directory);
+		}
+		// Mount only: later reads are driven by clicks and `reloadToken`.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [load]);
+
+	// Remembered so coming back to this project shows the same tree.
+	useEffect(() => {
+		writeExpandedDirs(root, Object.keys(directories).filter(directory => directories[directory]?.open));
+	}, [directories, root]);
+
+	// A file opened from elsewhere (chat, terminal, the remembered tab) has to
+	// have its folders expanded, or the highlight sits inside a closed branch.
+	useEffect(() => {
+		if (!selectedPath) {
+			return;
+		}
+		const missing: string[] = [];
+		let directory = parentOf(selectedPath);
+		while (directory !== '' && !directories[directory]?.open) {
+			missing.unshift(directory);
+			directory = parentOf(directory);
+		}
+		for (const path of missing) {
+			void load(path);
+		}
+		// `directories` is deliberately not a dependency: this runs when the
+		// selection changes, and loading flips those entries itself.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [selectedPath, root]);
 
 	// Re-read what is on screen, keeping which directories are expanded. The
 	// first run is the mount itself, which already loads the root.
