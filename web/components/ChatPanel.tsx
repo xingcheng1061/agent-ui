@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentClientCommand, AgentInfo, AgentServerEvent, AgentTaskUsage, ModelOption, QueuedMessage } from '../agentTypes';
 import { getTranscript, reportClientLog, searchFiles, type TranscriptItem } from '../api';
 import { clearAttention, requestAttention } from '../attention';
+import { t, useLang } from '../i18n';
 import { acquireAgentConnection, type AgentConnectionHandle } from './agentConnections';
 import { CodeHighlight, guessLanguage } from './CodeHighlight';
 import { draftKey, readDraft, writeDraft } from './composerDrafts';
@@ -286,6 +287,8 @@ function dropDurableDeltas(
 }
 
 export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStarted, onTurnEnd }: ChatPanelProps) {
+	// The `/` menu caches translated labels in a memo; see its dependency list.
+	const lang = useLang();
 	const [items, setItems] = useState<readonly Item[]>([]);
 	const [tasks, setTasks] = useState<readonly TaskState[]>([]);
 	const [outputs, setOutputs] = useState<Readonly<Record<string, string>>>({});
@@ -339,7 +342,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		agents?: readonly string[];
 		models?: readonly ModelOption[];
 	}>({});
-	const [status, setStatus] = useState('未连接');
+	const [status, setStatus] = useState(t('未连接'));
 	const [thinkingTokens, setThinkingTokens] = useState(0);
 	const [streaming, setStreaming] = useState(false);
 	/** Whether a CLI process is still backing this session; shown in the header. */
@@ -496,7 +499,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					return;
 				}
 				setItems(toChatItems(transcript));
-				setStatus(`已载入 ${sessionId.slice(0, 8)}`);
+				setStatus(t('已载入 {id}', { id: sessionId.slice(0, 8) }));
 				// Diagnostics: a transcript that renders empty is otherwise
 				// indistinguishable from one that arrived empty.
 				reportClientLog({
@@ -608,7 +611,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						agents: event.agents ?? previous.agents,
 						models: event.models ?? previous.models,
 					}));
-					setStatus('就绪');
+					setStatus(t('就绪'));
 					return;
 				case 'config':
 					setMeta(previous => ({
@@ -633,7 +636,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					setBackendLive(event.live);
 					setStreaming(serverBusyRef.current);
 					if (!event.live) {
-						setStatus('后台没有运行中的会话，发送消息即开始');
+						setStatus(t('后台没有运行中的会话，发送消息即开始'));
 					}
 					return;
 				case 'queue': {
@@ -654,7 +657,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					return;
 				}
 				case 'status':
-					setStatus(STATUS_LABEL[event.status] ?? event.status);
+					setStatus(t(STATUS_LABEL[event.status] ?? event.status));
 					return;
 				case 'thinking_tokens':
 					setThinkingTokens(event.estimated);
@@ -790,7 +793,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						sendRef.current({ type: 'permission_response', requestId: event.requestId, behavior: 'allow' });
 						return;
 					}
-					setStatus(event.toolName === 'AskUserQuestion' ? '等待你回答问题' : `等待审批：${event.toolName}`);
+					setStatus(event.toolName === 'AskUserQuestion' ? t('等待你回答问题') : t('等待审批：{tool}', { tool: event.toolName }));
 					setPermission({
 						requestId: event.requestId,
 						toolName: event.toolName,
@@ -800,8 +803,8 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					// The CLI is blocked until this is answered, so reach the user
 					// even when the tab is in the background.
 					requestAttention({
-						title: '需要审批',
-						body: `${event.toolName} 正在等待你的决定`,
+						title: t('需要审批'),
+						body: t('{tool} 正在等待你的决定', { tool: event.toolName }),
 						requestId: event.requestId,
 					});
 					return;
@@ -836,7 +839,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				}
 				case 'permission_cancelled':
 					setPermission(undefined);
-					setStatus('已取消审批');
+					setStatus(t('已取消审批'));
 					clearAttention();
 					return;
 				case 'error':
@@ -850,7 +853,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					setItems(previous => [...previous, {
 						kind: 'error',
 						id: nextId(),
-						text: `agent 进程退出（code ${event.code ?? '?'}）${event.stderr ? `\n${event.stderr}` : ''}`,
+						text: t('agent 进程退出（code {code}）{stderr}', { code: event.code ?? '?', stderr: event.stderr ? `\n${event.stderr}` : '' }),
 					}]);
 					return;
 			}
@@ -871,7 +874,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				setStreaming(false);
 			}
 			if (state === 'open') {
-				setStatus(previous => previous === '未连接' ? '就绪，等待输入' : previous);
+				setStatus(previous => previous === t('未连接') ? t('就绪，等待输入') : previous);
 			}
 		});
 		const stopEvents = connection.listen(parsed => {
@@ -1087,7 +1090,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	const requestStop = (kind: 'interrupt' | 'kill') => {
 		const target = connectionRef.current;
 		if (target?.state !== 'open') {
-			setStatus('连接已断开，正在重连…');
+			setStatus(t('连接已断开，正在重连…'));
 			return;
 		}
 		setStopRequested(true);
@@ -1105,10 +1108,10 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			type: 'permission_response',
 			requestId: permission.requestId,
 			behavior,
-			message: behavior === 'deny' ? '用户拒绝' : undefined,
+			message: behavior === 'deny' ? t('用户拒绝') : undefined,
 		});
 		setPermission(undefined);
-		setStatus('就绪');
+		setStatus(t('就绪'));
 		clearAttention();
 	};
 
@@ -1131,7 +1134,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			: {};
 		const text = freeform.trim();
 		if (Object.keys(answers).length === 0 && text === '') {
-			setStatus('先选一个选项，或直接输入回答');
+			setStatus(t('先选一个选项，或直接输入回答'));
 			return;
 		}
 		send({
@@ -1141,7 +1144,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			updatedInput: { ...input, answers, ...(text ? { response: text } : {}) },
 		});
 		setPermission(undefined);
-		setStatus('就绪');
+		setStatus(t('就绪'));
 		clearAttention();
 	};
 
@@ -1154,10 +1157,10 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			type: 'permission_response',
 			requestId: permission.requestId,
 			behavior: 'deny',
-			message: '用户跳过了这些问题。',
+			message: t('用户跳过了这些问题。'),
 		});
 		setPermission(undefined);
-		setStatus('已跳过');
+		setStatus(t('已跳过'));
 		clearAttention();
 	};
 
@@ -1209,15 +1212,15 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	const commands = useMemo(() => {
 		const skills = new Set(meta.skills ?? []);
 		return [
-			{ name: 'model', hint: '切换模型', action: 'model' as 'model' | 'mode' | undefined },
-			{ name: 'mode', hint: '切换权限模式', action: 'mode' as 'model' | 'mode' | undefined },
+			{ name: 'model', hint: t('切换模型'), action: 'model' as 'model' | 'mode' | undefined },
+			{ name: 'mode', hint: t('切换权限模式'), action: 'mode' as 'model' | 'mode' | undefined },
 			...(meta.slashCommands ?? []).map(name => ({
 				name,
 				hint: skills.has(name) ? 'skill' : 'command',
 				action: undefined as 'model' | 'mode' | undefined,
 			})),
 		];
-	}, [meta.slashCommands, meta.skills]);
+	}, [meta.slashCommands, meta.skills, lang]);
 
 	const modelOptions = useMemo(() => {
 		const options = [...(meta.models ?? [])];
@@ -1255,7 +1258,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				label: option.label ?? option.id,
 				// A label that hides the id still leaves the id worth seeing: it is
 				// what gets sent to the backend.
-				hint: option.id === meta.model ? '当前' : option.label ? option.id : '模型',
+				hint: option.id === meta.model ? t('当前') : option.label ? option.id : t('模型'),
 				run: () => {
 					send({ type: 'set_model', model: option.id });
 					setPicker(undefined);
@@ -1266,7 +1269,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			return permissionModes.map(mode => ({
 				key: `p:${mode}`,
 				label: mode,
-				hint: mode === meta.permissionMode ? '当前' : '权限模式',
+				hint: mode === meta.permissionMode ? t('当前') : t('权限模式'),
 				run: () => {
 					send({ type: 'set_permission_mode', mode });
 					setPicker(undefined);
@@ -1299,7 +1302,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			return fileMatches.map(file => ({
 				key: `f:${file}`,
 				label: `@${file}`,
-				hint: '文件',
+				hint: t('文件'),
 				run: () => applyMention(file),
 			}));
 		}
@@ -1328,15 +1331,15 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					{activity ?? status}
 					{!activity && meta.sessionId ? ` · ${meta.sessionId.slice(0, 8)}` : ''}
 				</span>
-				{activity && <span className="stat-pill accent">进行中</span>}
-				{thinkingTokens > 0 && <span className="stat-pill">思考 {formatTokens(thinkingTokens)}</span>}
-				{runningTasks > 0 && <span className="stat-pill accent">↳ {runningTasks} 个任务运行中</span>}
+				{activity && <span className="stat-pill accent">{t('进行中')}</span>}
+				{thinkingTokens > 0 && <span className="stat-pill">{t('思考 {count}', { count: formatTokens(thinkingTokens) })}</span>}
+				{runningTasks > 0 && <span className="stat-pill accent">{t('↳ {count} 个任务运行中', { count: runningTasks })}</span>}
 				{backendLive !== undefined && (
 					<span
 						className={`stat-pill${backendLive ? ' accent' : ''}`}
-						title={backendLive ? '后台 agent 进程仍在运行，刷新不会丢' : '后台没有该会话的进程，下一条消息会新建'}
+						title={backendLive ? t('后台 agent 进程仍在运行，刷新不会丢') : t('后台没有该会话的进程，下一条消息会新建')}
 					>
-						{backendLive ? '后台运行中' : '后台未运行'}
+						{backendLive ? t('后台运行中') : t('后台未运行')}
 					</span>
 				)}
 				<span className="spacer" />
@@ -1364,7 +1367,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				}}
 			>
 				{items.length === 0 && (
-					<div className="chat-empty">输入任务，交给 agent 执行（文件改动可在"代码"页查看）</div>
+					<div className="chat-empty">{t('输入任务，交给 agent 执行（文件改动可在"代码"页查看）')}</div>
 				)}
 				{roots.map((item, index) => (
 					<ChatItemView
@@ -1381,8 +1384,8 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				? (
 					<div className="permission-card question-card">
 						<div className="permission-head">
-							<span className="permission-title question-title-head">需要你回答</span>
-							<span className="permission-hint">agent 正在等这几个问题的答案</span>
+							<span className="permission-title question-title-head">{t('需要你回答')}</span>
+							<span className="permission-hint">{t('agent 正在等这几个问题的答案')}</span>
 						</div>
 						{questions.map(question => {
 							const picked = answerPicks[question.question] ?? [];
@@ -1391,7 +1394,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 									<div className="question-title">
 										{question.header && <span className="question-header">{question.header}</span>}
 										<span>{question.question}</span>
-										{question.multiSelect && <span className="question-multi">可多选</span>}
+										{question.multiSelect && <span className="question-multi">{t('可多选')}</span>}
 									</div>
 									<div className="question-options">
 										{question.options.map(option => (
@@ -1420,7 +1423,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						})}
 						<input
 							className="question-freeform"
-							placeholder="也可以直接输入回答（自由文本，回车提交）"
+							placeholder={t('也可以直接输入回答（自由文本，回车提交）')}
 							value={freeform}
 							onChange={event => setFreeform(event.target.value)}
 							onKeyDown={event => {
@@ -1431,29 +1434,29 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 							}}
 						/>
 						<div className="permission-actions">
-							<button type="button" className="primary" onClick={submitAnswers}>提交答案</button>
-							<button type="button" className="chip" onClick={skipQuestions}>跳过</button>
+							<button type="button" className="primary" onClick={submitAnswers}>{t('提交答案')}</button>
+							<button type="button" className="chip" onClick={skipQuestions}>{t('跳过')}</button>
 						</div>
 					</div>
 				)
 				: (
 					<div className="permission-card">
 						<div className="permission-head">
-							<span className="permission-title">需要审批：{permission.toolName}</span>
-							<span className="permission-hint">agent 正在等待你的决定</span>
+							<span className="permission-title">{t('需要审批：{tool}', { tool: permission.toolName })}</span>
+							<span className="permission-hint">{t('agent 正在等待你的决定')}</span>
 						</div>
 						<pre className="permission-input">{formatJson(permission.input)}</pre>
 						<div className="permission-actions">
-							<button type="button" className="primary" onClick={() => answerPermission('allow')}>允许</button>
-							<button type="button" className="chip" onClick={() => answerPermission('allow', true)}>本会话总是允许 {permission.toolName}</button>
-							<button type="button" className="chip danger" onClick={() => answerPermission('deny')}>拒绝</button>
+							<button type="button" className="primary" onClick={() => answerPermission('allow')}>{t('允许')}</button>
+							<button type="button" className="chip" onClick={() => answerPermission('allow', true)}>{t('本会话总是允许 {tool}', { tool: permission.toolName })}</button>
+							<button type="button" className="chip danger" onClick={() => answerPermission('deny')}>{t('拒绝')}</button>
 						</div>
 					</div>
 				))}
 
 			{queued.length > 0 && (
 				<div className="queue-strip">
-					<span className="queue-title">排队中 · {queued.length}</span>
+					<span className="queue-title">{t('排队中 · {count}', { count: queued.length })}</span>
 					{queued.map((item, index) => (
 						<span key={item.id} className="queue-item" title={item.text}>
 							<span className="queue-index">{index + 1}</span>
@@ -1461,14 +1464,14 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 							<button
 								type="button"
 								className="queue-now"
-								title="不等这一轮结束，直接插进当前执行过程"
+								title={t('不等这一轮结束，直接插进当前执行过程')}
 								onClick={() => promoteQueued(item.id)}
 							>
-								立即发送
+								{t('立即发送')}
 							</button>
 						</span>
 					))}
-					<span className="queue-hint">当前轮次结束后按顺序执行</span>
+					<span className="queue-hint">{t('当前轮次结束后按顺序执行')}</span>
 				</div>
 			)}
 
@@ -1501,7 +1504,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				<textarea
 					ref={inputRef}
 					value={draft}
-					placeholder="描述任务；Enter 发送 / Shift+Enter 换行；/ 调命令，@ 引用文件"
+					placeholder={t('描述任务；Enter 发送 / Shift+Enter 换行；/ 调命令，@ 引用文件')}
 					rows={3}
 					style={{ height: composerHeight }}
 					onChange={event => {
@@ -1546,21 +1549,21 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				<div className="composer-actions">
 					<span className="composer-hint">
 						{permission
-							? '等待审批… 也可以直接发送新消息，这会取消本次审批'
+							? t('等待审批… 也可以直接发送新消息，这会取消本次审批')
 							: unknownSlash
-								? `“/${leadingSlash}”不是已注册命令，agent 会把它当斜杠命令拦截并返回空内容`
+								? t('“{command}”不是已注册命令，agent 会把它当斜杠命令拦截并返回空内容', { command: leadingSlash })
 								: stopRequested
-									? '已请求停止，等待当前轮收尾…'
+									? t('已请求停止，等待当前轮收尾…')
 									: stalled
-										? '已超过 1 分钟没有新输出，可能卡住了（可点「停止」后重发）'
+										? t('已超过 1 分钟没有新输出，可能卡住了（可点「停止」后重发）')
 										: streaming
-											? '正在执行，可停止或强制结束'
-											: '/ 命令 · @ 文件 · Enter 发送'}
+											? t('正在执行，可停止或强制结束')
+											: t('/ 命令 · @ 文件 · Enter 发送')}
 					</span>
-					{streaming && <button type="button" className="chip danger" onClick={() => requestStop('kill')}>强制结束</button>}
+					{streaming && <button type="button" className="chip danger" onClick={() => requestStop('kill')}>{t('强制结束')}</button>}
 					{streaming && canSend && (
 						<button type="button" className="chip" onClick={() => submitText(draft.trim(), true)}>
-							立即发送
+							{t('立即发送')}
 						</button>
 					)}
 					<button
@@ -1576,7 +1579,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						 *   stream + no text   → 停止（中断当前轮）
 						 *   stream + text      → 排队发送
 						 */}
-						{stopping ? '停止' : streaming && canSend ? '排队发送' : '发送'}
+						{stopping ? t('停止') : streaming && canSend ? t('排队发送') : t('发送')}
 					</button>
 				</div>
 			</div>
@@ -1585,7 +1588,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				<select
 					className="selector"
 					value={meta.model ?? ''}
-					title="模型（运行时切换，不会重启会话）"
+					title={t('模型（运行时切换，不会重启会话）')}
 					onChange={event => {
 						if (event.target.value) {
 							send({ type: 'set_model', model: event.target.value });
@@ -1600,7 +1603,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				<select
 					className="selector"
 					value={meta.permissionMode ?? permissionModes[0] ?? 'default'}
-					title="权限模式（运行时切换）"
+					title={t('权限模式（运行时切换）')}
 					onChange={event => send({ type: 'set_permission_mode', mode: event.target.value })}
 				>
 					{permissionModes.map(mode => <option key={mode} value={mode}>{mode}</option>)}
@@ -1609,7 +1612,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					<select
 						className="selector"
 						value={meta.agent ?? agent ?? ''}
-						title="Agent 后端（切换会开始新会话）"
+						title={t('Agent 后端（切换会开始新会话）')}
 						onChange={event => {
 							const next = event.target.value;
 							if (next && next !== (meta.agent ?? agent)) {
@@ -1621,7 +1624,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						{meta.agentList?.map(info => <option key={info.id} value={info.id}>{info.name}</option>)}
 					</select>
 				)}
-				<span className="toolbar-label">Agent / 模型 / 权限模式</span>
+				<span className="toolbar-label">{t('Agent / 模型 / 权限模式')}</span>
 			</div>
 		</section>
 	);
@@ -1652,7 +1655,7 @@ function ChatItemView({ item, childrenOf, outputOf, live = false }: {
 			// turn of its own, so it explains an answer that arrived all at once.
 			return (
 				<div className={`msg user${item.queued ? ' queued' : ''}`}>
-					{item.queued && <span className="msg-tag" title="本轮执行中插入，未单独成轮">插话</span>}
+					{item.queued && <span className="msg-tag" title={t('本轮执行中插入，未单独成轮')}>{t('插话')}</span>}
 					{item.text.length > LONG_USER_TEXT
 						? <LongUserMessage text={item.text} />
 						: item.text}
@@ -1672,10 +1675,10 @@ function ChatItemView({ item, childrenOf, outputOf, live = false }: {
 			return (
 				<div className={`msg result${item.isError && !item.interrupted ? ' failed' : ''}${item.interrupted ? ' interrupted' : ''}`}>
 					{(item.interrupted || item.text !== '') && (
-						<div className="result-text">{item.interrupted ? '已中断本轮' : truncate(item.text, 600)}</div>
+						<div className="result-text">{item.interrupted ? t('已中断本轮') : truncate(item.text, 600)}</div>
 					)}
 					<div className="result-meta">
-						{item.numTurns !== undefined ? `${item.numTurns} 轮` : ''}
+						{item.numTurns !== undefined ? t('{count} 轮', { count: item.numTurns }) : ''}
 						{item.durationMs !== undefined ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : ''}
 						{item.costUsd !== undefined ? ` · $${item.costUsd.toFixed(4)}` : ''}
 					</div>
@@ -1697,7 +1700,7 @@ function LongUserMessage({ text }: { readonly text: string }) {
 		<details className="msg-long">
 			<summary className="msg-long-summary">
 				<span className="msg-long-preview">{preview}</span>
-				<span className="msg-long-meta">{lines} 行 · 点击展开</span>
+				<span className="msg-long-meta">{t('{count} 行 · 点击展开', { count: lines })}</span>
 			</summary>
 			<div className="msg-long-body">{text}</div>
 		</details>
@@ -1725,9 +1728,9 @@ function SkillCard({ item }: { readonly item: Extract<Item, { kind: 'tool' }> })
 			<summary className="tool-head">
 				<span className={`tool-dot ${state}`} />
 				<span className="tool-name">skill</span>
-				<span className="tool-file" title={name}>{name ?? '加载技能'}</span>
-				{body !== '' && <span className="tool-tag">{body.split('\n').length} 行</span>}
-				{!item.result && <span className="tool-tag running">加载中</span>}
+				<span className="tool-file" title={name}>{name ?? t('加载技能')}</span>
+				{body !== '' && <span className="tool-tag">{t('{count} 行', { count: body.split('\n').length })}</span>}
+				{!item.result && <span className="tool-tag running">{t('加载中')}</span>}
 			</summary>
 			<div className="tool-body">
 				{item.result?.isError
@@ -1778,9 +1781,9 @@ function BashCard({ item }: { readonly item: Extract<Item, { kind: 'tool' }> }) 
 			>
 				<span className={`bash-arrow${open ? ' open' : ''}`} />
 				<span className="bash-glyph">❯</span>
-				<span className="bash-command">{command || '(没有命令内容)'}</span>
+				<span className="bash-command">{command || t('(没有命令内容)')}</span>
 				<span className={`bash-status ${state}`}>
-					{state === 'running' ? '运行中' : state === 'failed' ? '失败' : '完成'}
+					{state === 'running' ? t('运行中') : state === 'failed' ? t('失败') : t('完成')}
 				</span>
 			</button>
 
@@ -1788,7 +1791,7 @@ function BashCard({ item }: { readonly item: Extract<Item, { kind: 'tool' }> }) 
 				<div className="bash-body">
 					{description && <div className="bash-desc">{description}</div>}
 					<div className="bash-block">
-						<button type="button" className="bash-copy" onClick={copy}>{copied ? '已复制' : '复制'}</button>
+						<button type="button" className="bash-copy" onClick={copy}>{copied ? t('已复制') : t('复制')}</button>
 						<CodeHighlight code={`$ ${command}`} language="bash" />
 					</div>
 					{item.result
@@ -1797,7 +1800,7 @@ function BashCard({ item }: { readonly item: Extract<Item, { kind: 'tool' }> }) 
 								<CodeHighlight code={output} language={guessLanguage(output)} />
 							</div>
 						)
-						: <div className="bash-pending">执行中…</div>}
+						: <div className="bash-pending">{t('执行中…')}</div>}
 				</div>
 			)}
 		</div>
@@ -1935,9 +1938,9 @@ function ReadCard({ item }: { readonly item: Extract<Item, { kind: 'tool' }> }) 
 			<summary className="tool-head">
 				<span className={`tool-dot ${state}`} />
 				<span className="tool-name">{item.name}</span>
-				<span className="tool-file" title={path}>{shortPath(path) || '文件'}</span>
-				{rows.length > 0 && <span className="tool-tag">{rows.length} 行</span>}
-				{!item.result && <span className="tool-tag running">运行中</span>}
+				<span className="tool-file" title={path}>{shortPath(path) || t('文件')}</span>
+				{rows.length > 0 && <span className="tool-tag">{t('{count} 行', { count: rows.length })}</span>}
+				{!item.result && <span className="tool-tag running">{t('运行中')}</span>}
 			</summary>
 			<div className="tool-body">
 				{failed && <pre className="tool-result failed">{truncate(toolErrorText(content), 2000)}</pre>}
@@ -1991,12 +1994,12 @@ function FileChangeCard({ item }: { readonly item: Extract<Item, { kind: 'tool' 
 			<summary className="tool-head">
 				<span className={`tool-dot ${state}`} />
 				<span className="tool-name">{item.name}</span>
-				<span className="tool-file" title={path}>{label || '文件'}</span>
+				<span className="tool-file" title={path}>{label || t('文件')}</span>
 				<span className="diff-stat">
 					<span className="added">+{added}</span>
 					<span className="removed">−{removed}</span>
 				</span>
-				{!item.result && <span className="tool-tag running">运行中</span>}
+				{!item.result && <span className="tool-tag running">{t('运行中')}</span>}
 			</summary>
 			<div className="tool-body">
 				{lines.length === 0
@@ -2010,7 +2013,7 @@ function FileChangeCard({ item }: { readonly item: Extract<Item, { kind: 'tool' 
 							))}
 						</pre>
 					)}
-				{hidden > 0 && <div className="diff-more">还有 {hidden} 行未显示</div>}
+				{hidden > 0 && <div className="diff-more">{t('还有 {count} 行未显示', { count: hidden })}</div>}
 				{/* A successful edit only ever answers with boilerplate ("The file …
 				    has been updated successfully"), which the diff already says;
 				    only a failure carries something worth reading. */}
@@ -2148,9 +2151,9 @@ function QuestionCard({ item }: { readonly item: ToolItem }) {
 		>
 			<summary className="tool-head">
 				<span className={`tool-dot ${state}`} />
-				<span className="tool-name">提问</span>
-				<span className="tool-file">{asked.length} 个问题</span>
-				<span className="tool-tag">{answers.size > 0 ? `已回答 ${answers.size}` : '未回答'}</span>
+				<span className="tool-name">{t('提问')}</span>
+				<span className="tool-file">{t('{count} 个问题', { count: asked.length })}</span>
+				<span className="tool-tag">{answers.size > 0 ? t('已回答 {count}', { count: answers.size }) : t('未回答')}</span>
 			</summary>
 			<div className="tool-body">
 				{asked.map(question => (
@@ -2158,7 +2161,7 @@ function QuestionCard({ item }: { readonly item: ToolItem }) {
 						<div className="question-title">
 							{question.header && <span className="question-header">{question.header}</span>}
 							<span>{question.question}</span>
-							{question.multiSelect && <span className="question-multi">可多选</span>}
+							{question.multiSelect && <span className="question-multi">{t('可多选')}</span>}
 						</div>
 						<div className="question-options">
 							{question.options.map(option => (
@@ -2172,7 +2175,7 @@ function QuestionCard({ item }: { readonly item: ToolItem }) {
 							))}
 						</div>
 						{answers.get(question.question) && (
-							<div className="question-answer">答：{answers.get(question.question)}</div>
+							<div className="question-answer">{t('答：{answer}', { answer: answers.get(question.question) ?? '' })}</div>
 						)}
 					</div>
 				))}
@@ -2205,9 +2208,9 @@ function SearchCard({ item }: { readonly item: ToolItem }) {
 			<summary className="tool-head">
 				<span className={`tool-dot ${state}`} />
 				<span className="tool-name">{item.name}</span>
-				<span className="tool-file" title={scope}>{pattern || '搜索'}</span>
-				{lines.length > 0 && <span className="tool-tag">{lines.length} 行</span>}
-				{!item.result && <span className="tool-tag running">运行中</span>}
+				<span className="tool-file" title={scope}>{pattern || t('搜索')}</span>
+				{lines.length > 0 && <span className="tool-tag">{t('{count} 行', { count: lines.length })}</span>}
+				{!item.result && <span className="tool-tag running">{t('运行中')}</span>}
 			</summary>
 			<div className="tool-body">
 				{item.result?.isError
@@ -2217,7 +2220,7 @@ function SearchCard({ item }: { readonly item: ToolItem }) {
 							{shown.map((line, index) => <span key={index} className="search-line">{line}</span>)}
 						</pre>
 					)}
-				{lines.length > shown.length && <div className="diff-more">还有 {lines.length - shown.length} 行未显示</div>}
+				{lines.length > shown.length && <div className="diff-more">{t('还有 {count} 行未显示', { count: lines.length - shown.length })}</div>}
 			</div>
 		</details>
 	);
@@ -2249,21 +2252,21 @@ function WebCard({ item }: { readonly item: ToolItem }) {
 			<summary className="tool-head">
 				<span className={`tool-dot ${state}`} />
 				<span className="tool-name">{item.name}</span>
-				<span className="tool-file" title={target}>{truncateLine(target, 90) || (search ? '搜索' : '页面')}</span>
-				{!item.result && <span className="tool-tag running">运行中</span>}
+				<span className="tool-file" title={target}>{truncateLine(target, 90) || (search ? t('搜索') : t('页面'))}</span>
+				{!item.result && <span className="tool-tag running">{t('运行中')}</span>}
 			</summary>
 			<div className="tool-body">
 				{item.result?.isError
 					? <pre className="tool-result failed">{truncate(toolErrorText(output), 2000)}</pre>
 					: !item.result
-						? <div className="tool-pending">执行中…</div>
+						? <div className="tool-pending">{t('执行中…')}</div>
 						: search
 							? (
 								<>
 									<pre className="search-result">
 										{shown.map((line, index) => <span key={index} className="search-line">{line}</span>)}
 									</pre>
-									{lines.length > shown.length && <div className="diff-more">还有 {lines.length - shown.length} 行未显示</div>}
+									{lines.length > shown.length && <div className="diff-more">{t('还有 {count} 行未显示', { count: lines.length - shown.length })}</div>}
 								</>
 							)
 							/* The fetched page is already markdown; the card caps its
@@ -2290,7 +2293,7 @@ function TaskToolCard({ item }: { readonly item: ToolItem }) {
 	if (rows.length === 0) {
 		// TaskCreate carries subject/description, TaskUpdate only ids and a status.
 		const field = (key: string) => typeof record[key] === 'string' ? record[key] as string : '';
-		const status = TODO_STATUS_LABEL[field('status')] ?? field('status');
+		const status = t(TODO_STATUS_LABEL[field('status')] ?? field('status'));
 		const subject = [field('subject'), field('description'), field('task_id') || field('taskId'), status]
 			.filter(Boolean);
 		if (subject.length > 0) {
@@ -2312,7 +2315,7 @@ function TaskToolCard({ item }: { readonly item: ToolItem }) {
 			<summary className="tool-head">
 				<span className={`tool-dot ${state}`} />
 				<span className="tool-name">{item.name}</span>
-				<span className="tool-file">{item.name === 'TodoWrite' ? `${done}/${rows.length} 完成` : rows[0]?.text ?? ''}</span>
+				<span className="tool-file">{item.name === 'TodoWrite' ? t('{done}/{total} 完成', { done, total: rows.length }) : rows[0]?.text ?? ''}</span>
 			</summary>
 			<div className="tool-body">
 				{rows.map((row, index) => (
@@ -2350,17 +2353,17 @@ function PlanCard({ item }: { readonly item: ToolItem }) {
 		>
 			<summary className="tool-head">
 				<span className={`tool-dot ${state}`} />
-				<span className="tool-name">{item.name === 'ExitPlanMode' ? '提交计划' : '进入计划模式'}</span>
-				<span className="tool-file">{plan === '' ? '' : `${plan.split('\n').length} 行`}</span>
-				{!result && <span className="tool-tag running">运行中</span>}
+				<span className="tool-name">{item.name === 'ExitPlanMode' ? t('提交计划') : t('进入计划模式')}</span>
+				<span className="tool-file">{plan === '' ? '' : t('{count} 行', { count: plan.split('\n').length })}</span>
+				{!result && <span className="tool-tag running">{t('运行中')}</span>}
 			</summary>
 			<div className="tool-body">
 				{plan !== '' && <div className="plan-body"><Markdown text={plan} /></div>}
 				{note !== '' && <div className={`edit-note${result?.isError ? ' failed' : ''}`}>{note}</div>}
-				{plan === '' && note === '' && <div className="tool-pending">等待确认…</div>}
+				{plan === '' && note === '' && <div className="tool-pending">{t('等待确认…')}</div>}
 				{extra.length > 0 && (
 					<details className="tool-raw">
-						<summary>原始参数</summary>
+						<summary>{t('原始参数')}</summary>
 						<pre className="tool-input">{formatJson(item.input)}</pre>
 					</details>
 				)}
@@ -2416,10 +2419,10 @@ function ToolCard({ item, childrenOf, outputOf }: {
 				<span className="tool-name">{item.name}</span>
 				<span className="tool-summary">{toolSummary(item.name, item.input)}</span>
 				{task?.subagentType && <span className="tool-tag">{task.subagentType}</span>}
-				{task && <span className={`tool-tag ${task.status}`}>{TASK_STATUS_LABEL[task.status] ?? task.status}{taskMeta(task) ? ` · ${taskMeta(task)}` : ''}</span>}
-				{log && <span className="tool-tag">输出</span>}
-				{nested && <span className="tool-tag">{children.length} 条</span>}
-				{!item.result && !task && <span className="tool-tag running">运行中</span>}
+				{task && <span className={`tool-tag ${task.status}`}>{t(TASK_STATUS_LABEL[task.status] ?? task.status)}{taskMeta(task) ? ` · ${taskMeta(task)}` : ''}</span>}
+				{log && <span className="tool-tag">{t('输出')}</span>}
+				{nested && <span className="tool-tag">{t('{count} 条', { count: children.length })}</span>}
+				{!item.result && !task && <span className="tool-tag running">{t('运行中')}</span>}
 			</summary>
 
 			<div className="tool-body">
@@ -2454,7 +2457,7 @@ function ToolCard({ item, childrenOf, outputOf }: {
 				{task ? (
 					prompt && (
 						<details className="tool-prompt">
-							<summary>提示词</summary>
+							<summary>{t('提示词')}</summary>
 							<pre className="tool-input">{prompt}</pre>
 						</details>
 					)
@@ -2463,7 +2466,7 @@ function ToolCard({ item, childrenOf, outputOf }: {
 					// more click away: expanding the card should show what the tool
 					// produced, not a JSON document.
 					<details className="tool-raw">
-						<summary>原始参数</summary>
+						<summary>{t('原始参数')}</summary>
 						<pre className="tool-input">{formatJson(item.input)}</pre>
 					</details>
 				)}
@@ -2486,9 +2489,9 @@ function ThinkingBlock({ text, live }: { readonly text: string; readonly live?: 
 		<details className="msg thinking">
 			<summary className="thinking-summary">
 				{live && <span className="thinking-pulse" />}
-				<span className="thinking-label">思考</span>
+				<span className="thinking-label">{t('思考')}</span>
 				<span className="thinking-preview">{preview}</span>
-				<span className="thinking-count">{text.length} 字</span>
+				<span className="thinking-count">{t('{count} 字', { count: text.length })}</span>
 			</summary>
 			<div className="thinking-body">{text}</div>
 		</details>
@@ -2514,45 +2517,45 @@ function activityLabel(item: Extract<Item, { kind: 'tool' }>): string {
 	const text = (key: string) => typeof record[key] === 'string' ? record[key] as string : '';
 	switch (item.name) {
 		case 'Read':
-			return `读取 ${text('file_path')}`;
+			return t('读取 {path}', { path: text('file_path') });
 		case 'Edit':
 		case 'MultiEdit':
 		case 'Write':
 		case 'NotebookEdit':
-			return `改动 ${text('file_path') || text('notebook_path')}`;
+			return t('改动 {path}', { path: text('file_path') || text('notebook_path') });
 		case 'Bash':
 		case 'PowerShell':
 		case 'Shell':
-			return `执行 ${text('command').slice(0, 60)}`;
+			return t('执行 {command}', { command: text('command').slice(0, 60) });
 		case 'Grep':
-			return `搜索 ${text('pattern')}`;
+			return t('搜索 {pattern}', { pattern: text('pattern') });
 		case 'Glob':
-			return `查找 ${text('pattern')}`;
+			return t('查找 {pattern}', { pattern: text('pattern') });
 		case 'Agent':
 		case 'Task':
-			return `子 agent：${text('description') || text('prompt')}`;
+			return t('子 agent：{name}', { name: text('description') || text('prompt') });
 		case 'WebFetch':
-			return `抓取 ${text('url')}`;
+			return t('抓取 {url}', { url: text('url') });
 		case 'WebSearch':
-			return `搜索 ${text('query')}`;
+			return t('搜索 {pattern}', { pattern: text('query') });
 		case 'AskUserQuestion':
-			return '向你提问';
+			return t('向你提问');
 		case 'TodoWrite':
-			return '更新任务清单';
+			return t('更新任务清单');
 		case 'TaskCreate':
-			return `新建任务：${text('subject')}`;
+			return t('新建任务：{subject}', { subject: text('subject') });
 		case 'TaskUpdate':
-			return `更新任务 ${taskId(record)}`;
+			return t('更新任务 {id}', { id: taskId(record) });
 		case 'TaskOutput':
-			return `读取任务输出 ${taskId(record)}`;
+			return t('读取任务输出 {id}', { id: taskId(record) });
 		case 'TaskStop':
-			return `停止任务 ${taskId(record)}`;
+			return t('停止任务 {id}', { id: taskId(record) });
 		case 'ExitPlanMode':
-			return '提交计划';
+			return t('提交计划');
 		case 'EnterPlanMode':
-			return '进入计划模式';
+			return t('进入计划模式');
 		default:
-			return `调用 ${item.name}`;
+			return t('调用 {name}', { name: item.name });
 	}
 }
 
@@ -2607,7 +2610,7 @@ function toolSummary(name: string, input: unknown): string {
 		case 'TaskStop':
 			return text('task_id') ?? text('taskId') ?? '';
 		case 'TodoWrite':
-			return Array.isArray(record['todos']) ? `${record['todos'].length} 项` : '';
+			return Array.isArray(record['todos']) ? `${t('{count} 项', { count: Array.isArray(record['todos']) ? record['todos'].length : 0 })}` : '';
 		default: {
 			const json = formatJson(input).replace(/\s+/g, ' ');
 			return truncateLine(json, 100);
