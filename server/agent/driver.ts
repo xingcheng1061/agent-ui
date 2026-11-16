@@ -48,6 +48,16 @@ export interface AgentSessionOptions {
 	readonly model?: string;
 	/** Backend-specific id from a previous session; ignored when unsupported. */
 	readonly resumeSessionId?: string;
+	/**
+	 * Extra instructions appended to the backend's own system prompt.
+	 *
+	 * Used for the shared files of a session group: they belong to no project,
+	 * so they cannot be expressed as a `CLAUDE.md` without writing into the
+	 * user's checkouts.
+	 */
+	readonly appendSystemPrompt?: string;
+	/** Directories outside `cwd` whose tools the session may use. */
+	readonly extraDirs?: readonly string[];
 }
 
 /** One running conversation. Implementations own whatever process/connection they need. */

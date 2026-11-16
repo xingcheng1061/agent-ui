@@ -21,7 +21,21 @@ export interface SessionEntry {
 	readonly size: number;
 	/** Archived sessions keep their transcript but stay out of the default list. */
 	readonly archived: boolean;
+	/** The group this conversation belongs to; renders under that heading. */
+	readonly groupId?: string;
 }
+
+/** A named bundle of conversations that may come from different projects. */
+export interface GroupInfo {
+	readonly id: string;
+	readonly name: string;
+	readonly createdAt: number;
+	/** CLI session ids, exclusive: one group per conversation. */
+	readonly members: readonly string[];
+}
+
+/** The two files a group shares; the name doubles as the API path segment. */
+export type GroupFileName = 'memory' | 'progress';
 
 export interface TranscriptItem {
 	readonly kind: 'user' | 'assistant' | 'thinking' | 'tool';
@@ -120,6 +134,89 @@ export async function listSessions(): Promise<readonly SessionEntry[]> {
 	return result.sessions;
 }
 
+export async function listGroups(): Promise<readonly GroupInfo[]> {
+	const result = await requestJson<{ groups: GroupInfo[] }>('/api/groups');
+	return result.groups;
+}
+
+export async function createGroup(name: string): Promise<GroupInfo> {
+	const result = await requestJson<{ group: GroupInfo }>('/api/groups', {
+		method: 'POST',
+		body: JSON.stringify({ name }),
+	});
+	return result.group;
+}
+
+export async function renameGroup(groupId: string, name: string): Promise<GroupInfo> {
+	const result = await requestJson<{ group: GroupInfo }>(`/api/groups/${encodeURIComponent(groupId)}`, {
+		method: 'PATCH',
+		body: JSON.stringify({ name }),
+	});
+	return result.group;
+}
+
+/** Deletes the group and its shared files; the conversations stay put. */
+export async function deleteGroup(groupId: string): Promise<void> {
+	await requestJson(`/api/groups/${encodeURIComponent(groupId)}`, { method: 'DELETE' });
+}
+
+/**
+ * What happened to a restart request (mirrors the server's `RestartOutcome`).
+ *
+ * `missing` is success too: a conversation with no process is already in the
+ * state a restart would produce, and its next message spawns one.
+ */
+export type RestartOutcome = 'restarted' | 'busy' | 'missing';
+
+export interface MembershipResult {
+	readonly groups: readonly GroupInfo[];
+	/** Whether the conversation's process was dropped to apply the new prompt. */
+	readonly restart: RestartOutcome;
+}
+
+/** Membership is exclusive: joining takes the session out of its previous group. */
+export async function joinGroup(groupId: string, sessionId: string): Promise<MembershipResult> {
+	const result = await requestJson<{ groups: GroupInfo[]; restart: RestartOutcome }>(
+		`/api/groups/${encodeURIComponent(groupId)}/members`,
+		{ method: 'POST', body: JSON.stringify({ sessionId }) },
+	);
+	return { groups: result.groups, restart: result.restart };
+}
+
+export async function leaveGroup(groupId: string, sessionId: string): Promise<MembershipResult> {
+	const result = await requestJson<{ groups: GroupInfo[]; restart: RestartOutcome }>(
+		`/api/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(sessionId)}`,
+		{ method: 'DELETE' },
+	);
+	return { groups: result.groups, restart: result.restart };
+}
+
+/**
+ * Drops the conversation's process so the next message starts a fresh one.
+ *
+ * The system prompt is only passed at spawn, which is why changing a group (or
+ * the model a session should resume with) needs the process to go away first.
+ */
+export async function restartSession(sessionId: string): Promise<RestartOutcome> {
+	const result = await requestJson<{ result: RestartOutcome }>(
+		`/api/sessions/${encodeURIComponent(sessionId)}/restart`,
+		{ method: 'POST' },
+	);
+	return result.result;
+}
+
+export async function readGroupFile(groupId: string, name: GroupFileName): Promise<string> {
+	const result = await requestJson<{ content: string }>(`/api/groups/${encodeURIComponent(groupId)}/file/${name}`);
+	return result.content;
+}
+
+export async function writeGroupFile(groupId: string, name: GroupFileName, content: string): Promise<void> {
+	await requestJson(`/api/groups/${encodeURIComponent(groupId)}/file/${name}`, {
+		method: 'PUT',
+		body: JSON.stringify({ content }),
+	});
+}
+
 export async function getTranscript(sessionId: string): Promise<readonly TranscriptItem[]> {
 	const result = await requestJson<{ items: TranscriptItem[] }>(`/api/sessions/${encodeURIComponent(sessionId)}`);
 	return result.items;
@@ -167,12 +264,20 @@ export function reportClientLog(payload: Readonly<Record<string, unknown>>): voi
 export interface SearchResult {
 	readonly files: readonly string[];
 	readonly dirs: readonly string[];
+	/** The walk stopped early: more matches exist than were returned. */
+	readonly truncated?: boolean;
 }
 
-/** Path search: files and directories are returned separately. */
-export async function searchEntries(root: string, query: string): Promise<SearchResult> {
+/**
+ * Path search: files and directories are returned separately.
+ *
+ * `deep` opts into the larger budgets kept for the file tree, where the search
+ * is an explicit action and someone is waiting on it. The `@` mention picker
+ * fires while typing and keeps the cheap budgets.
+ */
+export async function searchEntries(root: string, query: string, deep = false): Promise<SearchResult> {
 	return requestJson<SearchResult>(
-		`/api/fs/search?root=${encodeURIComponent(root)}&q=${encodeURIComponent(query)}`,
+		`/api/fs/search?root=${encodeURIComponent(root)}&q=${encodeURIComponent(query)}${deep ? '&deep=1' : ''}`,
 	);
 }
 

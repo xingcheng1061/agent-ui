@@ -505,6 +505,419 @@ button {
 	outline: none;
 }
 
+/* ------------------------------------------------------- session groups */
+
+/* One filter for the whole rail. The project dropdown narrows *where* a
+   conversation ran; this narrows *what* it was about, across both groups and
+   loose conversations. */
+.rail-search {
+	position: relative;
+	padding: 0 10px 6px;
+}
+
+.rail-search input {
+	width: 100%;
+	padding: 4px 22px 4px 8px;
+	background: var(--bg);
+	color: var(--fg);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	font: inherit;
+	font-size: 12px;
+	outline: none;
+}
+
+.rail-search input::placeholder {
+	color: var(--fg-dim);
+}
+
+.rail-search input:focus {
+	border-color: var(--accent);
+}
+
+.rail-search-clear {
+	position: absolute;
+	top: 50%;
+	right: 14px;
+	transform: translateY(-50%);
+	width: 16px;
+	height: 16px;
+	padding: 0;
+	display: grid;
+	place-items: center;
+	background: transparent;
+	border: none;
+	border-radius: 3px;
+	color: var(--fg-dim);
+	font-size: 13px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.rail-search-clear:hover {
+	background: var(--bg-hover);
+	color: var(--fg);
+}
+
+/* The rail's own entry point for groups. Always visible on purpose: the
+   per-row button only shows on hover, and a whole feature should not hide
+   behind one hover target. */
+.groups-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 8px 4px;
+}
+
+.groups-title {
+	flex: 1;
+	font-size: 10.5px;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	color: var(--fg-dim);
+	text-transform: uppercase;
+}
+
+.groups-new {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 3px 8px;
+	background: transparent;
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	color: var(--fg);
+	font: inherit;
+	font-size: 11.5px;
+	cursor: pointer;
+}
+
+.groups-new:hover {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+
+.groups-create {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 0 8px 6px;
+}
+
+.groups-create input {
+	flex: 1;
+	min-width: 0;
+	padding: 4px 6px;
+	background: var(--bg);
+	color: var(--fg);
+	border: 1px solid var(--accent);
+	border-radius: 3px;
+	font: inherit;
+	font-size: 12px;
+	outline: none;
+}
+
+.groups-confirm {
+	padding: 3px 10px;
+	background: var(--primary);
+	border: 1px solid var(--primary);
+	border-radius: 4px;
+	color: #fff;
+	font: inherit;
+	font-size: 11.5px;
+	cursor: pointer;
+}
+
+.groups-confirm:hover:not(:disabled) {
+	background: var(--primary-hover);
+	border-color: var(--primary-hover);
+}
+
+.groups-confirm:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+.groups-cancel {
+	padding: 3px 6px;
+	background: transparent;
+	border: none;
+	color: var(--fg-dim);
+	font: inherit;
+	font-size: 11.5px;
+	cursor: pointer;
+}
+
+.groups-cancel:hover {
+	color: var(--fg);
+}
+
+.groups-empty {
+	padding: 2px 12px 6px;
+	line-height: 1.5;
+}
+
+/* The "move to group" menu is anchored to its row, so the row is the
+   containing block. */
+.session-row {
+	position: relative;
+}
+
+/* ------------------------------------------------------------------------- *
+ * A group reads as a container without being drawn as one.
+ *
+ * Two things were ambiguous: a group title looked exactly like the date
+ * buckets below it (same size, same weight), and the fold arrow sat inline
+ * with the name with nothing tying the rows underneath to it. Size, weight and
+ * an indent on the rows answer both; a frame would fence the group off from
+ * the rest of the rail instead of layering it above it.
+ * ------------------------------------------------------------------------- */
+.group-block {
+	margin-bottom: 2px;
+}
+
+/* Indented past the title's caret: the gap is the hierarchy, and folding keeps
+   working because the rows disappear entirely. */
+.group-block .session-row {
+	padding-left: 20px;
+}
+
+.group-title {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 10px 6px 2px;
+}
+
+.group-fold {
+	width: 18px;
+	height: 18px;
+	flex: none;
+	display: grid;
+	place-items: center;
+	padding: 0;
+	background: transparent;
+	border: none;
+	border-radius: 3px;
+	color: var(--fg-dim);
+	cursor: pointer;
+}
+
+.group-fold:hover {
+	background: var(--bg-hover);
+	color: var(--fg);
+}
+
+.group-fold svg {
+	transform: rotate(0deg);
+	transition: transform 0.12s ease;
+}
+
+/* Right when folded, down when open — the caret says which way it will go. */
+.group-fold.open svg {
+	transform: rotate(90deg);
+}
+
+/* Heavier than `.bucket-title` on purpose: a container header, not a date
+   separator. The size gap is what makes the two no longer read as peers. */
+.group-name {
+	flex: 1;
+	min-width: 0;
+	padding: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	background: transparent;
+	border: none;
+	color: var(--fg);
+	font: inherit;
+	font-size: 12.5px;
+	font-weight: 600;
+	text-align: left;
+	cursor: default;
+}
+
+.group-count {
+	flex: none;
+	padding: 0 6px;
+	line-height: 16px;
+	border-radius: 8px;
+	background: var(--bg-hover);
+	color: var(--fg-dim);
+	font-size: 10px;
+	font-variant-numeric: tabular-nums;
+}
+
+.group-actions {
+	display: none;
+	gap: 2px;
+	flex: none;
+}
+
+.group-title:hover .group-actions,
+.group-title:focus-within .group-actions {
+	display: flex;
+}
+
+.group-rename {
+	flex: 1;
+	max-width: none;
+}
+
+/* An empty group still has to say what to do with it. Hidden while folded:
+   the point of folding is to stop reading the group's contents. */
+.group-empty {
+	padding: 2px 12px 6px 20px;
+	font-size: 11px;
+	line-height: 1.5;
+}
+
+.session-action.group.assigned {
+	color: var(--accent);
+}
+
+.group-menu {
+	position: absolute;
+	top: 26px;
+	right: 8px;
+	z-index: 20;
+	min-width: 160px;
+	max-width: 240px;
+	max-height: 240px;
+	overflow: auto;
+	padding: 4px;
+	background: var(--bg-elevated);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	box-shadow: 0 6px 18px rgb(0 0 0 / 40%);
+}
+
+.group-menu-item {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	padding: 5px 8px;
+	background: transparent;
+	border: none;
+	border-radius: 3px;
+	color: var(--fg);
+	font: inherit;
+	font-size: 12px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.group-menu-item:hover {
+	background: var(--bg-hover);
+}
+
+.group-menu-item.active {
+	color: var(--accent);
+}
+
+.group-menu-label {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.group-menu-check {
+	color: var(--accent);
+}
+
+.group-menu-new {
+	margin-top: 4px;
+	padding: 6px 2px 2px;
+	border-top: 1px solid var(--border);
+}
+
+.group-menu-new input {
+	width: 100%;
+	padding: 4px 6px;
+	background: var(--bg);
+	color: var(--fg);
+	border: 1px solid var(--border);
+	border-radius: 3px;
+	font: inherit;
+	font-size: 12px;
+	outline: none;
+}
+
+.group-menu-new input:focus {
+	border-color: var(--accent);
+}
+
+/* Shared-files editor: the search dialog's shell, wider and text-heavy. */
+.group-files {
+	width: min(760px, 92vw);
+}
+
+.group-files-hint {
+	margin: 8px 14px 0;
+	font-size: 11.5px;
+	line-height: 1.55;
+	color: var(--fg-dim);
+}
+
+.group-files-text {
+	margin: 8px 14px 0;
+	min-height: 300px;
+	resize: vertical;
+	padding: 10px;
+	background: var(--bg);
+	color: var(--fg);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+	font-size: 12.5px;
+	line-height: 1.6;
+	outline: none;
+}
+
+.group-files-text:focus {
+	border-color: var(--accent);
+}
+
+.group-files-foot {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 10px 14px 12px;
+	font-size: 11px;
+	color: var(--fg-dim);
+}
+
+.group-files-path {
+	font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+	opacity: 0.75;
+}
+
+.group-files-foot .spacer {
+	flex: 1;
+}
+
+/* Rail actions whose result is invisible on screen (a restarted process, a
+   membership change that only applies to the next spawn) report here. */
+.toast {
+	position: fixed;
+	left: 50%;
+	bottom: 24px;
+	z-index: 60;
+	transform: translateX(-50%);
+	max-width: min(560px, 90vw);
+	padding: 9px 14px;
+	background: var(--bg-elevated);
+	color: var(--fg);
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+	font-size: 12.5px;
+	line-height: 1.5;
+}
+
 .rail-check {
 	display: flex;
 	align-items: center;
@@ -1635,6 +2048,27 @@ button {
 .tree-search input:focus,
 .change-search:focus {
 	border-color: var(--accent);
+}
+
+/* Search is submit-driven (FileTree.submitSearch), so there has to be
+   something to click for people who do not know about the Enter key. */
+.tree-search-go {
+	flex: none;
+	width: 24px;
+	margin-left: 4px;
+	display: grid;
+	place-items: center;
+	padding: 0;
+	background: var(--bg-sunken);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	color: var(--fg-dim);
+	cursor: pointer;
+}
+
+.tree-search-go:hover {
+	border-color: var(--accent);
+	color: var(--fg);
 }
 
 /* The inline "new file / new folder" input, in place of a row. */

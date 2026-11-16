@@ -15,10 +15,11 @@
 | 分类 | 能力 |
 |---|---|
 | 会话 | 自动从 `~/.claude/projects` 反推项目与会话；手动注册新目录；`--resume` 续接；刷新不丢进行中的轮次；行内重命名 / 归档 / 删除（hover 或双击） |
+| 会话组 | 把**不同项目**的会话聚成一个可命名的组；组内共享 `memory.md` / `progress.md`，两个路径注入每个成员会话的系统提示，跨仓库交接不用重复解释；组在侧栏最前且可折叠 |
 | 对话 | 流式 Markdown（streamdown）+ KaTeX + shiki 高亮；思考块可折叠；工具卡片（Bash 有专用卡片） |
 | 工具可视化 | `tool_use`/`tool_result` 配对；子 agent（`Agent` 工具）嵌套展示；后台任务实时输出轮询 |
 | 控制 | 运行时切模型 / 切权限模式；优雅中断；强制结束；消息排队；工具审批（允许 / 总是允许 / 拒绝） |
-| 代码 | Monaco 编辑、文件树（右键新建文件/目录、删除、项目内搜索）、git 变更按目录折叠并可按路径过滤、只读 diff、agent 每轮结束自动刷新变更与文件树 |
+| 代码 | Monaco 编辑、文件树（右键新建文件/目录、删除、项目内搜索）、git 变更按目录折叠并可按路径过滤、只读 diff、agent 每轮结束自动刷新变更与文件树；C/C++ `Ctrl+单击` / `F12` 经 clangd 跳定义、悬停看文档（需要 `clangd` 与 `compile_commands.json`） |
 | 终端 | `node-pty` 真终端，**多标签**，shell 与连接都活在服务端池子里（切标签/切项目/刷新都不重连），真断线时回放最近几屏输出；`Ctrl+C`/`Ctrl+V` 复制粘贴，`Ctrl+单击` 路径直接在代码区打开（支持 `path:12`，跨项目绝对路径也行） |
 | 账户 | 登录鉴权，账号密码存 `~/.agent-ui/users.json`（scrypt 哈希），会话令牌走 HttpOnly Cookie |
 | 布局 | 会话列表 / 对话 / 代码 三栏，所有分隔线可拖拽，宽度持久化 |
@@ -217,8 +218,9 @@ npm start
 
 - [ ] 单独终止某个后台任务（CLI 的 `TaskStop` 目前只有模型能调）
 - [ ] `/clear` 与界面同步（CLI 清了上下文，前端消息不同步清）
-- [ ] LSP：`clangd` / `pyright` / `gopls` + WS 桥 + `monaco-languageclient`
-- [ ] Monaco 跨文件跳转（TS worker 已就绪，差「为未打开的 import 建 model」）
+- [x] LSP：`clangd` 的 definition / hover（HTTP 语义化桥，没上 `monaco-languageclient`）
+- [ ] LSP 其余能力：诊断、补全、语义高亮；`pyright` / `gopls`
+- [ ] Monaco 跨文件跳转（C/C++ 已由 clangd 提供；TS worker 已就绪，差「为未打开的 import 建 model」）
 - [ ] 会话批量操作（多选归档 / 清理）
 - [ ] 多用户与多端（需要先做账号体系；届时 IndexedDB 镜像的策略要重新评估）
 

@@ -90,7 +90,17 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 	const [results, setResults] = useState<readonly string[]>([]);
 	const [dirResults, setDirResults] = useState<readonly string[]>([]);
 	const [searching, setSearching] = useState(false);
+	/** The walk hit its budget: the list below is not the whole answer. */
+	const [truncated, setTruncated] = useState(false);
 	const trimmedQuery = query.trim();
+	/**
+	 * The query the tree is actually searched for.
+	 *
+	 * Separate from `query` because the walk is a real filesystem traversal: it
+	 * must run when the user says so, not on every keystroke of a half-typed
+	 * path. See `submitSearch`.
+	 */
+	const [submitted, setSubmitted] = useState('');
 
 	const load = useCallback(async (directory: string) => {
 		setDirectories(previous => ({
@@ -183,36 +193,48 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 	// directories to find one file is the slow path, and the server already has
 	// a bounded walk for the `@` picker.
 	useEffect(() => {
-		if (trimmedQuery === '') {
+		if (submitted === '') {
 			setResults([]);
 			setDirResults([]);
+			setTruncated(false);
 			setSearching(false);
 			return;
 		}
 		let cancelled = false;
 		setSearching(true);
-		const timer = window.setTimeout(() => {
-			searchEntries(root, trimmedQuery)
-				.then(result => {
-					if (!cancelled) {
-						setResults(result.files);
-						setDirResults(result.dirs);
-						setSearching(false);
-					}
-				})
-				.catch(() => {
-					if (!cancelled) {
-						setResults([]);
-						setDirResults([]);
-						setSearching(false);
-					}
-				});
-		}, 250);
+		searchEntries(root, submitted, true)
+			.then(result => {
+				if (!cancelled) {
+					setResults(result.files);
+					setDirResults(result.dirs);
+					setTruncated(result.truncated === true);
+					setSearching(false);
+				}
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setResults([]);
+					setDirResults([]);
+					setTruncated(false);
+					setSearching(false);
+				}
+			});
 		return () => {
 			cancelled = true;
-			window.clearTimeout(timer);
 		};
-	}, [trimmedQuery, root]);
+	}, [submitted, root]);
+
+	/**
+	 * Searches for what is in the box right now.
+	 *
+	 * Deliberately not tied to `onChange`: each search is a bounded but real
+	 * directory walk, and firing it per keystroke spends disk on prefixes nobody
+	 * asked about ("cpp", "cpp-", "cpp-d"). Enter and the button are the two
+	 * ways in, and pressing Enter again on an unchanged query opens the best hit.
+	 */
+	const submitSearch = () => {
+		setSubmitted(trimmedQuery);
+	};
 
 	// Any click outside the menu dismisses it; the menu itself stops propagation.
 	useEffect(() => {
@@ -433,10 +455,24 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 			<div className="tree-search">
 				<input
 					value={query}
-					onChange={event => setQuery(event.target.value)}
+					onChange={event => {
+						const next = event.target.value;
+						setQuery(next);
+						// An empty box leaves search mode at once: showing hits for a
+						// query that is no longer on screen reads as a bug.
+						if (next.trim() === '') {
+							setSubmitted('');
+						}
+					}}
 					onKeyDown={event => {
-						// Enter takes the best match: a directory expands, a file opens.
 						if (event.key === 'Enter') {
+							event.preventDefault();
+							// The first Enter searches; a second one on an unchanged query
+							// takes the best hit — a directory expands, a file opens.
+							if (trimmedQuery !== submitted) {
+								submitSearch();
+								return;
+							}
 							if (dirResults.length > 0) {
 								void revealDirectory(dirResults[0]!);
 							} else if (results.length > 0) {
@@ -445,13 +481,34 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 						}
 						if (event.key === 'Escape') {
 							setQuery('');
+							setSubmitted('');
 						}
 					}}
-					placeholder={t('搜索文件')}
+					placeholder={t('搜索文件或目录，回车')}
 					spellCheck={false}
 				/>
+				<button
+					type="button"
+					className="tree-search-go"
+					title={t('搜索（回车）')}
+					onClick={submitSearch}
+				>
+					<svg
+						viewBox="0 0 14 14"
+						width="12"
+						height="12"
+						fill="none"
+						stroke="currentColor"
+						strokeWidth="1.3"
+						strokeLinecap="round"
+						aria-hidden="true"
+					>
+						<circle cx="6" cy="6" r="4" />
+						<path d="M9 9l3 3" />
+					</svg>
+				</button>
 			</div>
-			{trimmedQuery === ''
+			{submitted === ''
 				? (
 					<>
 						{rootLoading && <div className="tree-hint">loading…</div>}
@@ -464,7 +521,12 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 					<>
 						{searching && <div className="tree-hint">{t('搜索中…')}</div>}
 						{!searching && results.length === 0 && dirResults.length === 0 && (
-							<div className="tree-hint">{t('没有匹配「{query}」的文件或目录', { query: trimmedQuery })}</div>
+							<div className="tree-hint">{t('没有匹配「{query}」的文件或目录', { query: submitted })}</div>
+						)}
+						{!searching && truncated && (results.length > 0 || dirResults.length > 0) && (
+							<div className="tree-hint">
+								{t('结果不完整，只列出了前 {count} 项（目录太大或路径太深）', { count: results.length + dirResults.length })}
+							</div>
 						)}
 						{dirResults.map(dirPath => (
 							<div

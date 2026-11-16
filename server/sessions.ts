@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { readAgentUiConfig, underAnyRoot } from './appConfig.js';
+import { groupForSession } from './groups.js';
 import { invalidateProjectsCache, listProjects, projectsDir } from './projects.js';
 import { JsonStore } from './store.js';
 
@@ -50,6 +51,8 @@ export interface SessionEntry {
 	readonly size: number;
 	/** Archived sessions keep their transcript but stay out of the default list. */
 	readonly archived: boolean;
+	/** The group this conversation belongs to, if any. See `groups.ts`. */
+	readonly groupId?: string;
 }
 
 interface ContentBlock {
@@ -299,6 +302,8 @@ export async function listAllSessions(options: { readonly includeArchived?: bool
 			updatedAt: entry.updatedAt,
 			size: entry.size,
 			archived: archived(entry),
+			// Groups live in their own file, so the rail cannot see them otherwise.
+			groupId: groupForSession(entry.id)?.id,
 		};
 	}));
 }

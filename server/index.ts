@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { preloadAgentState } from './agent/agentState.js';
 import { requestPermissionFromBrowser } from './agent/permissionGateway.js';
-import { createAgentServer, killRunningSession, listRunningSessions } from './agent/router.js';
+import { createAgentServer, killRunningSession, listRunningSessions, restartRunningSession } from './agent/router.js';
 import { createAgentRuntime, disposeAgentRuntime } from './agent/runtime.js';
 import {
 	ACCESS_TOKEN,
@@ -38,6 +38,18 @@ import {
 } from './auth.js';
 import { fsRouter } from './fsApi.js';
 import { gitFileVersions, gitStatus } from './git.js';
+import {
+	createGroup,
+	deleteGroup,
+	groupById,
+	isGroupFileName,
+	listGroups,
+	preloadGroups,
+	readGroupFile,
+	renameGroup,
+	setMembership,
+	writeGroupFile,
+} from './groups.js';
 import { closeDocument, definition, diagnostics, disposeLsp, hover, lspStatus, LspUnavailableError, semanticTokens, syncDocument, warmLsp } from './lsp.js';
 import { resolveModels } from './models.js';
 import { BadRequestError, PathOutsideRootError, readStringQuery, resolveRoot, shouldIgnore, toAbsolute } from './paths.js';
@@ -345,6 +357,91 @@ app.post('/api/projects', async (req, res) => {
 	});
 });
 
+// ------------------------------------------------------------------- groups
+
+/**
+ * Session groups: conversations from different projects, bundled by hand.
+ *
+ * Groups are the one piece of state that is neither the CLI's (transcripts)
+ * nor a project's (roots): they live in `session-groups.json`, and their shared
+ * files under `~/.agent-ui/groups/<id>/`.
+ */
+function requireGroup(id: string): void {
+	if (!groupById(id)) {
+		throw new BadRequestError('组不存在。');
+	}
+}
+
+app.get('/api/groups', (_req, res) => {
+	res.json({ groups: listGroups() });
+});
+
+app.post('/api/groups', async (req, res) => {
+	const body = req.body as { name?: unknown } | undefined;
+	if (typeof body?.name !== 'string' || body.name.trim() === '') {
+		throw new BadRequestError('`name` is required.');
+	}
+	res.json({ group: await createGroup(body.name) });
+});
+
+app.patch('/api/groups/:id', async (req, res) => {
+	const body = req.body as { name?: unknown } | undefined;
+	if (typeof body?.name !== 'string' || body.name.trim() === '') {
+		throw new BadRequestError('`name` is required.');
+	}
+	requireGroup(req.params.id);
+	res.json({ group: await renameGroup(req.params.id, body.name) });
+});
+
+/** Deletes the group and its shared files; the conversations stay. */
+app.delete('/api/groups/:id', async (req, res) => {
+	requireGroup(req.params.id);
+	await deleteGroup(req.params.id);
+	res.json({ ok: true });
+});
+
+/** Membership is exclusive: a session joins one group and leaves the rest. */
+app.post('/api/groups/:id/members', async (req, res) => {
+	const body = req.body as { sessionId?: unknown } | undefined;
+	if (typeof body?.sessionId !== 'string' || body.sessionId === '') {
+		throw new BadRequestError('`sessionId` is required.');
+	}
+	requireGroup(req.params.id);
+	const groups = await setMembership(body.sessionId, req.params.id);
+	// The new system prompt only reaches a process that starts *after* this
+	// write, so an idle conversation is restarted here. A busy one is left
+	// alone (`busy`) and picks the group up at its next start.
+	res.json({ groups, restart: restartRunningSession(body.sessionId) });
+});
+
+app.delete('/api/groups/:id/members/:sessionId', async (req, res) => {
+	requireGroup(req.params.id);
+	const groups = await setMembership(req.params.sessionId, undefined);
+	// Same reasoning as joining: a running process still believes it is grouped.
+	res.json({ groups, restart: restartRunningSession(req.params.sessionId) });
+});
+
+app.get('/api/groups/:id/file/:name', async (req, res) => {
+	if (!isGroupFileName(req.params.name)) {
+		throw new BadRequestError('未知的组文件。');
+	}
+	requireGroup(req.params.id);
+	res.json({ content: await readGroupFile(req.params.id, req.params.name) });
+});
+
+app.put('/api/groups/:id/file/:name', async (req, res) => {
+	if (!isGroupFileName(req.params.name)) {
+		throw new BadRequestError('未知的组文件。');
+	}
+	const body = req.body as { content?: unknown } | undefined;
+	if (typeof body?.content !== 'string') {
+		throw new BadRequestError('`content` is required.');
+	}
+	requireGroup(req.params.id);
+	await writeGroupFile(req.params.id, req.params.name, body.content);
+	res.json({ ok: true });
+});
+
 /** What the agent changed: working tree vs. HEAD. */
 app.get('/api/git/status', async (req, res) => {
 	const root = await resolveRoot(readStringQuery(req.query['root'], 'root'));
@@ -441,6 +538,17 @@ app.delete('/api/sessions/:id', async (req, res) => {
 		return;
 	}
 	res.json({ ok: true });
+});
+
+/**
+ * Drops a conversation's process so the next message starts a fresh one.
+ *
+ * The system prompt (and therefore a group's shared files) is only passed at
+ * spawn, so anything that changes it needs a new process to take effect.
+ * `--resume` keeps the transcript, so the conversation itself is untouched.
+ */
+app.post('/api/sessions/:id/restart', (req, res) => {
+	res.json({ result: restartRunningSession(req.params.id) });
 });
 
 // ------------------------------------------------------------------ clangd
@@ -618,7 +726,7 @@ const agents = await createAgentRuntime({
 const agentServer = createAgentServer({ registry: agents.registry });
 
 // Auth and terminal state are read from disk before the first request lands.
-await Promise.all([preloadAuth(), preloadTerminals()]);
+await Promise.all([preloadAuth(), preloadTerminals(), preloadGroups()]);
 // No prune here: on boot every recorded terminal has no shell yet, and those
 // are exactly the ones that get respawned (with their persisted output) when a
 // client attaches again. Pruning at startup is what made a dev-server restart

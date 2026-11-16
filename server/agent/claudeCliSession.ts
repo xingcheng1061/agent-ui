@@ -160,6 +160,15 @@ export class ClaudeCliSession implements AgentSession {
 		if (_options.resumeSessionId) {
 			args.push('--resume', _options.resumeSessionId);
 		}
+		// A session group's shared files: appended rather than replacing the
+		// prompt, because everything the CLI ships (tool rules, cwd, memory
+		// paths) still has to apply.
+		if (_options.appendSystemPrompt) {
+			args.push('--append-system-prompt', _options.appendSystemPrompt);
+		}
+		for (const directory of _options.extraDirs ?? []) {
+			args.push('--add-dir', directory);
+		}
 
 		// Approval prompts: the CLI spawns this MCP server and calls it whenever a
 		// tool needs a decision.

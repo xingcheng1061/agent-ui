@@ -1,18 +1,29 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
 	archiveSession,
+	createGroup,
+	deleteGroup,
 	deleteSession,
 	fetchMe,
+	joinGroup,
+	leaveGroup,
+	listGroups,
 	listProjects,
 	listSessions,
 	logout,
+	renameGroup,
 	renameSession,
+	restartSession,
 	runningSessions,
+	type GroupInfo,
+	type MembershipResult,
 	type ProjectInfo,
+	type RestartOutcome,
 	type SessionEntry,
 } from './api';
 import { AuthPage } from './components/AuthPage';
 import { ChatPanel } from './components/ChatPanel';
+import { GroupFilesDialog } from './components/GroupFilesDialog';
 import { NewSessionDialog } from './components/NewSessionDialog';
 import { PasswordDialog } from './components/PasswordDialog';
 import { SessionSidebar } from './components/SessionSidebar';
@@ -68,11 +79,30 @@ type AuthState = { readonly kind: 'loading' }
 export function App() {
 	const [projects, setProjects] = useState<readonly ProjectInfo[]>([]);
 	const [sessions, setSessions] = useState<readonly SessionEntry[]>([]);
+	/** Cross-project bundles of conversations; membership rides on the session. */
+	const [groups, setGroups] = useState<readonly GroupInfo[]>([]);
+	/** The group whose shared files are open in the editor dialog, if any. */
+	const [groupFiles, setGroupFiles] = useState<GroupInfo | undefined>(undefined);
 	const [active, setActive] = useState<ActiveView | undefined>(undefined);
 	const [error, setError] = useState<string | undefined>(undefined);
 	const [loaded, setLoaded] = useState(false);
 	const [dialogOpen, setDialogOpen] = useState(false);
 	const [passwordOpen, setPasswordOpen] = useState(false);
+	/**
+	 * One line of feedback for actions whose effect is not visible in the rail.
+	 *
+	 * Membership changes are exactly that: whether the conversation's process was
+	 * restarted decides whether the group's shared files are live now or at its
+	 * next turn, and nothing on screen would otherwise say which.
+	 */
+	const [toast, setToast] = useState<string | undefined>(undefined);
+	useEffect(() => {
+		if (toast === undefined) {
+			return;
+		}
+		const timer = window.setTimeout(() => setToast(undefined), 5000);
+		return () => window.clearTimeout(timer);
+	}, [toast]);
 	const [revision, setRevision] = useState(0);
 	/** A `path:line` clicked in a tool result, waiting for the code pane. */
 	const [openRequest, setOpenRequest] = useState<{ readonly path: string; readonly line?: number; readonly token: number } | undefined>(undefined);
@@ -120,9 +150,10 @@ export function App() {
 	}, [active]);
 
 	const refresh = useCallback(async () => {
-		const [nextProjects, nextSessions] = await Promise.all([listProjects(), listSessions()]);
+		const [nextProjects, nextSessions, nextGroups] = await Promise.all([listProjects(), listSessions(), listGroups()]);
 		setProjects(nextProjects);
 		setSessions(nextSessions);
+		setGroups(nextGroups);
 		setLoaded(true);
 		setActive(current => {
 			if (current) {
@@ -316,6 +347,73 @@ export function App() {
 		await refresh();
 	};
 
+	/**
+	 * Group actions all rewrite `session-groups.json` and re-read the list.
+	 *
+	 * Where a row renders is decided by the session's own `groupId`, which comes
+	 * back from the server, so the rail cannot move it locally and stay correct.
+	 */
+	const assignGroup = (session: SessionEntry, groupId: string | undefined) => {
+		const current = session.groupId;
+		const run: Promise<MembershipResult> = groupId === undefined
+			? (current === undefined
+				? Promise.resolve({ groups, restart: 'missing' as RestartOutcome })
+				: leaveGroup(current, session.id))
+			: joinGroup(groupId, session.id);
+		void run
+			.then(async result => {
+				// Joining and leaving both change the injected system prompt, so the
+				// outcome worth reporting is what happened to the process.
+				setToast(membershipNote(result.restart, groupId !== undefined));
+				await refresh();
+			})
+			.catch(reason => window.alert(t('调整会话组失败：{error}', { error: String(reason) })));
+	};
+
+	const restartSessionEntry = (session: SessionEntry) => {
+		void restartSession(session.id)
+			.then(outcome => {
+				setToast(outcome === 'busy'
+					? t('会话正在执行，现在不能重载；等这一轮结束再试')
+					: t('会话进程已重载，下一条消息会带上最新的系统提示'));
+			})
+			.catch(reason => window.alert(t('重载会话进程失败：{error}', { error: String(reason) })));
+	};
+
+	const createGroupWith = (name: string, session?: SessionEntry) => {
+		void createGroup(name)
+			.then(async group => {
+				if (session) {
+					const joined = await joinGroup(group.id, session.id);
+					setToast(membershipNote(joined.restart, true));
+				}
+				await refresh();
+			})
+			.catch(reason => window.alert(t('创建会话组失败：{error}', { error: String(reason) })));
+	};
+
+	const renameGroupEntry = (group: GroupInfo, name: string) => {
+		void renameGroup(group.id, name)
+			.then(() => refresh())
+			.catch(reason => window.alert(t('重命名会话组失败：{error}', { error: String(reason) })));
+	};
+
+	const deleteGroupEntry = (group: GroupInfo) => {
+		const confirmed = window.confirm(t(
+			'删除会话组「{name}」？\n\n组里的会话和记录都保留，只是不再归组；共享的记忆与进度文件会一并删除。',
+			{ name: group.name },
+		));
+		if (!confirmed) {
+			return;
+		}
+		void deleteGroup(group.id)
+			.then(async () => {
+				setGroupFiles(current => current?.id === group.id ? undefined : current);
+				await refresh();
+			})
+			.catch(reason => window.alert(t('删除会话组失败：{error}', { error: String(reason) })));
+	};
+
 	if (auth.kind === 'loading') {
 		return <div className="boot">loading…</div>;
 	}
@@ -392,12 +490,19 @@ export function App() {
 				<SessionSidebar
 					projects={projects}
 					sessions={sessions}
+					groups={groups}
 					activeSessionId={active?.sessionId}
 					onSelectSession={selectSession}
 					onNewSession={() => setDialogOpen(true)}
 					onRenameSession={renameSessionEntry}
 					onArchiveSession={archiveSessionEntry}
 					onDeleteSession={deleteSessionEntry}
+					onAssignGroup={assignGroup}
+					onCreateGroup={createGroupWith}
+					onRenameGroup={renameGroupEntry}
+					onDeleteGroup={deleteGroupEntry}
+					onOpenGroupFiles={setGroupFiles}
+					onRestartSession={restartSessionEntry}
 					running={running}
 					approvals={approvals}
 				/>
@@ -448,6 +553,8 @@ export function App() {
 				/>
 			)}
 			{passwordOpen && <PasswordDialog onClose={() => setPasswordOpen(false)} />}
+			{groupFiles && <GroupFilesDialog group={groupFiles} onClose={() => setGroupFiles(undefined)} />}
+			{toast !== undefined && <div className="toast" role="status">{toast}</div>}
 		</div>
 	);
 }
@@ -455,4 +562,23 @@ export function App() {
 function baseName(root: string): string {
 	const parts = root.split(/[\\/]/).filter(part => part.length > 0);
 	return parts.length > 0 ? parts[parts.length - 1] : root;
+}
+
+/**
+ * What a membership change means for the conversation that was moved.
+ *
+ * The group's shared files ride on the system prompt, which only a fresh
+ * process receives: `restarted` means the next message already carries them,
+ * `busy` waits for the turn in flight to end, and `missing` had no process to
+ * begin with, so the next message spawns one with the new prompt anyway.
+ */
+function membershipNote(outcome: RestartOutcome, joined: boolean): string {
+	const subject = joined ? t('已加入会话组') : t('已移出会话组');
+	if (outcome === 'busy') {
+		return `${subject}；会话正在执行，这一轮结束后生效（也可以手动重载进程）`;
+	}
+	if (outcome === 'restarted') {
+		return `${subject}，会话进程已重载，下一条消息就会带上新的共享文件`;
+	}
+	return `${subject}；当前没有运行中的进程，下一条消息会按新设置启动`;
 }

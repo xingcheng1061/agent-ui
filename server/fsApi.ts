@@ -83,27 +83,66 @@ fsRouter.get('/list', async (req, res) => {
 });
 
 /**
- * Path search for the `@` mention picker. Bounded by depth, scanned entries and
- * result count so a huge checkout cannot stall the request.
+ * Bounds for the path search, per caller.
+ *
+ * Two kinds of caller share this walk. `quick` serves the `@` mention picker,
+ * which fires while typing and must stay cheap. `deep` serves the file tree,
+ * where a person pressed Enter and is watching the answer, so it may walk a
+ * whole large checkout — generated sources, vendored trees, a mono-repo.
+ */
+interface SearchLimits {
+	readonly depth: number;
+	readonly scanned: number;
+	readonly files: number;
+	readonly dirs: number;
+	/** Wall clock guard; 0 means the budgets above are the only bound. */
+	readonly budgetMs: number;
+}
+
+const SEARCH_LIMITS: { readonly quick: SearchLimits; readonly deep: SearchLimits } = {
+	quick: { depth: 8, scanned: 20_000, files: 200, dirs: 100, budgetMs: 0 },
+	deep: { depth: 20, scanned: 200_000, files: 2_000, dirs: 500, budgetMs: 10_000 },
+};
+
+/**
+ * Path search: files and directories, returned separately.
+ *
+ * `?deep=1` opts into the larger budgets. `truncated` says the walk stopped
+ * early, so the caller can admit the list is not exhaustive instead of
+ * pretending a partial answer is complete.
  */
 fsRouter.get('/search', async (req, res) => {
 	const root = await resolveRoot(readStringQuery(req.query['root'], 'root'));
 	const query = readStringQuery(req.query['q'] ?? '', 'q').toLowerCase();
+	const limits = readStringQuery(req.query['deep'] ?? '', 'deep') === '1' ? SEARCH_LIMITS.deep : SEARCH_LIMITS.quick;
 	const skip = new Set(['node_modules', '.git', 'dist', 'out', 'build', '.next', 'target', 'coverage', '.cache']);
 	const files: string[] = [];
 	const dirs: string[] = [];
+	const beganAt = Date.now();
 	let scanned = 0;
-	const full = () => files.length >= 200 || dirs.length >= 100;
+	let truncated = false;
+	const full = () => files.length >= limits.files || dirs.length >= limits.dirs;
+	const stop = () => scanned > limits.scanned
+		|| full()
+		|| (limits.budgetMs > 0 && Date.now() - beganAt > limits.budgetMs);
 
 	const walk = async (directory: string, depth: number): Promise<void> => {
-		if (depth > 8 || scanned > 20000 || full()) {
+		if (depth > limits.depth) {
+			// There is more below; the answer is just not exhaustive.
+			truncated = true;
+			return;
+		}
+		if (stop()) {
+			truncated = true;
 			return;
 		}
 		const dirents = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
 		for (const dirent of dirents) {
-			if (scanned++ > 20000 || full()) {
+			if (stop()) {
+				truncated = true;
 				return;
 			}
+			scanned += 1;
 			if (dirent.isDirectory()) {
 				if (skip.has(dirent.name) || shouldIgnore(dirent.name)) {
 					continue;
@@ -128,7 +167,7 @@ fsRouter.get('/search', async (req, res) => {
 	// Shorter paths first: `package.json` before `server/agent/package.json`.
 	files.sort((a, b) => a.length - b.length || a.localeCompare(b));
 	dirs.sort((a, b) => a.length - b.length || a.localeCompare(b));
-	res.json({ files, dirs, truncated: full() });
+	res.json({ files, dirs, truncated });
 });
 
 /**

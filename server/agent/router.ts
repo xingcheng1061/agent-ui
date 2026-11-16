@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { WebSocket, WebSocketServer } from 'ws';
 import { DEBUG, PROJECT_ROOT, REAP_DELAY_MS, requestUrl, stamp } from '../config.js';
+import { groupDir, groupForSession, groupSystemPrompt } from '../groups.js';
 import { resolveRoot } from '../paths.js';
 import { JsonStore } from '../store.js';
 import {
@@ -123,6 +124,29 @@ export function killRunningSession(sessionId: string): boolean {
 	return killLive(sessionId);
 }
 
+/** What happened to a restart request; the caller turns it into a message. */
+export type RestartOutcome =
+	/** Process was idle and is gone: the next message respawns it. */
+	| 'restarted'
+	/** A turn or a tool approval is in flight; nothing was touched. */
+	| 'busy'
+	/** No process at all — already the state a restart would produce. */
+	| 'missing';
+
+let restartLive: (sessionId: string) => RestartOutcome = () => 'missing';
+
+/**
+ * Drops a conversation's process so the next message starts a new one.
+ *
+ * Needed because the system prompt is only passed at spawn: joining a group
+ * changes what the conversation should be told, and a process that is already
+ * running cannot be re-told anything. `--resume` keeps the transcript, so this
+ * costs a CLI startup and nothing else.
+ */
+export function restartRunningSession(sessionId: string): RestartOutcome {
+	return restartLive(sessionId);
+}
+
 /**
  * Deferred messages, by CLI session id.
  *
@@ -187,6 +211,32 @@ export function createAgentServer(options: Omit<AgentServerOptions, 'cwd'>): Web
 			}
 		}
 		return true;
+	};
+	restartLive = sessionId => {
+		const entry = live.get(sessionId) ?? [...live.values()].find(item => item.cliSessionId === sessionId);
+		if (!entry) {
+			return 'missing';
+		}
+		// A turn in flight (or a pending approval) is someone's work; dropping the
+		// process to apply a prompt change is never what they asked for.
+		if (entry.busy) {
+			return 'busy';
+		}
+		if (entry.reapTimer) {
+			clearTimeout(entry.reapTimer);
+			entry.reapTimer = undefined;
+		}
+		// No `exit` event, on purpose: the conversation did not end. Idle reaping
+		// does the same thing, and the watching tab simply reattaches when the
+		// next message spawns a process.
+		entry.sockets.clear();
+		entry.session.dispose();
+		for (const [key, value] of live) {
+			if (value === entry) {
+				live.delete(key);
+			}
+		}
+		return 'restarted';
 	};
 	const server = new WebSocketServer({ noServer: true });
 	// Persisted model/mode choices; the spawn path reads it synchronously.
@@ -715,6 +765,16 @@ class AgentConnection {
 		const stored = choiceForSession(resumeSessionId, driver.id);
 		const model = this._pendingModel ?? pickModel(driver, stored.model);
 		const permissionMode = this._pendingMode ?? pickMode(driver, stored.permissionMode);
+		/**
+		 * The group, if this conversation was put in one.
+		 *
+		 * Only a resumed session can have one: a group is chosen by a person
+		 * after the conversation exists, and the backend hands out the id on the
+		 * first turn. A conversation grouped while its process is alive therefore
+		 * sees the shared files from its next start — nothing pushes a new system
+		 * prompt into a running process.
+		 */
+		const group = groupForSession(resumeSessionId);
 		// Some backends only report their session id once the first turn starts,
 		// so the explicit pick is bound to the session from inside `emit`.
 		const requested = {
@@ -820,6 +880,10 @@ class AgentConnection {
 					permissionMode,
 					model,
 					resumeSessionId,
+					// A grouped conversation is handed the group's shared files, so a
+					// resume in one project can continue what another project started.
+					appendSystemPrompt: group ? groupSystemPrompt(group) : undefined,
+					extraDirs: group ? [groupDir(group.id)] : undefined,
 				},
 				emit,
 			),

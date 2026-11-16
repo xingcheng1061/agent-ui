@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ProjectInfo, SessionEntry } from '../api';
+import type { GroupInfo, ProjectInfo, SessionEntry } from '../api';
 import { t, useLang } from '../i18n';
 import { ALL, ProjectFilter } from './ProjectFilter';
 import { projectLabels } from '../projectNames';
@@ -7,6 +7,8 @@ import { projectLabels } from '../projectNames';
 interface SessionSidebarProps {
 	readonly projects: readonly ProjectInfo[];
 	readonly sessions: readonly SessionEntry[];
+	/** Groups are cross-project on purpose: they outlive any single workspace. */
+	readonly groups: readonly GroupInfo[];
 	readonly activeSessionId: string | undefined;
 	readonly onSelectSession: (session: SessionEntry) => void;
 	readonly onNewSession: () => void;
@@ -14,6 +16,20 @@ interface SessionSidebarProps {
 	readonly onRenameSession: (session: SessionEntry, title: string) => void;
 	readonly onArchiveSession: (session: SessionEntry, archived: boolean) => void;
 	readonly onDeleteSession: (session: SessionEntry) => void;
+	/** `undefined` takes the conversation out of whatever group holds it. */
+	readonly onAssignGroup: (session: SessionEntry, groupId: string | undefined) => void;
+	readonly onCreateGroup: (name: string, session?: SessionEntry) => void;
+	readonly onRenameGroup: (group: GroupInfo, name: string) => void;
+	readonly onDeleteGroup: (group: GroupInfo) => void;
+	/** Opens the shared `memory.md` / `progress.md` editor for a group. */
+	readonly onOpenGroupFiles: (group: GroupInfo) => void;
+	/**
+	 * Drops the conversation's process so the next message starts a new one.
+	 *
+	 * The only way to apply a changed system prompt (a group's shared files,
+	 * for instance) to a conversation whose process is already running.
+	 */
+	readonly onRestartSession: (session: SessionEntry) => void;
 	/**
 	 * Sessions with a process still running, mapped to whether a turn is being
 	 * answered right now. The chat socket only knows the conversation it is
@@ -35,12 +51,19 @@ interface SessionSidebarProps {
 export function SessionSidebar({
 	projects,
 	sessions,
+	groups,
 	activeSessionId,
 	onSelectSession,
 	onNewSession,
 	onRenameSession,
 	onArchiveSession,
 	onDeleteSession,
+	onAssignGroup,
+	onCreateGroup,
+	onRenameGroup,
+	onDeleteGroup,
+	onOpenGroupFiles,
+	onRestartSession,
 	running,
 	approvals,
 }: SessionSidebarProps) {
@@ -59,6 +82,49 @@ export function SessionSidebar({
 	// them on every keystroke.
 	const renamingRef = useRef<SessionEntry | undefined>(undefined);
 	const draftRef = useRef('');
+
+	// Group state: which row's menu is open, the inline "new group" draft, and
+	// which groups the user folded away. All three are rail-local: they describe
+	// what is on screen, not anything the server knows.
+	const [groupMenuFor, setGroupMenuFor] = useState<string | undefined>(undefined);
+	const [newGroupName, setNewGroupName] = useState('');
+	/** The rail's own "new group" field, independent of the per-row menu. */
+	const [creatingGroup, setCreatingGroup] = useState(false);
+	const [newGroupDraft, setNewGroupDraft] = useState('');
+	/**
+	 * Free-text filter over conversation titles, project names and group names.
+	 *
+	 * Titles alone would not be enough: the CLI names a conversation after its
+	 * first prompt ("Add parser tests"), and a person usually remembers the
+	 * project or the group, not that string.
+	 */
+	const [query, setQuery] = useState('');
+	const searchRef = useRef<HTMLInputElement | null>(null);
+	const [renamingGroupId, setRenamingGroupId] = useState<string | undefined>(undefined);
+	const [groupDraft, setGroupDraft] = useState('');
+	const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(() => new Set());
+
+	/**
+	 * A click anywhere else closes the menu.
+	 *
+	 * Closing on the click itself would fire before the item's own handler: the
+	 * menu unmounts, the button disappears, and the click lands on nothing.
+	 */
+	useEffect(() => {
+		if (groupMenuFor === undefined) {
+			return;
+		}
+		const onMouseDown = (event: MouseEvent) => {
+			const target = event.target;
+			if (target instanceof Element && target.closest('.group-menu, .session-action.group')) {
+				return;
+			}
+			setGroupMenuFor(undefined);
+			setNewGroupName('');
+		};
+		document.addEventListener('mousedown', onMouseDown, true);
+		return () => document.removeEventListener('mousedown', onMouseDown, true);
+	}, [groupMenuFor]);
 
 	const commitRename = () => {
 		const session = renamingRef.current;
@@ -141,6 +207,38 @@ export function SessionSidebar({
 	const archivedTotal = sessions.filter(session => session.archived).length;
 	const projectName = (projectId: string) => labels.get(projectId) ?? projectId;
 
+	const search = query.trim().toLowerCase();
+	const searching = search !== '';
+	/** Title *and* project name: the rail is cross-project, so both identify. */
+	const matchesSession = (session: SessionEntry) => !searching
+		|| `${session.title} ${projectName(session.projectId)}`.toLowerCase().includes(search);
+	const matchesGroupName = (group: GroupInfo) => group.name.toLowerCase().includes(search);
+
+	/**
+	 * Ctrl+F focuses the filter, unless something already owns that key.
+	 *
+	 * Monaco's find widget and the composer's own editing live inside their
+	 * elements; stealing the key there would break them, so only presses that
+	 * land on the shell itself are captured.
+	 */
+	useEffect(() => {
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') {
+				return;
+			}
+			const target = event.target;
+			if (target instanceof HTMLElement
+				&& target.closest('.monaco-editor, input, textarea, [contenteditable="true"]') !== null) {
+				return;
+			}
+			event.preventDefault();
+			searchRef.current?.focus();
+			searchRef.current?.select();
+		};
+		document.addEventListener('keydown', onKeyDown);
+		return () => document.removeEventListener('keydown', onKeyDown);
+	}, []);
+
 	const beginRename = (session: SessionEntry) => {
 		renamingRef.current = session;
 		draftRef.current = session.title;
@@ -148,12 +246,149 @@ export function SessionSidebar({
 		setDraftTitle(session.title);
 	};
 
-	const buckets = [
-		...bucketize(activeSessions),
-		...(showArchived && archivedSessions.length > 0
-			? [{ label: t('已归档（{count}）', { count: archivedSessions.length }), sessions: archivedSessions }]
+	/**
+	 * Groups first, then everything that is not in one, by date.
+	 *
+	 * A grouped conversation appears *only* under its group. Listing it under
+	 * "today" as well would make the rail read as if it held twice the
+	 * conversations it does.
+	 */
+	const groupIds = new Set(groups.map(group => group.id));
+	const groupBuckets: Bucket[] = groups.flatMap<Bucket>(group => {
+		const members = activeSessions
+			.filter(session => session.groupId === group.id)
+			.sort((left, right) => right.updatedAt - left.updatedAt);
+		// A hit on the group name keeps the whole group visible; otherwise only
+		// the conversations whose own text matches — searching "parser" should
+		// not drag in every unrelated conversation that shares a group.
+		const nameHit = matchesGroupName(group);
+		const sessions = searching && !nameHit ? members.filter(matchesSession) : members;
+		// While searching, a group with nothing left in it is just noise.
+		return !searching || nameHit || sessions.length > 0
+			? [{ label: group.name, group, sessions }]
+			: [];
+	});
+	// A group deleted in another tab leaves sessions pointing at nothing; they
+	// fall back to the date buckets instead of disappearing from the rail.
+	const ungrouped = activeSessions.filter(session =>
+		(session.groupId === undefined || !groupIds.has(session.groupId)) && matchesSession(session));
+
+	const visibleArchived = searching ? archivedSessions.filter(matchesSession) : archivedSessions;
+
+	const buckets: readonly Bucket[] = [
+		...groupBuckets,
+		...bucketize(ungrouped),
+		...(showArchived && visibleArchived.length > 0
+			? [{ label: t('已归档（{count}）', { count: visibleArchived.length }), sessions: visibleArchived }]
 			: []),
 	];
+
+	/**
+	 * Creates the group from the rail's own field.
+	 *
+	 * The Enter key and the button share this, so trimming and "an empty name
+	 * means nothing" cannot drift between the two ways of submitting.
+	 */
+	const commitNewGroup = () => {
+		const name = newGroupDraft.trim();
+		if (name === '') {
+			return;
+		}
+		setCreatingGroup(false);
+		setNewGroupDraft('');
+		onCreateGroup(name);
+	};
+
+	/** Group title row: fold, rename in place, open the shared files, delete. */
+	const renderGroupTitle = (group: GroupInfo, count: number) => {
+		// A search always shows what it matched; folding only applies when browsing.
+		const collapsed = !searching && collapsedGroups.has(group.id);
+		const renaming = renamingGroupId === group.id;
+		return (
+			<div className="group-title">
+				<button
+					type="button"
+					className={`group-fold${collapsed ? '' : ' open'}`}
+					title={collapsed ? t('展开这个组') : t('收起这个组')}
+					onClick={() => setCollapsedGroups(current => {
+						const next = new Set(current);
+						if (next.has(group.id)) {
+							next.delete(group.id);
+						} else {
+							next.add(group.id);
+						}
+						return next;
+					})}
+				>
+					<Icon name="chevron" />
+				</button>
+				{renaming ? (
+					<input
+						className="session-rename group-rename"
+						autoFocus
+						value={groupDraft}
+						onChange={event => setGroupDraft(event.target.value)}
+						onKeyDown={event => {
+							if (event.key === 'Enter') {
+								event.preventDefault();
+								const next = groupDraft.trim();
+								setRenamingGroupId(undefined);
+								if (next && next !== group.name) {
+									onRenameGroup(group, next);
+								}
+							} else if (event.key === 'Escape') {
+								event.preventDefault();
+								setRenamingGroupId(undefined);
+							}
+						}}
+						onBlur={() => setRenamingGroupId(undefined)}
+					/>
+				) : (
+					<button
+						type="button"
+						className="group-name"
+						title={t('双击重命名；组内会话共享记忆与进度文件')}
+						onDoubleClick={() => {
+							setGroupDraft(group.name);
+							setRenamingGroupId(group.id);
+						}}
+					>
+						{group.name}
+					</button>
+				)}
+				<span className="group-count">{count}</span>
+				<span className="group-actions">
+					<button
+						type="button"
+						className="session-action"
+						title={t('编辑共享的记忆 / 进度文件')}
+						onClick={() => onOpenGroupFiles(group)}
+					>
+						<Icon name="files" />
+					</button>
+					<button
+						type="button"
+						className="session-action"
+						title={t('重命名组')}
+						onClick={() => {
+							setGroupDraft(group.name);
+							setRenamingGroupId(group.id);
+						}}
+					>
+						<Icon name="rename" />
+					</button>
+					<button
+						type="button"
+						className="session-action danger"
+						title={t('删除组（会话与记录都保留）')}
+						onClick={() => onDeleteGroup(group)}
+					>
+						<Icon name="delete" />
+					</button>
+				</span>
+			</div>
+		);
+	};
 
 	return (
 		<div className="session-rail">
@@ -168,6 +403,35 @@ export function SessionSidebar({
 					onChange={setFilter}
 					sessionTotal={sessions.length}
 				/>
+				<div className="rail-search">
+					<input
+						ref={searchRef}
+						value={query}
+						placeholder={t('搜索会话或组（Ctrl+F）')}
+						aria-label={t('搜索会话或组')}
+						onChange={event => setQuery(event.target.value)}
+						onKeyDown={event => {
+							if (event.key === 'Escape') {
+								event.preventDefault();
+								setQuery('');
+								event.currentTarget.blur();
+							}
+						}}
+					/>
+					{query !== '' && (
+						<button
+							type="button"
+							className="rail-search-clear"
+							title={t('清除搜索')}
+							onClick={() => {
+								setQuery('');
+								searchRef.current?.focus();
+							}}
+						>
+							×
+						</button>
+					)}
+				</div>
 				<label className="rail-check" title={t('归档的会话仍保留记录，只是默认不在这里列出')}>
 					<input
 						type="checkbox"
@@ -184,11 +448,91 @@ export function SessionSidebar({
 			 * so the toolbar and the scroll area are siblings now.
 			 */}
 			<div className="rail-list">
-				{activeSessions.length === 0 && !showArchived && <div className="rail-empty">{t('这个项目还没有会话')}</div>}
-				{buckets.map(bucket => (
-					<div key={bucket.label}>
-						<div className="bucket-title">{bucket.label}</div>
-						{bucket.sessions.map(session => {
+				{/*
+				 * Groups are the one cross-project thing in the rail, and the only
+				 * way to make one used to be a hover button on a conversation row
+				 * followed by a text field inside its menu. The entry lives here
+				 * instead: always visible, one click, and it says what a group is
+				 * when there are none yet.
+				 */}
+				<div className="groups-head">
+					<span className="groups-title">{t('会话组')}</span>
+					<button
+						type="button"
+						className="groups-new"
+						title={t('把不同工作区的会话聚成一组，组内共享记忆与进度文件')}
+						onClick={() => {
+							setCreatingGroup(open => !open);
+							setNewGroupDraft('');
+						}}
+					>
+						+ {t('新建组')}
+					</button>
+				</div>
+				{creatingGroup ? (
+					<div className="groups-create">
+						<input
+							autoFocus
+							value={newGroupDraft}
+							placeholder={t('组名，回车创建')}
+							onChange={event => setNewGroupDraft(event.target.value)}
+							onKeyDown={event => {
+								if (event.key === 'Escape') {
+									setCreatingGroup(false);
+									return;
+								}
+								if (event.key === 'Enter') {
+									event.preventDefault();
+									commitNewGroup();
+								}
+							}}
+						/>
+						<button
+							type="button"
+							className="groups-confirm"
+							disabled={newGroupDraft.trim() === ''}
+							onClick={commitNewGroup}
+						>
+							{t('创建')}
+						</button>
+						<button
+							type="button"
+							className="groups-cancel"
+							onClick={() => {
+								setCreatingGroup(false);
+								setNewGroupDraft('');
+							}}
+						>
+							{t('取消')}
+						</button>
+					</div>
+				) : groups.length === 0 && (
+					<div className="rail-empty groups-empty">
+						{t('还没有会话组。不同工作区的会话可以聚成一组，组内共享记忆与进度文件。')}
+					</div>
+				)}
+				{searching && buckets.length === 0 && (
+					<div className="rail-empty">{t('没有匹配「{query}」的会话或组', { query: query.trim() })}</div>
+				)}
+				{!searching && activeSessions.length === 0 && !showArchived && (
+					<div className="rail-empty">{t('这个项目还没有会话')}</div>
+				)}
+				{buckets.map(bucket => {
+					const collapsed = !searching && bucket.group !== undefined && collapsedGroups.has(bucket.group.id);
+					return (
+					<div
+						key={bucket.group ? `group:${bucket.group.id}` : bucket.label}
+						className={bucket.group ? 'group-block' : undefined}
+					>
+						{bucket.group
+							? renderGroupTitle(bucket.group, bucket.sessions.length)
+							: <div className="bucket-title">{bucket.label}</div>}
+						{bucket.group && !collapsed && bucket.sessions.length === 0 && (
+							<div className="rail-empty group-empty">
+								{t('这个组还没有会话，点会话行上的分组按钮加进来')}
+							</div>
+						)}
+						{(collapsed ? [] : bucket.sessions).map(session => {
 							const live = running?.get(session.id);
 							const pendingTool = approvals?.get(session.id);
 							const renaming = renamingId === session.id;
@@ -255,6 +599,17 @@ export function SessionSidebar({
 											>
 												<button
 													type="button"
+													className={`session-action group${session.groupId ? ' assigned' : ''}`}
+													title={session.groupId ? t('已在会话组里，点击调整') : t('加入会话组')}
+													onClick={() => {
+														setNewGroupName('');
+														setGroupMenuFor(current => current === session.id ? undefined : session.id);
+													}}
+												>
+													<Icon name="group" />
+												</button>
+												<button
+													type="button"
 													className="session-action"
 													title={t('重命名（双击会话也可）')}
 													onClick={() => beginRename(session)}
@@ -266,10 +621,18 @@ export function SessionSidebar({
 													className="session-action"
 													title={t(session.archived ? '取消归档' : '归档（保留记录，从列表隐藏）')}
 													onClick={() => onArchiveSession(session, !session.archived)}
-												>
+													>
 													<Icon name={session.archived ? 'unarchive' : 'archive'} />
-												</button>
-												<button
+													</button>
+													<button
+													type="button"
+													className="session-action"
+													title={t('重载会话进程（让新的系统提示生效）')}
+													onClick={() => onRestartSession(session)}
+													>
+													<Icon name="restart" />
+													</button>
+													<button
 													type="button"
 													className="session-action danger"
 													title={t('删除会话（同时删除记录文件，不可恢复）')}
@@ -278,19 +641,80 @@ export function SessionSidebar({
 													<Icon name="delete" />
 												</button>
 											</span>
+											{groupMenuFor === session.id && (
+												/*
+												 * Outside `.session-actions` on purpose: that span
+												 * swallows mousedown to keep the row from focusing
+												 * itself, which would stop the new-group input from
+												 * ever receiving a caret.
+												 */
+												<div
+													className="group-menu"
+													onClick={event => event.stopPropagation()}
+													onDoubleClick={event => event.stopPropagation()}
+												>
+													{groups.map(group => (
+														<button
+															key={group.id}
+															type="button"
+															className={`group-menu-item${session.groupId === group.id ? ' active' : ''}`}
+															onClick={() => {
+																setGroupMenuFor(undefined);
+																onAssignGroup(session, group.id);
+															}}
+														>
+															<span className="group-menu-label">{group.name}</span>
+															{session.groupId === group.id && <span className="group-menu-check">✓</span>}
+														</button>
+													))}
+													{session.groupId !== undefined && (
+														<button
+															type="button"
+															className="group-menu-item"
+															onClick={() => {
+																setGroupMenuFor(undefined);
+																onAssignGroup(session, undefined);
+															}}
+														>
+															{t('移出会话组')}
+														</button>
+													)}
+													<div className="group-menu-new">
+														<input
+															value={newGroupName}
+															placeholder={t('新组名，回车创建')}
+															onChange={event => setNewGroupName(event.target.value)}
+															onKeyDown={event => {
+																if (event.key !== 'Enter') {
+																	return;
+																}
+																event.preventDefault();
+																const name = newGroupName.trim();
+																if (!name) {
+																	return;
+																}
+																setGroupMenuFor(undefined);
+																setNewGroupName('');
+																onCreateGroup(name, session);
+															}}
+														/>
+													</div>
+												</div>
+											)}
 										</>
 									)}
 								</div>
 							);
 						})}
 					</div>
-				))}
+					);
+				})}
 			</div>
 		</div>
 	);
 }
 
-type IconName = 'rename' | 'archive' | 'unarchive' | 'delete';
+type IconName = 'rename' | 'archive' | 'unarchive' | 'delete' | 'group' | 'files' | 'restart' | 'chevron';
 
 /** Inline so the rail has no icon-font dependency and inherits row color. */
 function Icon({ name }: { readonly name: IconName }) {
@@ -299,6 +723,12 @@ function Icon({ name }: { readonly name: IconName }) {
 		archive: ['M1.5 2.5h11v3h-11z', 'M3 5.5v6h8v-6', 'M5.5 8h3'],
 		unarchive: ['M1.5 2.5h11v3h-11z', 'M3 5.5v6h8v-6', 'M5.5 8.5l1.5-1.5 1.5 1.5'],
 		delete: ['M2.5 3.5h9', 'M5.5 3.5V2h3v1.5', 'M4 3.5l.6 8h4.8l.6-8'],
+		// Two stacked panes: what the rail draws for a group heading.
+		group: ['M1.5 2.5h11v3.5h-11z', 'M1.5 8h11v3.5h-11z'],
+		files: ['M3 1.5h5l3 3v8H3z', 'M8 1.5v3h3', 'M5 6.5h4', 'M5 9h4'],
+		restart: ['M13 8a5 5 0 1 1-1.7-3.8', 'M13 1.8v3.6h-3.6'],
+		// Points right when folded, down when open (CSS rotates it).
+		chevron: ['M5.5 3.5l4 3.5-4 3.5'],
 	};
 	return (
 		<svg viewBox="0 0 14 14" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -310,6 +740,8 @@ function Icon({ name }: { readonly name: IconName }) {
 interface Bucket {
 	readonly label: string;
 	readonly sessions: readonly SessionEntry[];
+	/** Set on a group bucket: its heading carries the group's own actions. */
+	readonly group?: GroupInfo;
 }
 
 function bucketize(sessions: readonly SessionEntry[]): readonly Bucket[] {
