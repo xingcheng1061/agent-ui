@@ -1142,6 +1142,7 @@ button {
 /* Directory search sits under the path box and filters a walk, not the list. */
 .browse-search {
 	display: flex;
+	gap: 6px;
 	padding: 4px 8px 0;
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
 	addProject,
 	browseDirectories,
@@ -21,12 +21,21 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 	const [pathInput, setPathInput] = useState('');
 	const [projectQuery, setProjectQuery] = useState('');
 	const [dirQuery, setDirQuery] = useState('');
+	/** The query actually searched for — typing alone does not run a walk. */
+	const [dirSearch, setDirSearch] = useState('');
 	const [hits, setHits] = useState<readonly DirectoryHit[]>([]);
 	const [hitsLoading, setHitsLoading] = useState(false);
 	const [error, setError] = useState<string | undefined>(undefined);
 	const [busy, setBusy] = useState(false);
+	/** Sequence so a slow answer cannot overwrite a newer search. */
+	const searchSeq = useRef(0);
 
 	const go = (target?: string) => {
+		searchSeq.current += 1;
+		setDirQuery('');
+		setDirSearch('');
+		setHits([]);
+		setHitsLoading(false);
 		browseDirectories(target)
 			.then(result => {
 				setBrowse(result);
@@ -42,42 +51,40 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 		}
 	}, [tab, browse]);
 
-	// Typing a directory name should find a nested checkout, not only a child of
-	// whichever directory is on screen — the server walks down from here.
-	const searchRoot = browse?.path ?? '';
-	const searching = dirQuery.trim().length >= 2;
-	useEffect(() => {
-		const query = dirQuery.trim();
+	// The walk runs only when submitted: typing is cheap, walking a big tree is
+	// not, so the box does not search on every keystroke.
+	const searching = dirSearch !== '';
+	const search = (raw: string) => {
+		const query = raw.trim();
+		const seq = searchSeq.current + 1;
+		searchSeq.current = seq;
 		if (query.length < 2) {
+			setDirSearch('');
 			setHits([]);
 			setHitsLoading(false);
 			return;
 		}
-		let cancelled = false;
+		// A directory name should find a nested checkout, not only a child of
+		// whichever directory is on screen — the server searches down from here.
+		setDirSearch(query);
 		setHitsLoading(true);
-		const timer = window.setTimeout(() => {
-			findDirectories(searchRoot, query)
-				.then(result => {
-					if (!cancelled) {
-						setHits(result);
-					}
-				})
-				.catch(() => {
-					if (!cancelled) {
-						setHits([]);
-					}
-				})
-				.finally(() => {
-					if (!cancelled) {
-						setHitsLoading(false);
-					}
-				});
-		}, 250);
-		return () => {
-			cancelled = true;
-			window.clearTimeout(timer);
-		};
-	}, [dirQuery, searchRoot]);
+		findDirectories(browse?.path ?? '', query)
+			.then(result => {
+				if (searchSeq.current === seq) {
+					setHits(result);
+				}
+			})
+			.catch(() => {
+				if (searchSeq.current === seq) {
+					setHits([]);
+				}
+			})
+			.finally(() => {
+				if (searchSeq.current === seq) {
+					setHitsLoading(false);
+				}
+			});
+	};
 
 	const create = async (root: string) => {
 		if (busy) {
@@ -165,15 +172,15 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 								value={dirQuery}
 								onChange={event => setDirQuery(event.target.value)}
 								onKeyDown={event => {
-									// Enter takes the best match, like a quick-open box.
-									if (event.key === 'Enter' && hits.length > 0) {
-										setDirQuery('');
-										go(hits[0]!.path);
+									// Only a submitted query searches: Enter or the button.
+									if (event.key === 'Enter') {
+										search(dirQuery);
 									}
 								}}
 								placeholder={t('搜索当前目录及其子目录（至少 2 个字）')}
 								spellCheck={false}
 							/>
+							<button type="button" className="toggle" onClick={() => search(dirQuery)}>{t('搜索')}</button>
 						</div>
 
 						<div className="browse-roots">
