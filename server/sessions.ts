@@ -82,9 +82,27 @@ interface TranscriptLine {
 	 * last one wins.
 	 */
 	readonly aiTitle?: string;
+	/** Set on the user message that carries a compaction summary. */
+	readonly isCompactSummary?: boolean;
+	/** The newer compaction record: `{"type":"summary","summary":…,"leafUuid":…}`. */
+	readonly summary?: string;
 }
 
-const MAX_ITEMS = 400;
+/** Raw items parsed from one transcript, plus where the newest compaction starts. */
+interface ParsedTranscript {
+	readonly items: readonly TranscriptItem[];
+	/**
+	 * Index of the first item after the newest compaction.
+	 *
+	 * Everything before it is context the model no longer has: the CLI kept it
+	 * on disk, but the conversation continues from the summary.
+	 */
+	readonly compactedAt?: number;
+}
+
+const MAX_ITEMS = 4000;
+/** Bytes of one transcript page. Big conversations are read in slices. */
+const TRANSCRIPT_PAGE_BYTES = 400 * 1024;
 const MAX_TOOL_TEXT = 4000;
 const TITLE_BUDGET = 60;
 /**
@@ -331,12 +349,59 @@ async function findSession(sessionId: string): Promise<FoundSession | undefined>
 	return undefined;
 }
 
-export async function readTranscriptById(sessionId: string): Promise<readonly TranscriptItem[]> {
+/** One page of a conversation, newest items last. */
+export interface TranscriptPage {
+	readonly items: readonly TranscriptItem[];
+	/** Older items are on disk; `before` takes the next page up from them. */
+	readonly hasMore: boolean;
+	/**
+	 * Index of `items[0]` in the whole transcript, echoed back as the next
+	 * `before`: the client renders a filtered version of the list, so it cannot
+	 * count its way to this number.
+	 */
+	readonly start: number;
+}
+
+/** Rough wire size of one item, which is what the page budget is about. */
+function itemBytes(item: TranscriptItem): number {
+	return JSON.stringify(item).length;
+}
+
+/**
+ * Reads a conversation in pages.
+ *
+ * A long conversation is megabytes of jsonl, and sending all of it made opening
+ * one slow enough to feel broken. The default page is the newest slice, ending
+ * at the newest compaction when there is one — the context before it is history
+ * the agent no longer has. `before` walks backwards from what is on screen.
+ */
+export async function readTranscriptById(
+	sessionId: string,
+	page: { readonly before?: number; readonly budgetBytes?: number } = {},
+): Promise<TranscriptPage> {
 	const found = await findSession(sessionId);
 	if (!found) {
-		return [];
+		return { items: [], hasMore: false, start: 0 };
 	}
-	return readTranscript(found.filePath);
+	const transcript = await readTranscript(found.filePath);
+	const all = transcript.items;
+	const budget = page.budgetBytes ?? TRANSCRIPT_PAGE_BYTES;
+	const end = page.before === undefined ? all.length : Math.max(0, Math.min(page.before, all.length));
+	let start = end;
+	let used = 0;
+	// At least one item, however large: a single huge message still has to open.
+	while (start > 0 && (used < budget || start === end)) {
+		const size = itemBytes(all[start - 1]!);
+		used += size;
+		start -= 1;
+	}
+	if (page.before === undefined && transcript.compactedAt !== undefined && transcript.compactedAt < end) {
+		// Summarised-away context is not what the conversation is about any more;
+		// "load more" is where it comes back. A boundary at the very end means
+		// the compaction just happened, and there is nothing after it to show.
+		start = Math.min(transcript.compactedAt, end);
+	}
+	return { items: all.slice(start, end), hasMore: start > 0, start };
 }
 
 /** Renames a session; an empty title restores the generated one. */
@@ -424,13 +489,21 @@ export async function deleteSession(sessionId: string): Promise<boolean> {
 	return true;
 }
 
-async function readTranscript(filePath: string): Promise<readonly TranscriptItem[]> {
+async function readTranscript(filePath: string): Promise<ParsedTranscript> {
 	const raw = await fs.readFile(filePath, 'utf8').catch(() => '');
-	const items = parseItems(raw);
+	const parsed = parseItems(raw);
+	const items = [...parsed.items];
 	for (const subagent of await readSubagents(filePath)) {
 		insertSubagent(items, subagent);
 	}
-	return items.length > MAX_ITEMS ? items.slice(items.length - MAX_ITEMS) : items;
+	if (items.length <= MAX_ITEMS) {
+		return parsed.compactedAt === undefined ? { items } : { items, compactedAt: parsed.compactedAt };
+	}
+	const dropped = items.length - MAX_ITEMS;
+	return {
+		items: items.slice(dropped),
+		compactedAt: parsed.compactedAt === undefined ? undefined : Math.max(0, parsed.compactedAt - dropped),
+	};
 }
 
 /**
@@ -468,9 +541,10 @@ function queuedCommandText(attachment: TranscriptLine['attachment']): string {
  * did then nests under the tool call that spawned it, exactly like the live
  * stream does.
  */
-function parseItems(raw: string, parentToolUseId?: string): TranscriptItem[] {
+function parseItems(raw: string, parentToolUseId?: string): ParsedTranscript {
 	const items: TranscriptItem[] = [];
 	const toolIndexes = new Map<string, number>();
+	let compactedAt: number | undefined;
 
 	for (const line of raw.split('\n')) {
 		const entry = parseLine(line);
@@ -480,6 +554,15 @@ function parseItems(raw: string, parentToolUseId?: string): TranscriptItem[] {
 				items.push({ kind: 'user', text: queued, queued: true });
 			}
 			continue;
+		}
+		// Two shapes of the same thing: the older `summary` record and the newer
+		// `isCompactSummary` user message. Either one marks where the live
+		// context begins; everything above it was summarised away.
+		if (entry?.type === 'summary' || entry?.isCompactSummary === true) {
+			compactedAt = items.length;
+			if (entry?.type !== 'user') {
+				continue;
+			}
 		}
 		if (entry?.type !== 'user' && entry?.type !== 'assistant') {
 			continue;
@@ -515,7 +598,7 @@ function parseItems(raw: string, parentToolUseId?: string): TranscriptItem[] {
 		}
 	}
 
-	return items;
+	return compactedAt === undefined ? { items } : { items, compactedAt };
 }
 
 interface SubagentTranscript {
@@ -547,7 +630,7 @@ async function readSubagents(sessionFile: string): Promise<readonly SubagentTran
 				description: typeof meta['description'] === 'string' ? meta['description'] : undefined,
 				toolUseId: typeof meta['toolUseId'] === 'string' ? meta['toolUseId'] : undefined,
 			},
-			items: parseItems(raw, typeof meta['toolUseId'] === 'string' ? meta['toolUseId'] : undefined),
+			items: parseItems(raw, typeof meta['toolUseId'] === 'string' ? meta['toolUseId'] : undefined).items,
 		});
 	}
 	return transcripts;

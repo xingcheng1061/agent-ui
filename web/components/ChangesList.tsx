@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { gitStatus, type GitFileEntry, type GitStatus } from '../api';
 import { t } from '../i18n';
 
@@ -20,6 +20,34 @@ interface TreeNode {
 	readonly status?: string;
 	readonly insertions: number;
 	readonly deletions: number;
+}
+
+/** Where the list is looking: this project's files, or the rest of the repo. */
+type ChangeScope = 'root' | 'above' | 'all';
+
+/** Every directory prefix of the given files, so they can start folded. */
+function directoryPaths(files: readonly GitFileEntry[]): readonly string[] {
+	const paths = new Set<string>();
+	for (const file of files) {
+		const segments = file.path.replace(/\\/g, '/').split('/').filter(segment => segment.length > 0);
+		for (let index = 1; index < segments.length; index++) {
+			paths.add(segments.slice(0, index).join('/'));
+		}
+	}
+	return [...paths];
+}
+
+/** The directories that have to stay open for `filePath` to be visible. */
+function ancestorsOf(filePath: string | undefined): readonly string[] {
+	if (!filePath) {
+		return [];
+	}
+	const segments = filePath.replace(/\\/g, '/').split('/');
+	const ancestors: string[] = [];
+	for (let index = 1; index < segments.length; index++) {
+		ancestors.push(segments.slice(0, index).join('/'));
+	}
+	return ancestors;
 }
 
 /** Groups a flat file list into a directory tree, aggregating stats upwards. */
@@ -91,11 +119,22 @@ function buildTree(files: readonly GitFileEntry[]): readonly TreeNode[] {
 export function ChangesList({ root, activePath, revision, onSelect, onCountChange }: ChangesListProps) {
 	const [status, setStatus] = useState<GitStatus | undefined>(undefined);
 	const [error, setError] = useState<string | undefined>(undefined);
-	/** Folder paths the user folded shut; everything starts open. */
+	/**
+	 * Folded folders. Everything starts folded: a monorepo change set expanded
+	 * to the file is a wall of rows, and the shape of the change matters more
+	 * than its contents until a folder is opened on purpose.
+	 */
 	const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set());
+	/** Which part of the repository is listed. */
+	const [scope, setScope] = useState<ChangeScope>('root');
 	/** Filter box: matches are shown flat, with their full path. */
 	const [query, setQuery] = useState('');
 	const trimmedQuery = query.trim().toLowerCase();
+	// Read by the fetch effect, which must not depend on the selection.
+	const activePathRef = useRef(activePath);
+	activePathRef.current = activePath;
+	/** Folders already folded once, so a refetch does not undo an open folder. */
+	const knownDirsRef = useRef<ReadonlySet<string>>(new Set());
 
 	useEffect(() => {
 		let cancelled = false;
@@ -107,6 +146,20 @@ export function ChangesList({ root, activePath, revision, onSelect, onCountChang
 				setStatus(result);
 				setError(undefined);
 				onCountChange(result.files.length);
+				// The open file keeps its ancestors unfolded; everything else starts
+				// shut. Only folders seen for the first time are folded, so the turn
+				// that just ended does not close what the user opened.
+				const unfolded = new Set(ancestorsOf(activePathRef.current));
+				const directories = directoryPaths(result.files);
+				const fresh = directories.filter(directory => !knownDirsRef.current.has(directory) && !unfolded.has(directory));
+				knownDirsRef.current = new Set([...knownDirsRef.current, ...directories]);
+				setFolded(previous => {
+					const next = new Set(previous);
+					for (const directory of fresh) {
+						next.add(directory);
+					}
+					return next;
+				});
 			})
 			.catch(reason => {
 				if (!cancelled) {
@@ -121,13 +174,9 @@ export function ChangesList({ root, activePath, revision, onSelect, onCountChang
 
 	// Keep the selected file reachable: unfold its ancestors.
 	useEffect(() => {
-		if (!activePath) {
+		const ancestors = ancestorsOf(activePath);
+		if (ancestors.length === 0) {
 			return;
-		}
-		const segments = activePath.replace(/\\/g, '/').split('/');
-		const ancestors: string[] = [];
-		for (let index = 1; index < segments.length; index++) {
-			ancestors.push(segments.slice(0, index).join('/'));
 		}
 		setFolded(previous => {
 			const next = new Set(previous);
@@ -141,12 +190,18 @@ export function ChangesList({ root, activePath, revision, onSelect, onCountChang
 		});
 	}, [activePath]);
 
-	const tree = useMemo(() => buildTree(status?.files ?? []), [status]);
+	const allFiles = useMemo(() => status?.files ?? [], [status]);
+	const insideFiles = useMemo(() => allFiles.filter(file => (file.scope ?? 'root') === 'root'), [allFiles]);
+	const aboveFiles = useMemo(() => allFiles.filter(file => file.scope === 'above'), [allFiles]);
+	// The default is the project itself: a repository that also holds other
+	// checkouts used to fill this list with changes nobody here had made.
+	const scopedFiles = scope === 'above' ? aboveFiles : scope === 'all' ? allFiles : insideFiles;
+	const tree = useMemo(() => buildTree(scopedFiles), [scopedFiles]);
 	const matches = useMemo(
 		() => (trimmedQuery === ''
 			? []
-			: (status?.files ?? []).filter(file => file.path.toLowerCase().includes(trimmedQuery))),
-		[status, trimmedQuery],
+			: scopedFiles.filter(file => file.path.toLowerCase().includes(trimmedQuery))),
+		[scopedFiles, trimmedQuery],
 	);
 
 	if (error) {
@@ -176,9 +231,37 @@ export function ChangesList({ root, activePath, revision, onSelect, onCountChang
 			<div className="change-branch">
 				<span>{status.branch || '(no commits yet)'}</span>
 				<span className="change-count">
-					{trimmedQuery === '' ? t('{count} 个文件', { count: status.files.length }) : t('{matched} / {total} 个文件', { matched: matches.length, total: status.files.length })}
+					{trimmedQuery === '' ? t('{count} 个文件', { count: scopedFiles.length }) : t('{matched} / {total} 个文件', { matched: matches.length, total: scopedFiles.length })}
 				</span>
 			</div>
+			{aboveFiles.length > 0 && (
+				<div className="change-scope">
+					<button
+						type="button"
+						className={`chip${scope === 'root' ? ' active' : ''}`}
+						title={t('只看这个项目目录里的变更')}
+						onClick={() => setScope('root')}
+					>
+						{t('本项目 {count}', { count: insideFiles.length })}
+					</button>
+					<button
+						type="button"
+						className={`chip${scope === 'above' ? ' active' : ''}`}
+						title={t('仓库里其它目录的变更（不在本项目内）')}
+						onClick={() => setScope('above')}
+					>
+						{t('上层 {count}', { count: aboveFiles.length })}
+					</button>
+					<button
+						type="button"
+						className={`chip${scope === 'all' ? ' active' : ''}`}
+						title={t('整个仓库的变更')}
+						onClick={() => setScope('all')}
+					>
+						{t('全部 {count}', { count: allFiles.length })}
+					</button>
+				</div>
+			)}
 			<input
 				className="change-search"
 				value={query}
@@ -220,7 +303,11 @@ export function ChangesList({ root, activePath, revision, onSelect, onCountChang
 				)
 				: (
 					<>
-						{status.files.length === 0 && <div className="rail-empty">{t('工作区干净')}</div>}
+						{scopedFiles.length === 0 && (
+							<div className="rail-empty">
+								{allFiles.length === 0 ? t('工作区干净') : t('这个范围里没有变更')}
+							</div>
+						)}
 						<TreeRows
 							nodes={tree}
 							depth={0}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
 	archiveSession,
 	createGroup,
@@ -339,8 +339,18 @@ export function App() {
 			.catch(reason => window.alert(t('删除失败：{error}', { error: String(reason) })));
 	};
 
-	const startSession = async (root: string) => {
+	/**
+	 * Group chosen for the conversation about to be created.
+	 *
+	 * It cannot be applied here: a group is a list of session ids, and this
+	 * conversation has none until its first message spawns the CLI. The value is
+	 * held until `onSessionStarted` reports the id.
+	 */
+	const pendingGroupRef = useRef<string | undefined>(undefined);
+
+	const startSession = async (root: string, groupId?: string) => {
 		// A new session keeps the backend the user is currently working with.
+		pendingGroupRef.current = groupId;
 		setActive(current => ({ root, agent: current?.agent }));
 		setViewToken(value => value + 1);
 		setDialogOpen(false);
@@ -523,6 +533,19 @@ export function App() {
 								onAgentChange={nextAgent => setActive({ root: active.root, agent: nextAgent })}
 								onSessionStarted={sessionId => {
 									setActive(current => current ? { ...current, sessionId } : current);
+									// A group picked in the new-session dialog is applied as
+									// soon as the id exists: membership needs an id, and the
+									// rail would otherwise file the conversation as ungrouped.
+									const group = pendingGroupRef.current;
+									pendingGroupRef.current = undefined;
+									if (group) {
+										void joinGroup(group, sessionId)
+											.then(async result => {
+												setToast(membershipNote(result.restart, true));
+												await refresh();
+											})
+											.catch(reason => window.alert(t('加入会话组失败：{error}', { error: String(reason) })));
+									}
 									void refresh().catch(() => undefined);
 								}}
 								onOpenPath={(path, line) => {
@@ -548,6 +571,7 @@ export function App() {
 			{dialogOpen && (
 				<NewSessionDialog
 					projects={projects}
+					groups={groups}
 					onClose={() => setDialogOpen(false)}
 					onCreate={startSession}
 				/>

@@ -108,6 +108,19 @@ const EN: Readonly<Record<string, string>> = {
 	'当前目录及子目录里没有匹配的目录；可以回到上层目录再搜': 'No matching folder here or below; try a parent folder',
 	'（没有子目录）': '(no subfolders)',
 	'在此目录新建会话': 'Start a conversation in this folder',
+	'会话组': 'Group',
+	'不分组': 'No group',
+	'新会话直接归到这个组，不用先聊一句': 'File the new conversation here — no message needed first',
+	'加入会话组失败：{error}': 'Could not join the group: {error}',
+
+	// ---- changes list
+	'本项目 {count}': 'This project {count}',
+	'上层 {count}': 'Elsewhere {count}',
+	'全部 {count}': 'All {count}',
+	'只看这个项目目录里的变更': 'Only changes inside this project folder',
+	'仓库里其它目录的变更（不在本项目内）': 'Changes elsewhere in the repository, outside this project',
+	'整个仓库的变更': 'Changes in the whole repository',
+	'这个范围里没有变更': 'No changes in this scope',
 
 	// ---- auth
 	'两次输入的新密码不一致。': 'The new passwords do not match.',
@@ -171,6 +184,7 @@ const EN: Readonly<Record<string, string>> = {
 	'重新连接': 'Reconnect',
 	'连接中…': 'Connecting…',
 	'[无法读取剪贴板：请通过 localhost 或 HTTPS 打开本页]': '[Cannot read the clipboard: open this page through localhost or HTTPS]',
+	'[已停止自动重连，点「重新连接」再试]': '[Stopped retrying automatically — press "Reconnect" to try again]',
 
 	// ---- misc
 	'渲染出错：{error}\n\n{stack}': 'Render error: {error}\n\n{stack}',
@@ -228,7 +242,11 @@ const EN: Readonly<Record<string, string>> = {
 	'排队中 · {count}': 'Queued · {count}',
 	'不等这一轮结束，直接插进当前执行过程': 'Skip the wait and inject this into the running turn',
 	'立即发送': 'Send now',
+	'从队列里去掉这条消息': 'Drop this message from the queue',
 	'当前轮次结束后按顺序执行': 'Runs in order once the current turn ends',
+	'关闭这条提示': 'Dismiss this notice',
+	'加载更早的消息': 'Load earlier messages',
+	'加载中…': 'Loading…',
 
 	// ---- chat: composer
 	'描述任务；Enter 发送 / Shift+Enter 换行；/ 调命令，@ 引用文件': 'Describe a task; Enter to send / Shift+Enter for a newline; / for commands, @ to reference files',

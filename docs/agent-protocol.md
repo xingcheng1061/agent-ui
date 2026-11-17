@@ -29,6 +29,8 @@ claude --print --verbose \
 | `attach` | `sessionId?`、`lastSeq?` | 连接握手：认领该会话的活进程并加入它的观众集合。`lastSeq` 仅记录在日志里用于对齐，服务端**不补发任何事件**（缓冲已停用，见下文「多会话并行」） |
 | `detach` | — | 退出该会话的观众集合，**不碰进程**。切到别的会话时用它；再次 `attach` 时，运行中的内容由客户端自己的镜像接上 |
 | `user` | `text`、`sessionId?` | 发消息。`busy` 时进入排队（CLI 按 stdin 顺序执行），服务端回 `queue` 事件；若此时有未处理的审批，会先取消审批再发 |
+| `promote` | `id`、`sessionId?` | 把排队中的某条立刻插进当前轮。条目已不在队列里时回 `error` |
+| `dequeue` | `id`、`sessionId?` | 取消排队中的某条。条目已开始执行就什么也不做——取消是「让它消失」，不是询问它的下落，所以**不回 `error`** |
 | `interrupt` | — | 优雅中断：`control_request{subtype:'interrupt'}` |
 | `kill` | — | 强杀进程 |
 | `set_model` | `model` | `control_request{subtype:'set_model'}` |

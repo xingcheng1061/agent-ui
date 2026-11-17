@@ -493,8 +493,18 @@ app.get('/api/sessions', async (req, res) => {
 	res.json({ sessions: await listAllSessions({ includeArchived }) });
 });
 
+/**
+ * One page of a conversation.
+ *
+ * `before` is the index the client already holds at its top, so "load more"
+ * walks backwards; without it this is the newest slice, which is all a normal
+ * open needs.
+ */
 app.get('/api/sessions/:id', async (req, res) => {
-	res.json({ items: await readTranscriptById(req.params.id) });
+	const before = typeof req.query['before'] === 'string' ? Number(req.query['before']) : undefined;
+	res.json(await readTranscriptById(req.params.id, {
+		before: before !== undefined && Number.isFinite(before) && before >= 0 ? Math.floor(before) : undefined,
+	}));
 });
 
 /**

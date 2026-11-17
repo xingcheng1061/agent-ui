@@ -126,6 +126,23 @@ type Item =
 	}
 	| { readonly kind: 'error'; readonly id: string; readonly text: string };
 
+interface CachedTranscript {
+	readonly items: readonly Item[];
+	readonly hasMore: boolean;
+	/** Index of the oldest item in the whole transcript, for "load more". */
+	readonly oldest: number;
+}
+
+/**
+ * What each conversation last rendered as, kept for the life of the page.
+ *
+ * Switching away and back used to re-read the entire transcript from the
+ * server, which on a long conversation is megabytes of jsonl for an answer that
+ * cannot have changed. A reload starts from an empty cache, which is exactly
+ * when asking the server again is right.
+ */
+const transcriptCache = new Map<string, CachedTranscript>();
+
 interface ChatPanelProps {
 	readonly root: string;
 	readonly sessionId: string | undefined;
@@ -302,6 +319,11 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	// The `/` menu caches translated labels in a memo; see its dependency list.
 	const lang = useLang();
 	const [items, setItems] = useState<readonly Item[]>([]);
+	/** Older items exist on disk: the transcript opened on its newest page. */
+	const [hasMore, setHasMore] = useState(false);
+	const [loadingMore, setLoadingMore] = useState(false);
+	/** Where the oldest rendered item sits in the whole transcript. */
+	const oldestRef = useRef(0);
 	const [tasks, setTasks] = useState<readonly TaskState[]>([]);
 	const [outputs, setOutputs] = useState<Readonly<Record<string, string>>>({});
 	const [permission, setPermission] = useState<PendingPermission | undefined>(undefined);
@@ -470,6 +492,32 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	};
 
 	/**
+	 * Re-reads history for the session on screen, without leaving it.
+	 *
+	 * Compaction is the case that needs it: `/compact` replaces the conversation
+	 * with a summary record in the jsonl, and nothing streams that record here —
+	 * before this, the new context only appeared after a reload or a switch.
+	 */
+	const reloadTranscriptRef = useRef<(reason: string) => void>(() => undefined);
+	reloadTranscriptRef.current = (reason: string) => {
+		const id = resumeIdRef.current;
+		if (!id) {
+			return;
+		}
+		getTranscript(id)
+			.then(page => {
+				if (resumeIdRef.current !== id) {
+					return;
+				}
+				setItems(toChatItems(page.items));
+				setHasMore(page.hasMore);
+				oldestRef.current = page.start ?? 0;
+				reportClientLog({ event: 'transcript-reload', session: id, items: page.items.length, reason });
+			})
+			.catch(error => setStatus(String(error)));
+	};
+
+	/**
 	 * Live events are held until the jsonl history has been applied, so the final
 	 * order is "everything up to this turn" + "this turn".
 	 *
@@ -504,13 +552,26 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		loadedIdRef.current = sessionId;
 		resetTranscript();
 		serverBusyRef.current = undefined;
+		// Read once per page load: coming back to a conversation that is already
+		// in the cache must not cost another full transcript round trip.
+		const cached = transcriptCache.get(sessionId);
+		if (cached) {
+			setItems(cached.items);
+			setHasMore(cached.hasMore);
+			oldestRef.current = cached.oldest;
+			setStatus(t('已载入 {id}', { id: sessionId.slice(0, 8) }));
+			return;
+		}
 		void pruneLiveTurns();
 		getTranscript(sessionId)
-			.then(async transcript => {
+			.then(async page => {
 				if (loadedIdRef.current !== sessionId) {
 					return;
 				}
+				const transcript = page.items;
 				setItems(toChatItems(transcript));
+				setHasMore(page.hasMore);
+				oldestRef.current = page.start ?? 0;
 				setStatus(t('已载入 {id}', { id: sessionId.slice(0, 8) }));
 				// Diagnostics: a transcript that renders empty is otherwise
 				// indistinguishable from one that arrived empty.
@@ -580,6 +641,41 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			});
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [sessionId, root]);
+
+	// Keep the page-level copy in step with what is on screen, so returning to a
+	// conversation shows exactly what was left behind instead of asking again.
+	useEffect(() => {
+		const id = resumeIdRef.current;
+		if (!id || items.length === 0) {
+			return;
+		}
+		transcriptCache.set(id, { items, hasMore, oldest: oldestRef.current });
+	}, [items, hasMore]);
+
+	/**
+	 * Pulls the page before the oldest message on screen.
+	 *
+	 * Only this and a page reload reach the server for history: the transcript
+	 * is read in slices because a long conversation is megabytes of jsonl.
+	 */
+	const loadEarlier = () => {
+		const id = resumeIdRef.current;
+		if (!id || loadingMore || !hasMore) {
+			return;
+		}
+		setLoadingMore(true);
+		getTranscript(id, { before: oldestRef.current })
+			.then(page => {
+				if (resumeIdRef.current !== id) {
+					return;
+				}
+				setItems(previous => [...toChatItems(page.items), ...previous]);
+				oldestRef.current = page.start ?? 0;
+				setHasMore(page.hasMore);
+			})
+			.catch(error => setStatus(String(error)))
+			.finally(() => setLoadingMore(false));
+	};
 
 	const sendRef = useRef<(command: AgentClientCommand) => void>(() => undefined);
 
@@ -670,6 +766,11 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				}
 				case 'status':
 					setStatus(t(STATUS_LABEL[event.status] ?? event.status));
+					if (event.status === 'compacted') {
+						// The summary is a jsonl record, not a stream event: re-read the
+						// history, after giving the CLI a moment to flush it.
+						window.setTimeout(() => reloadTranscriptRef.current('compacted'), 400);
+					}
 					return;
 				case 'thinking_tokens':
 					setThinkingTokens(event.estimated);
@@ -1086,6 +1187,12 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		send(target ? { type: 'promote', id, sessionId: target } : { type: 'promote', id });
 	};
 
+	/** Drops a queued message; the server answers with the surviving queue. */
+	const dropQueued = (id: string) => {
+		const target = stopTargetId();
+		send(target ? { type: 'dequeue', id, sessionId: target } : { type: 'dequeue', id });
+	};
+
 	const submit = () => submitText(draft.trim());
 
 	/**
@@ -1381,6 +1488,13 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				{items.length === 0 && (
 					<div className="chat-empty">{t('输入任务，交给 agent 执行（文件改动可在"代码"页查看）')}</div>
 				)}
+				{hasMore && (
+					<div className="chat-earlier">
+						<button type="button" className="chip" disabled={loadingMore} onClick={loadEarlier}>
+							{loadingMore ? t('加载中…') : t('加载更早的消息')}
+						</button>
+					</div>
+				)}
 				<OpenPathContext.Provider value={onOpenPath}>
 					{roots.map((item, index) => (
 						<ChatItemView
@@ -1389,6 +1503,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 							childrenOf={childrenOf}
 							outputOf={outputOf}
 							live={streaming && index === roots.length - 1}
+							onDismiss={id => setItems(previous => previous.filter(entry => entry.id !== id))}
 						/>
 					))}
 				</OpenPathContext.Provider>
@@ -1482,6 +1597,14 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 								onClick={() => promoteQueued(item.id)}
 							>
 								{t('立即发送')}
+							</button>
+							<button
+								type="button"
+								className="queue-drop"
+								title={t('从队列里去掉这条消息')}
+								onClick={() => dropQueued(item.id)}
+							>
+								{t('取消')}
 							</button>
 						</span>
 					))}
@@ -1656,12 +1779,14 @@ function hasMermaidDiagram(text: string): boolean {
 	return /^[ \t]*```+[ \t]*mermaid\b[\s\S]*?^[ \t]*```+[ \t]*$/im.test(text);
 }
 
-function ChatItemView({ item, childrenOf, outputOf, live = false }: {
+function ChatItemView({ item, childrenOf, outputOf, live = false, onDismiss }: {
 	readonly item: Item;
 	readonly childrenOf: (id: string) => readonly Item[];
 	readonly outputOf: (taskId: string) => string | undefined;
 	/** The bubble still receiving deltas; streamdown then repairs partial syntax. */
 	readonly live?: boolean;
+	/** Error bubbles are transient news, not history: they can be closed. */
+	readonly onDismiss?: (id: string) => void;
 }) {
 	switch (item.kind) {
 		case 'user':
@@ -1699,7 +1824,14 @@ function ChatItemView({ item, childrenOf, outputOf, live = false }: {
 				</div>
 			);
 		case 'error':
-			return <div className="msg error">{item.text}</div>;
+			return (
+				<div className="msg error">
+					<span className="msg-error-text">{item.text}</span>
+					{onDismiss && (
+						<button type="button" className="msg-dismiss" title={t('关闭这条提示')} onClick={() => onDismiss(item.id)}>×</button>
+					)}
+				</div>
+			);
 	}
 }
 

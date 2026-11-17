@@ -228,6 +228,12 @@ export type AgentClientCommand =
 	 */
 	| { readonly type: 'promote'; readonly id: string; readonly sessionId?: string }
 	/**
+	 * Drops a queued message nobody wants any more. Silent by design: the item
+	 * may already have started, and answering that with an error put a line on
+	 * screen that nothing could ever remove.
+	 */
+	| { readonly type: 'dequeue'; readonly id: string; readonly sessionId?: string }
+	/**
 	 * Graceful stop: asks the CLI to abort the current turn, keeps the process alive.
 	 * `sessionId` names the target when this socket is not the one that spawned it.
 	 */

@@ -4,7 +4,7 @@ import '@xterm/xterm/css/xterm.css';
 import { terminalUrl } from '../api';
 import { t } from '../i18n';
 import { getTheme, onThemeChange, type ThemeName } from '../theme';
-import { findPathTokens, resolveTerminalTarget, type TerminalTarget } from './terminalPaths';
+import { findPathTokens, findUrlTokens, resolveTerminalTarget, type TerminalTarget } from './terminalPaths';
 
 /**
  * One live terminal screen per terminal id, owned outside React.
@@ -67,9 +67,27 @@ const XTERM_THEMES: Record<ThemeName, {
 	},
 };
 
-/** Silent retries before asking the user; covers transient blips. */
+/** Silent retries before the overlay appears; covers transient blips. */
 const AUTO_RETRIES = 2;
 const RETRY_DELAY_MS = 1500;
+/**
+ * Retrying does not stop after a couple of failures: a laptop waking up, a
+ * proxy dropping an idle socket or a server restart all end the same way, and
+ * the shell is still running, so waiting for a manual click was the wrong
+ * default.
+ */
+const RETRY_MAX_DELAY_MS = 15_000;
+/**
+ * How long a failing connection keeps retrying before it stops and waits.
+ *
+ * A handshake the server refused (a stale token, a 502 from a proxy, a server
+ * that is off) looks exactly like an outage from here — `WebSocket` reports
+ * neither status nor reason — so without a limit every terminal would knock
+ * every 15 seconds for as long as the page stayed open. Five minutes covers a
+ * restart or a wake-up; after that the overlay is the honest answer, and one
+ * click retries.
+ */
+const RETRY_GIVE_UP_MS = 5 * 60_000;
 
 /** Detached screens kept warm; the least recently used one goes first. */
 const MAX_IDLE_SESSIONS = 8;
@@ -104,7 +122,35 @@ class LiveScreen implements TerminalSession {
 	private readonly _onTheme: () => void;
 	private _socket: WebSocket | undefined;
 	private _retryTimer: number | undefined;
-	private _retriesLeft = AUTO_RETRIES;
+	/** Consecutive failed connects since the last successful open. */
+	private _attempts = 0;
+	/** When the current run of failures began; `undefined` while connected. */
+	private _failingSince: number | undefined;
+	/**
+	 * A retry is owed but the page is in a background tab.
+	 *
+	 * Timer throttling already slows those down; not scheduling at all is
+	 * better, and showing the tab again retries at once instead of after
+	 * whatever the throttled timer had left.
+	 */
+	private _pendingRetry = false;
+	/** Woken by `visibilitychange`; see `_scheduleRetry`. */
+	private readonly _onVisibility = () => {
+		if (this._disposed || document.visibilityState !== 'visible' || !this._pendingRetry) {
+			return;
+		}
+		this._pendingRetry = false;
+		// Time spent hidden is not time spent failing.
+		this._failingSince = undefined;
+		if (!this._socket) {
+			this._connect();
+		}
+	};
+	/**
+	 * The server refused this terminal (it is gone, not just unreachable), so
+	 * reconnecting would loop forever: wait for the user instead.
+	 */
+	private _fatal = false;
 	private _state: TerminalState = 'connecting';
 	/** `xterm.open` needs a laid-out parent, so it waits for the first attach. */
 	private _opened = false;
@@ -166,6 +212,7 @@ class LiveScreen implements TerminalSession {
 		this._onTheme = onThemeChange(theme => {
 			this._term.options.theme = XTERM_THEMES[theme];
 		});
+		document.addEventListener('visibilitychange', this._onVisibility);
 		this._connect();
 	}
 
@@ -210,6 +257,11 @@ class LiveScreen implements TerminalSession {
 		if (this._host.parentElement === slot) {
 			slot.removeChild(this._host);
 		}
+		// Pruning is bounded by what is detached, so doing it here keeps a long
+		// session from holding every screen it ever opened: it used to run only
+		// when another terminal was created, i.e. never once the user stopped
+		// adding terminals.
+		pruneIdleScreens();
 	}
 
 	/**
@@ -246,7 +298,10 @@ class LiveScreen implements TerminalSession {
 			window.clearTimeout(this._retryTimer);
 			this._retryTimer = undefined;
 		}
-		this._retriesLeft = AUTO_RETRIES;
+		this._attempts = 0;
+		this._failingSince = undefined;
+		this._pendingRetry = false;
+		this._fatal = false;
 		this._connect();
 	}
 
@@ -263,38 +318,55 @@ class LiveScreen implements TerminalSession {
 	 * on click, in the workspace.
 	 */
 	private _linksAt(bufferLineNumber: number): ILink[] | undefined {
-		// The live directory wins over the project root; without either there is
-		// nothing to resolve a relative path against.
-		const base = this._cwd || this._openRoot;
-		if (!this._openTarget || !base) {
-			return undefined;
-		}
 		const line = this._term.buffer.active.getLine(bufferLineNumber - 1);
 		if (!line) {
 			return undefined;
 		}
 		const text = line.translateToString(true);
-		const tokens = findPathTokens(text);
-		if (tokens.length === 0) {
-			return undefined;
+		const links: ILink[] = [];
+		// A URL needs no base and no code pane: it opens in the browser.
+		for (const url of findUrlTokens(text)) {
+			links.push({
+				range: {
+					start: { x: url.start + 1, y: bufferLineNumber },
+					end: { x: url.end, y: bufferLineNumber },
+				},
+				text: url.text,
+				activate: (event: MouseEvent) => {
+					if (!event.ctrlKey && !event.metaKey) {
+						return;
+					}
+					window.open(url.text, '_blank', 'noopener,noreferrer');
+				},
+			});
 		}
-		return tokens.map(token => ({
-			range: {
-				start: { x: token.start + 1, y: bufferLineNumber },
-				end: { x: token.end, y: bufferLineNumber },
-			},
-			text: token.text,
-			activate: (event: MouseEvent) => {
-				// Same rule as VS Code: hover shows the target, ctrl+click opens it.
-				if (!event.ctrlKey && !event.metaKey) {
-					return;
-				}
-				// `base` is the directory the row was painted under, which is the one
-				// the line was printed in. Resolving at click time instead would use
-				// wherever the shell is *now* — wrong for anything above the prompt.
-				this._openTarget?.(resolveTerminalTarget(token, base));
-			},
-		}));
+		// The live directory wins over the project root; without either there is
+		// nothing to resolve a relative path against.
+		const base = this._cwd || this._openRoot;
+		const openTarget = this._openTarget;
+		if (openTarget && base) {
+			for (const token of findPathTokens(text)) {
+				links.push({
+					range: {
+						start: { x: token.start + 1, y: bufferLineNumber },
+						end: { x: token.end, y: bufferLineNumber },
+					},
+					text: token.text,
+					activate: (event: MouseEvent) => {
+						// Same rule as VS Code: hover shows the target, ctrl+click opens it.
+						if (!event.ctrlKey && !event.metaKey) {
+							return;
+						}
+						// `base` is the directory the row was painted under, which is the
+						// one the line was printed in. Resolving at click time instead
+						// would use wherever the shell is *now* — wrong for anything
+						// above the prompt.
+						openTarget(resolveTerminalTarget(token, base));
+					},
+				});
+			}
+		}
+		return links.length > 0 ? links : undefined;
 	}
 
 	/**
@@ -368,6 +440,7 @@ class LiveScreen implements TerminalSession {
 			this._retryTimer = undefined;
 		}
 		this._onTheme();
+		document.removeEventListener('visibilitychange', this._onVisibility);
 		this._socket?.close();
 		this._socket = undefined;
 		this._host.remove();
@@ -387,7 +460,10 @@ class LiveScreen implements TerminalSession {
 				return;
 			}
 			this._setState('open');
-			this._retriesLeft = AUTO_RETRIES;
+			this._attempts = 0;
+			this._failingSince = undefined;
+			this._pendingRetry = false;
+			this._fatal = false;
 			// A new socket may land on a respawned PTY, so its size is unknown.
 			this._sentCols = 0;
 			this._sentRows = 0;
@@ -405,19 +481,60 @@ class LiveScreen implements TerminalSession {
 			if (this._disposed) {
 				return;
 			}
-			this._setState('closed');
-			this._term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
-			if (this._retriesLeft > 0) {
-				this._retriesLeft -= 1;
-				this._retryTimer = window.setTimeout(() => {
-					this._retryTimer = undefined;
-					this._connect();
-				}, RETRY_DELAY_MS);
+			const wasOpen = this._state === 'open';
+			if (this._fatal) {
+				this._setState('closed');
+				return;
 			}
+			this._attempts += 1;
+			if (this._failingSince === undefined) {
+				this._failingSince = Date.now();
+			}
+			// The overlay after a couple of silent fails, so a real outage is
+			// visible; the retries keep going underneath either way.
+			if (this._attempts > AUTO_RETRIES) {
+				this._setState('closed');
+			}
+			if (wasOpen) {
+				this._term.write('\r\n\x1b[90m[connection closed]\x1b[0m\r\n');
+			}
+			// A blip is worth riding out silently; five minutes of it is not, and
+			// retrying forever would keep knocking on a server that refuses us
+			// (bad token, dead port) for as long as the tab is open.
+			if (Date.now() - this._failingSince > RETRY_GIVE_UP_MS) {
+				this._setState('closed');
+				this._pendingRetry = false;
+				this._term.write(`\r\n\x1b[90m${t('[已停止自动重连，点「重新连接」再试]')}\x1b[0m\r\n`);
+				return;
+			}
+			const delay = Math.min(RETRY_DELAY_MS * 2 ** Math.max(0, this._attempts - 1), RETRY_MAX_DELAY_MS);
+			this._scheduleRetry(delay);
 		});
 		socket.addEventListener('error', () => {
 			// `close` always follows and owns the retry decision.
 		});
+	}
+
+	/**
+	 * Queues the next attempt, or leaves it owed until the tab is visible.
+	 *
+	 * Every screen retries on its own schedule, so a background tab with a dead
+	 * server would otherwise keep a handful of timers knocking for nothing —
+	 * and browsers throttle those timers anyway, which made the wait
+	 * unpredictable. Coming back to the tab retries immediately instead.
+	 */
+	private _scheduleRetry(delay: number): void {
+		if (this._disposed) {
+			return;
+		}
+		if (document.visibilityState === 'hidden') {
+			this._pendingRetry = true;
+			return;
+		}
+		this._retryTimer = window.setTimeout(() => {
+			this._retryTimer = undefined;
+			this._connect();
+		}, delay);
 	}
 
 	private _onMessage(event: MessageEvent): void {
@@ -450,6 +567,9 @@ class LiveScreen implements TerminalSession {
 		} else if (message.type === 'cwd' && typeof message.cwd === 'string' && message.cwd !== '') {
 			this._cwd = message.cwd;
 		} else if (message.type === 'error') {
+			// The server only sends this when the terminal cannot be served at
+			// all: retrying the same id would never succeed.
+			this._fatal = true;
 			this._term.write(`\r\n\x1b[31m${message.message ?? 'terminal error'}\x1b[0m\r\n`);
 		} else if (message.type === 'exit') {
 			this._term.write(`\r\n\x1b[90m[process exited: ${message.code ?? '?'}]\x1b[0m\r\n`);

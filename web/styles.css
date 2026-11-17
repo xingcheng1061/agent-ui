@@ -950,18 +950,25 @@ button {
 }
 
 /* A conversation can be answering in a tab nobody is looking at; the rail says so
-   instead of pretending it is idle. Busy pulses, a quiet process stays a dot. */
+   instead of pretending it is idle. Only a running turn gets a dot: a process
+   that is merely alive used to leave a dot behind for an hour, which read as
+   "unread" no matter how often the conversation had been opened. */
 .session-run {
 	flex: none;
 	width: 6px;
 	height: 6px;
 	border-radius: 50%;
-	background: var(--fg-dim);
-}
-
-.session-run.busy {
 	background: var(--accent);
 	animation: agent-pulse 1.2s ease-in-out infinite;
+}
+
+/* Something happened in here since it was last open. */
+.session-unread {
+	flex: none;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--accent);
 }
 
 /* A conversation blocked on an approval. Shown even when the approval was
@@ -1068,6 +1075,94 @@ button {
 	background: var(--bg);
 	border-color: var(--border);
 	color: var(--fg);
+}
+
+/* Target group for the conversation being created, chosen before it exists.
+   A field of its own rather than a bare <select>: the native control ignored
+   the dialog's padding, clipped long group names and dropped its menu over the
+   list with the OS's own styling. */
+.modal-group {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 10px 12px 0;
+}
+
+.modal-group-label {
+	flex: none;
+	font-size: 11.5px;
+	color: var(--fg-dim);
+}
+
+.modal-group-pick {
+	position: relative;
+	flex: 1;
+	min-width: 0;
+	max-width: 260px;
+}
+
+.group-pick {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	padding: 4px 8px;
+	background: var(--bg);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	color: var(--fg-dim);
+	font: inherit;
+	font-size: 12px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.group-pick:hover {
+	border-color: var(--border-strong);
+}
+
+/* Filed somewhere: the value is real content, not a placeholder. */
+.group-pick.set {
+	color: var(--fg);
+}
+
+.group-pick.open {
+	border-color: var(--accent);
+}
+
+.group-pick > svg {
+	flex: none;
+	opacity: 0.7;
+}
+
+.group-pick-name {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.group-pick-caret {
+	flex: none;
+	font-size: 9px;
+	color: var(--fg-dim);
+}
+
+/* Reuses the rail's menu rows; anchored to the field instead of a session row. */
+.group-pick-menu {
+	position: absolute;
+	top: calc(100% + 4px);
+	left: 0;
+	right: 0;
+	z-index: 30;
+	max-height: 220px;
+	overflow: auto;
+	padding: 4px;
+	background: var(--bg-elevated);
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	box-shadow: 0 6px 18px rgb(0 0 0 / 40%);
 }
 
 /* Filter box over the existing-project list. */
@@ -1298,6 +1393,12 @@ button {
 	background: var(--bg-hover);
 }
 
+/* The chosen one in a row of mutually exclusive chips. */
+.chip.active {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+
 .chip:disabled {
 	opacity: 0.45;
 	cursor: default;
@@ -1330,6 +1431,13 @@ button {
 	font-size: 12px;
 	padding: 8px;
 	line-height: 1.7;
+}
+
+/* The transcript opens on its newest page; older pages are one click away. */
+.chat-earlier {
+	display: flex;
+	justify-content: center;
+	padding: 4px 0 2px;
 }
 
 .msg {
@@ -1455,9 +1563,35 @@ button {
 }
 
 .msg.error {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
 	background: var(--danger-bg);
 	color: var(--danger);
 	font-size: 12px;
+}
+
+.msg-error-text {
+	flex: 1;
+	min-width: 0;
+}
+
+/* An error is news about one moment; nothing else can clear it from the
+   transcript, so the bubble carries its own way out. */
+.msg-dismiss {
+	flex: none;
+	padding: 0 2px;
+	border: none;
+	background: transparent;
+	color: inherit;
+	font-size: 13px;
+	line-height: 1.2;
+	opacity: 0.7;
+	cursor: pointer;
+}
+
+.msg-dismiss:hover {
+	opacity: 1;
 }
 
 .msg.result {
@@ -1733,6 +1867,15 @@ button {
 	font-size: 11px;
 	color: var(--fg-dim);
 	border-bottom: 1px solid var(--border);
+}
+
+/* "This project / else in the repo": a nested checkout no longer inherits the
+   whole repository's change list. */
+.change-scope {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	padding: 6px 8px 2px;
 }
 
 .change-count {
@@ -3315,6 +3458,24 @@ button {
 	color: var(--warn);
 }
 
+/* "Cancel": the queue is the user's own list, so dropping an entry is noise. */
+.queue-drop {
+	flex: none;
+	padding: 0 4px;
+	border: 1px solid transparent;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--warn-dim);
+	font-size: 10px;
+	line-height: 15px;
+	cursor: pointer;
+}
+
+.queue-drop:hover {
+	border-color: var(--danger-border);
+	color: var(--danger);
+}
+
 /* ---------- auth page ---------- */
 
 .auth-page {
@@ -3375,8 +3536,11 @@ button {
 	color: var(--danger-text);
 }
 
+/* `primary` alone paints nothing: every other primary button pulls its fill
+   from a scoped rule, so this one has to name the colour itself. */
 .auth-submit {
 	height: 32px;
+	background: var(--primary);
 	border: none;
 	border-radius: 4px;
 	color: #fff;
@@ -3384,8 +3548,14 @@ button {
 	cursor: pointer;
 }
 
+.auth-submit:hover:not(:disabled) {
+	background: var(--primary-hover);
+}
+
+/* Dimmed rather than re-coloured: the button has to keep looking like the
+   thing you are meant to press, not like a grey slab. */
 .auth-submit:disabled {
-	opacity: 0.5;
+	opacity: 0.55;
 	cursor: default;
 }
 

@@ -159,6 +159,8 @@ export type AgentClientCommand =
 	}
 	/** "Send now" for a queued message: steer it into the running turn. */
 	| { readonly type: 'promote'; readonly id: string; readonly sessionId?: string }
+	/** Drops a queued message; a no-op when it already started. */
+	| { readonly type: 'dequeue'; readonly id: string; readonly sessionId?: string }
 	| { readonly type: 'interrupt'; readonly sessionId?: string }
 	| { readonly type: 'kill'; readonly sessionId?: string }
 	| {

@@ -37,6 +37,21 @@ const SNAPSHOT_LIMIT = 8_000;
 const REAP_DELAY_MS = 60 * 60 * 1000;
 
 /**
+ * How often an open terminal socket is probed.
+ *
+ * An idle socket carries no bytes, and everything between the browser and this
+ * process — a proxy, a NAT table, a sleeping laptop — drops connections that
+ * stay quiet for a minute or two. A ping every 30s keeps the path awake and,
+ * when the peer really is gone, turns a silent hang into a reconnect.
+ */
+const TERMINAL_KEEP_ALIVE_MS = 30 * 1000;
+
+/** A socket carrying the liveness flag of the keep-alive loop. */
+interface TrackedSocket extends WebSocket {
+	_terminalAlive?: boolean;
+}
+
+/**
  * How much output survives a server restart.
  *
  * The shell itself cannot survive one — the PTY dies with the process — so the
@@ -489,6 +504,13 @@ export async function attachTerminal(id: string, socket: WebSocket): Promise<boo
 	if (!entry) {
 		return false;
 	}
+	// The caller awaits a store read before getting here, so a client that
+	// reconnected and dropped again can already be closed. Registering it would
+	// add a socket whose `close` has fired before the listener existed: it would
+	// sit in `sockets` forever and keep the PTY from ever being reaped.
+	if (socket.readyState !== WebSocket.OPEN) {
+		return false;
+	}
 	if (entry.reapTimer) {
 		clearTimeout(entry.reapTimer);
 		entry.reapTimer = undefined;
@@ -543,7 +565,42 @@ export async function disposeAllTerminals(): Promise<void> {
 
 export function createTerminalServer(): WebSocketServer {
 	const server = new WebSocketServer({ noServer: true });
+
+	// Same probe as the agent socket: silence used to mean a dead link that only
+	// surfaced when the user typed into it.
+	const keepAlive = setInterval(() => {
+		for (const client of server.clients) {
+			const tracked = client as TrackedSocket;
+			const alive = tracked._terminalAlive !== false;
+			tracked._terminalAlive = false;
+			if (alive) {
+				client.ping();
+			} else {
+				client.terminate();
+			}
+		}
+		// A socket that died between accept and attach never reaches the close
+		// listener `attachTerminal` registers, so nothing else would notice it:
+		// the entry would keep a phantom viewer, never arm a reap, and hold its
+		// shell open for the life of the server. Sweeping here also covers the
+		// quiet terminal that produces no output for `broadcast` to prune on.
+		for (const entry of live.values()) {
+			for (const socket of entry.sockets) {
+				if (socket.readyState !== WebSocket.OPEN) {
+					entry.sockets.delete(socket);
+				}
+			}
+			if (entry.sockets.size === 0 && !entry.reapTimer) {
+				armReap(entry);
+			}
+		}
+	}, TERMINAL_KEEP_ALIVE_MS);
+	keepAlive.unref();
+
 	server.on('connection', (socket, req) => {
+		const tracked = socket as TrackedSocket;
+		tracked._terminalAlive = true;
+		tracked.on('pong', () => { tracked._terminalAlive = true; });
 		const url = requestUrl(req.url, req.headers.host);
 		const id = url.searchParams.get('id') ?? '';
 		void (async () => {

@@ -646,7 +646,21 @@ class AgentConnection {
 				this._announceBusy(target);
 				target.session.sendUserMessage(item.text);
 				return;
-			}
+				}
+				case 'dequeue': {
+				// Cancelling is a request to make the item go away, not a request for
+				// news about it: an id that already started is simply nothing to do.
+				const target = this._entry ?? (typeof command.sessionId === 'string' ? this._findLive(command.sessionId) : undefined);
+				const index = target?.queued.findIndex(item => item.id === command.id) ?? -1;
+				if (!target || index < 0) {
+					return;
+				}
+				const [removed] = target.queued.splice(index, 1);
+				this._sendQueue(target);
+				this._persistQueue(target);
+				this._log(`dequeued ${removed.id.slice(0, 8)}`);
+				return;
+				}
 			case 'interrupt': {
 				// Graceful: the CLI aborts the turn but keeps the session (and its
 				// conversation state) alive, so the next message just continues.

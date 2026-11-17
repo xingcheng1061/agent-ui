@@ -19,6 +19,16 @@ export interface PathToken {
 	readonly column?: number;
 }
 
+/** A URL printed on screen, clickable in the browser. */
+export interface UrlToken {
+	/** The URL as printed, without trailing prose punctuation. */
+	readonly text: string;
+	/** 0-based column of the first character in the line. */
+	readonly start: number;
+	/** 0-based column just past the last character. */
+	readonly end: number;
+}
+
 /** A path resolved to an absolute location, ready for the code pane. */
 export interface TerminalTarget {
 	/** Absolute path, using the separator style it was printed with. */
@@ -38,6 +48,9 @@ export interface TerminalTarget {
  * also keeps `(see foo.ts)` and `"foo.ts"` down to the path itself.
  */
 const TOKEN = /[^\s"'`<>()[\]{}|]+/g;
+
+/** `http://…` / `https://…` printed by a dev server, a test log or a build. */
+const URL_TOKEN = /\bhttps?:\/\/[^\s"'`<>()[\]{}|]+/gi;
 
 const DRIVE = /^[A-Za-z]:/;
 
@@ -105,6 +118,27 @@ export function findPathTokens(line: string): PathToken[] {
 			continue;
 		}
 		tokens.push({ text: trimmed, start, end: start + trimmed.length, line: lineNumber, column });
+	}
+	return tokens;
+}
+
+/**
+ * Every URL on one rendered line.
+ *
+ * Kept apart from `findPathTokens`, which skips anything containing `://`: a
+ * URL is never a file, and a path is never something the browser can open.
+ */
+export function findUrlTokens(line: string): UrlToken[] {
+	const tokens: UrlToken[] = [];
+	for (const match of line.matchAll(URL_TOKEN)) {
+		// `https://example.com.` — the sentence's full stop is not the host's.
+		const trimmed = match[0].replace(TRAILING_PUNCTUATION, '');
+		// A scheme with no host is not worth a link.
+		if (trimmed.replace(/^https?:\/\//i, '').length === 0) {
+			continue;
+		}
+		const start = match.index ?? 0;
+		tokens.push({ text: trimmed, start, end: start + trimmed.length });
 	}
 	return tokens;
 }

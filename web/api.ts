@@ -217,9 +217,28 @@ export async function writeGroupFile(groupId: string, name: GroupFileName, conte
 	});
 }
 
-export async function getTranscript(sessionId: string): Promise<readonly TranscriptItem[]> {
-	const result = await requestJson<{ items: TranscriptItem[] }>(`/api/sessions/${encodeURIComponent(sessionId)}`);
-	return result.items;
+/** One page of a conversation; `hasMore` means older items are still on disk. */
+export interface TranscriptPage {
+	readonly items: readonly TranscriptItem[];
+	readonly hasMore: boolean;
+	/** Index of `items[0]` in the whole transcript: what `before` wants next. */
+	readonly start?: number;
+}
+
+/**
+ * Reads a conversation.
+ *
+ * Without `before` this is the newest page — the only call a normal open makes.
+ * `before` is the index of the oldest item already on screen, which is how the
+ * "load more" button walks backwards.
+ */
+export async function getTranscript(
+	sessionId: string,
+	options: { readonly before?: number } = {},
+): Promise<TranscriptPage> {
+	const query = options.before === undefined ? '' : `?before=${options.before}`;
+	const result = await requestJson<TranscriptPage>(`/api/sessions/${encodeURIComponent(sessionId)}${query}`);
+	return { items: result.items, hasMore: result.hasMore === true, start: result.start };
 }
 
 /** An empty title restores the generated one. */
@@ -468,6 +487,8 @@ export interface GitFileEntry {
 	readonly status: string;
 	readonly insertions: number;
 	readonly deletions: number;
+	/** `above` = elsewhere in the same repository, outside this project. */
+	readonly scope?: 'root' | 'above';
 }
 
 export interface GitStatus {

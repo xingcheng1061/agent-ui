@@ -36,6 +36,14 @@ export interface GitFileEntry {
 	readonly status: string;
 	readonly insertions: number;
 	readonly deletions: number;
+	/**
+	 * `root` for a file inside the conversation's own directory, `above` for one
+	 * elsewhere in the same repository.
+	 *
+	 * A project nested in a monorepo used to list every unrelated change in the
+	 * repository; the picker can now separate the two.
+	 */
+	readonly scope: 'root' | 'above';
 }
 
 export interface GitStatusResult {
@@ -127,6 +135,7 @@ export async function gitStatus(root: string): Promise<GitStatusResult> {
 	// when the project is a subdirectory of the repository. `gitFileVersions`
 	// accepts both conventions, so the click that follows still resolves.
 	const prefix = toPosix(path.relative(base, root));
+	const inside = (filePath: string) => prefix === '' || filePath.startsWith(`${prefix}/`);
 	const forDisplay = (filePath: string) => prefix && filePath.startsWith(`${prefix}/`)
 		? filePath.slice(prefix.length + 1)
 		: filePath;
@@ -137,6 +146,7 @@ export async function gitStatus(root: string): Promise<GitStatusResult> {
 			status: row.status,
 			insertions: row.insertions,
 			deletions: row.deletions,
+			scope: inside(row.filePath) ? 'root' : 'above',
 		});
 	}
 

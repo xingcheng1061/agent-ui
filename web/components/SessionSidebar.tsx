@@ -4,6 +4,43 @@ import { t, useLang } from '../i18n';
 import { ALL, ProjectFilter } from './ProjectFilter';
 import { projectLabels } from '../projectNames';
 
+/**
+ * When each conversation was last opened, so the rail can stop marking it.
+ *
+ * Kept in this browser on purpose: "read" is a property of the reader, not of
+ * the transcript, and the server holds no per-user state to hang it on. The
+ * `undefined` state means "never recorded" — the first run adopts whatever is
+ * already listed instead of labelling every existing conversation as new.
+ */
+const SEEN_KEY = 'agentui.seen';
+
+function readSeen(): Record<string, number> | undefined {
+	try {
+		const raw = localStorage.getItem(SEEN_KEY);
+		if (!raw) {
+			return undefined;
+		}
+		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		const seen: Record<string, number> = {};
+		for (const [id, value] of Object.entries(parsed)) {
+			if (typeof value === 'number') {
+				seen[id] = value;
+			}
+		}
+		return seen;
+	} catch {
+		return undefined;
+	}
+}
+
+function writeSeen(seen: Record<string, number>): void {
+	try {
+		localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+	} catch {
+		// Storage blocked or full: an extra dot is not worth failing a render.
+	}
+}
+
 interface SessionSidebarProps {
 	readonly projects: readonly ProjectInfo[];
 	readonly sessions: readonly SessionEntry[];
@@ -76,6 +113,7 @@ export function SessionSidebar({
 	 */
 	const [showArchived, setShowArchived] = useState(false);
 	const [renamingId, setRenamingId] = useState<string | undefined>(undefined);
+	const [seen, setSeen] = useState<Record<string, number> | undefined>(readSeen);
 	const [draftTitle, setDraftTitle] = useState('');
 	const editorRef = useRef<HTMLInputElement | null>(null);
 	// The pending edit, readable from the listeners below without re-binding
@@ -103,6 +141,31 @@ export function SessionSidebar({
 	const [renamingGroupId, setRenamingGroupId] = useState<string | undefined>(undefined);
 	const [groupDraft, setGroupDraft] = useState('');
 	const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(() => new Set());
+
+	/**
+	 * Records the open conversation as read, and keeps it read while it grows.
+	 *
+	 * The first run adopts the list as the baseline: dots that were there on
+	 * every row of a fresh browser would mean nothing.
+	 */
+	useEffect(() => {
+		if (seen === undefined) {
+			const baseline: Record<string, number> = {};
+			for (const session of sessions) {
+				baseline[session.id] = session.updatedAt;
+			}
+			setSeen(baseline);
+			writeSeen(baseline);
+			return;
+		}
+		const current = activeSessionId ? sessions.find(session => session.id === activeSessionId) : undefined;
+		if (!current || (seen[current.id] ?? 0) >= current.updatedAt) {
+			return;
+		}
+		const next = { ...seen, [current.id]: current.updatedAt };
+		setSeen(next);
+		writeSeen(next);
+	}, [activeSessionId, sessions, seen]);
 
 	/**
 	 * A click anywhere else closes the menu.
@@ -536,6 +599,11 @@ export function SessionSidebar({
 							const live = running?.get(session.id);
 							const pendingTool = approvals?.get(session.id);
 							const renaming = renamingId === session.id;
+							// Unseen activity, not "a process exists": the two used to share
+							// one dot, so a conversation that was read still looked new until
+							// its shell was reaped an hour later.
+							const unread = session.id !== activeSessionId
+								&& session.updatedAt > (seen?.[session.id] ?? session.updatedAt);
 							return (
 								<div
 									key={session.id}
@@ -577,7 +645,9 @@ export function SessionSidebar({
 												title={`${session.title}\n${session.cwd}${pendingTool ? `\n${t('等待审批：{tool}', { tool: pendingTool })}` : ''}${live === true ? `\n${t('正在回答')}` : live === false ? `\n${t('进程在运行，空闲')}` : ''}`}
 											>
 												<span className="session-title">
-													{live !== undefined && <i className={`session-run${live ? ' busy' : ''}`} />}
+													{live === true
+														? <i className="session-run" />
+														: unread && <i className="session-unread" />}
 													<span className="session-text">{session.title}</span>
 													{pendingTool && <span className="session-badge">{t('待审批')}</span>}
 												</span>

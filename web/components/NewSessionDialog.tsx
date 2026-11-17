@@ -5,18 +5,27 @@ import {
 	findDirectories,
 	type BrowseResult,
 	type DirectoryHit,
+	type GroupInfo,
 	type ProjectInfo,
 } from '../api';
 import { t } from '../i18n';
 
 interface NewSessionDialogProps {
 	readonly projects: readonly ProjectInfo[];
+	readonly groups: readonly GroupInfo[];
 	readonly onClose: () => void;
-	readonly onCreate: (root: string) => Promise<void> | void;
+	/** `groupId` is applied once the conversation has an id of its own. */
+	readonly onCreate: (root: string, groupId?: string) => Promise<void> | void;
 }
 
-export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDialogProps) {
+export function NewSessionDialog({ projects, groups, onClose, onCreate }: NewSessionDialogProps) {
 	const [tab, setTab] = useState<'projects' | 'browse'>('projects');
+	// Chosen up front: a conversation can be filed while it is being created,
+	// instead of having to send a message first and move it afterwards.
+	const [groupId, setGroupId] = useState('');
+	const [groupOpen, setGroupOpen] = useState(false);
+	const groupPickerRef = useRef<HTMLDivElement | null>(null);
+	const selectedGroup = groups.find(group => group.id === groupId);
 	const [browse, setBrowse] = useState<BrowseResult | undefined>(undefined);
 	const [pathInput, setPathInput] = useState('');
 	const [projectQuery, setProjectQuery] = useState('');
@@ -50,6 +59,23 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 			go(undefined);
 		}
 	}, [tab, browse]);
+
+	// A click outside the picker folds it away. `mousedown` and not `click`, for
+	// the same reason as the rail's group menu: the click that closes would
+	// otherwise land on whatever is underneath the menu that just vanished.
+	useEffect(() => {
+		if (!groupOpen) {
+			return;
+		}
+		const onMouseDown = (event: MouseEvent) => {
+			if (event.target instanceof Node && groupPickerRef.current?.contains(event.target)) {
+				return;
+			}
+			setGroupOpen(false);
+		};
+		document.addEventListener('mousedown', onMouseDown, true);
+		return () => document.removeEventListener('mousedown', onMouseDown, true);
+	}, [groupOpen]);
 
 	// The walk runs only when submitted: typing is cheap, walking a big tree is
 	// not, so the box does not search on every keystroke.
@@ -94,7 +120,7 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 		setError(undefined);
 		try {
 			await addProject(root);
-			await onCreate(root);
+			await onCreate(root, groupId === '' ? undefined : groupId);
 		} catch (reason) {
 			setError(String(reason));
 			setBusy(false);
@@ -118,6 +144,69 @@ export function NewSessionDialog({ projects, onClose, onCreate }: NewSessionDial
 					<button type="button" className={`modal-tab${tab === 'projects' ? ' active' : ''}`} onClick={() => setTab('projects')}>{t('已有项目')}</button>
 					<button type="button" className={`modal-tab${tab === 'browse' ? ' active' : ''}`} onClick={() => setTab('browse')}>{t('选择目录')}</button>
 				</div>
+
+				{groups.length > 0 && (
+					<div className="modal-group">
+						<span className="modal-group-label">{t('会话组')}</span>
+						<div className="modal-group-pick" ref={groupPickerRef}>
+							<button
+								type="button"
+								className={`group-pick${selectedGroup ? ' set' : ''}${groupOpen ? ' open' : ''}`}
+								title={t('新会话直接归到这个组，不用先聊一句')}
+								aria-haspopup="listbox"
+								aria-expanded={groupOpen}
+								onClick={() => setGroupOpen(open => !open)}
+								onKeyDown={event => {
+									if (event.key === 'Escape' && groupOpen) {
+										// Escape would otherwise close the whole dialog.
+										event.stopPropagation();
+										setGroupOpen(false);
+									}
+								}}
+							>
+								<svg viewBox="0 0 14 14" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+									<path d="M1.5 2.5h11v3.5h-11z" />
+									<path d="M1.5 8h11v3.5h-11z" />
+								</svg>
+								<span className="group-pick-name">{selectedGroup?.name ?? t('不分组')}</span>
+								<span className="group-pick-caret">▾</span>
+							</button>
+							{groupOpen && (
+								<div className="group-pick-menu" role="listbox">
+									<button
+										type="button"
+										role="option"
+										aria-selected={groupId === ''}
+										className={`group-menu-item${groupId === '' ? ' active' : ''}`}
+										onClick={() => {
+											setGroupId('');
+											setGroupOpen(false);
+										}}
+									>
+										<span className="group-menu-label">{t('不分组')}</span>
+										{groupId === '' && <span className="group-menu-check">✓</span>}
+									</button>
+									{groups.map(group => (
+										<button
+											key={group.id}
+											type="button"
+											role="option"
+											aria-selected={groupId === group.id}
+											className={`group-menu-item${groupId === group.id ? ' active' : ''}`}
+											onClick={() => {
+												setGroupId(group.id);
+												setGroupOpen(false);
+											}}
+										>
+											<span className="group-menu-label">{group.name}</span>
+											{groupId === group.id && <span className="group-menu-check">✓</span>}
+										</button>
+									))}
+								</div>
+							)}
+						</div>
+					</div>
+				)}
 
 				{tab === 'projects' && (
 					<>

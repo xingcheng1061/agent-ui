@@ -33,7 +33,9 @@ export default defineConfig({
 			// module '/api.ts', so Vite proxied it to the server, which answered
 			// 404 — the app then failed to mount and the dev page went blank.
 			'^/api/': { target: SERVER_ORIGIN, changeOrigin: true },
-			'^/pty(\\?|/|$)': silenceProxyErrors({ target: SERVER_ORIGIN.replace(/^http/, 'ws'), ws: true }),
+			// The route is `/terminal` (see server/index.ts); the old `/pty` name
+			// left the terminal unproxied in dev, so it only worked in production.
+			'^/terminal(\\?|/|$)': silenceProxyErrors({ target: SERVER_ORIGIN.replace(/^http/, 'ws'), ws: true }),
 			'^/agent(\\?|/|$)': silenceProxyErrors({ target: SERVER_ORIGIN.replace(/^http/, 'ws'), ws: true }),
 		},
 	},
