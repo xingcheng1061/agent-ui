@@ -268,9 +268,23 @@ button {
 	background: var(--bg-elevated);
 }
 
+/* New conversation and open project: the same size, because they are two ways
+   into the same pane. Only one of them creates anything, so it stays primary. */
+.rail-actions {
+	display: flex;
+	gap: 6px;
+}
+
+.rail-actions > button {
+	flex: 1 1 0;
+	min-width: 0;
+}
+
 .rail-new {
 	background: var(--primary);
-	border: none;
+	/* A transparent border, so the secondary button's 1px outline does not make
+	   the two different heights. */
+	border: 1px solid transparent;
 	color: #fff;
 	border-radius: 4px;
 	padding: 6px 10px;
@@ -278,8 +292,121 @@ button {
 	cursor: pointer;
 }
 
-.rail-new:hover {
+.rail-new:hover:not(:disabled) {
 	background: var(--primary-hover);
+}
+
+/* Opening a folder creates nothing, so it is the quiet one of the two. */
+.rail-new.rail-open {
+	background: var(--bg);
+	border: 1px solid var(--border);
+	color: var(--fg-dim);
+}
+
+.rail-new.rail-open:hover:not(:disabled) {
+	background: var(--bg-hover);
+	border-color: var(--border-strong);
+	color: var(--fg);
+}
+
+/* Conversations / open projects: the rail shows one at a time. */
+.rail-tabs {
+	display: flex;
+	gap: 2px;
+	padding: 2px;
+	background: var(--surface-sunken);
+	border-radius: 4px;
+}
+
+.rail-tab {
+	flex: 1;
+	padding: 3px 6px;
+	background: transparent;
+	border: none;
+	border-radius: 3px;
+	color: var(--fg-dim);
+	font: inherit;
+	font-size: 11.5px;
+	cursor: pointer;
+}
+
+.rail-tab:hover {
+	color: var(--fg);
+}
+
+.rail-tab.active {
+	background: var(--bg);
+	color: var(--fg);
+	box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.rail-project {
+	display: flex;
+	align-items: center;
+	border-radius: 4px;
+}
+
+.rail-project:hover {
+	background: var(--bg-hover);
+}
+
+.rail-project.active {
+	background: var(--bg-hover);
+	box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.rail-project-main {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+	padding: 5px 8px;
+	background: none;
+	border: none;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.rail-project-name {
+	font-size: 12.5px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.rail-project-path {
+	font-size: 10.5px;
+	color: var(--fg-dim);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.rail-project-close {
+	flex: none;
+	width: 20px;
+	height: 20px;
+	margin-right: 4px;
+	background: none;
+	border: none;
+	border-radius: 3px;
+	color: var(--fg-dim);
+	font-size: 14px;
+	line-height: 1;
+	cursor: pointer;
+	opacity: 0;
+}
+
+.rail-project:hover .rail-project-close {
+	opacity: 1;
+}
+
+.rail-project-close:hover {
+	background: var(--bg-hover);
+	color: var(--fg);
 }
 
 /* Searchable project filter: a `<select>` cannot be typed into, and this rail

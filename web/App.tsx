@@ -39,6 +39,14 @@ interface ActiveView {
 	readonly sessionId?: string;
 	/** Backend for a new conversation; existing history comes from Claude's store. */
 	readonly agent?: string;
+	/**
+	 * Code only: the project is open without a conversation.
+	 *
+	 * Reading a repository does not need a transcript, and going through "new
+	 * conversation" just to see the files left an empty chat panel and a session
+	 * in the rail that nobody asked for.
+	 */
+	readonly browse?: boolean;
 }
 
 /**
@@ -64,10 +72,35 @@ function readActiveView(): ActiveView | undefined {
 			root: parsed.root,
 			sessionId: typeof parsed.sessionId === 'string' ? parsed.sessionId : undefined,
 			agent: typeof parsed.agent === 'string' ? parsed.agent : undefined,
+			browse: parsed.browse === true ? true : undefined,
 		};
 	} catch {
 		// Storage blocked: starting from the newest session is still fine.
 		return undefined;
+	}
+}
+
+/** Folders opened for reading, newest first; survives a reload. */
+const OPENED_KEY = 'agentui.opened';
+
+function readOpenedProjects(): readonly string[] {
+	try {
+		const raw = localStorage.getItem(OPENED_KEY);
+		if (!raw) {
+			return [];
+		}
+		const parsed: unknown = JSON.parse(raw);
+		return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+	} catch {
+		return [];
+	}
+}
+
+function writeOpenedProjects(projects: readonly string[]): void {
+	try {
+		localStorage.setItem(OPENED_KEY, JSON.stringify(projects));
+	} catch {
+		// Storage blocked: the list lives for this page only.
 	}
 }
 
@@ -87,6 +120,20 @@ export function App() {
 	const [error, setError] = useState<string | undefined>(undefined);
 	const [loaded, setLoaded] = useState(false);
 	const [dialogOpen, setDialogOpen] = useState(false);
+	/** The same dialog picks a folder either to start in or to read. */
+	const [dialogMode, setDialogMode] = useState<'create' | 'browse'>('create');
+	const [openedProjects, setOpenedProjects] = useState<readonly string[]>(readOpenedProjects);
+	useEffect(() => {
+		writeOpenedProjects(openedProjects);
+	}, [openedProjects]);
+	// A reload can land on a folder that was opened before the list was ever
+	// written (or after storage was cleared): adopt it instead of showing a
+	// project that the "项目" tab does not know about.
+	useEffect(() => {
+		if (active?.browse && !openedProjects.includes(active.root)) {
+			setOpenedProjects(current => [active.root, ...current]);
+		}
+	}, [active, openedProjects]);
 	const [passwordOpen, setPasswordOpen] = useState(false);
 	/**
 	 * One line of feedback for actions whose effect is not visible in the rail.
@@ -358,6 +405,57 @@ export function App() {
 	};
 
 	/**
+	 * Opens a project for reading only: code, git changes and a terminal, no
+	 * conversation.
+	 *
+	 * The folder still goes through the dialog's `addProject` — the file APIs
+	 * resolve paths against known project roots, so an unregistered directory
+	 * would render an empty pane.
+	 */
+	const showProject = (root: string) => {
+		setActive({ root, browse: true });
+		setViewToken(value => value + 1);
+	};
+
+	const openProject = async (root: string) => {
+		setOpenedProjects(current => [root, ...current.filter(item => item !== root)]);
+		showProject(root);
+		setDialogOpen(false);
+		await refresh();
+	};
+
+	/** Switches to a folder that is already open, without re-picking it. */
+	const activateProject = async (root: string) => {
+		setOpenedProjects(current => [root, ...current.filter(item => item !== root)]);
+		showProject(root);
+		await refresh();
+	};
+
+	/**
+	 * Drops a folder from the list. The files are untouched; if it was the one
+	 * on screen, the next open folder takes over.
+	 */
+	const closeProject = (root: string) => {
+		const remaining = openedProjects.filter(item => item !== root);
+		setOpenedProjects(remaining);
+		setActive(current => {
+			if (!current?.browse || current.root !== root) {
+				return current;
+			}
+			const next = remaining[0];
+			return next ? { root: next, browse: true } : undefined;
+		});
+		if (active?.browse && active.root === root) {
+			setViewToken(value => value + 1);
+		}
+	};
+
+	const openDialog = (mode: 'create' | 'browse') => {
+		setDialogMode(mode);
+		setDialogOpen(true);
+	};
+
+	/**
 	 * Group actions all rewrite `session-groups.json` and re-read the list.
 	 *
 	 * Where a row renders is decided by the session's own `groupId`, which comes
@@ -447,7 +545,11 @@ export function App() {
 	return (
 		<div className="app">
 			<header className="topbar">
-				<span className="topbar-title">{activeSession?.title ?? t('新会话')}</span>
+				<span className="topbar-title">
+					{active?.browse
+						? t('{project} · 仅浏览', { project: baseName(active.root) })
+						: activeSession?.title ?? t('新会话')}
+				</span>
 				<span className="project-chip" title={active?.root ?? ''}>{active ? baseName(active.root) : '—'}</span>
 				<span className="project-root">{active?.root ?? t('未选择项目')}</span>
 				<span className="account-chip" title={`${auth.username} · ${auth.role}`}>
@@ -503,7 +605,12 @@ export function App() {
 					groups={groups}
 					activeSessionId={active?.sessionId}
 					onSelectSession={selectSession}
-					onNewSession={() => setDialogOpen(true)}
+					onNewSession={() => openDialog('create')}
+					onOpenProject={() => openDialog('browse')}
+					openedProjects={openedProjects}
+					openRoot={active?.browse ? active.root : undefined}
+					onActivateProject={activateProject}
+					onCloseProject={closeProject}
 					onRenameSession={renameSessionEntry}
 					onArchiveSession={archiveSessionEntry}
 					onDeleteSession={deleteSessionEntry}
@@ -519,11 +626,16 @@ export function App() {
 				<Splitter axis="x" onResize={delta => setRailWidth(clamp(railWidth + delta, 160, 520))} />
 
 				<main
-					className={`main${active ? ' split' : ''}`}
-					style={active ? { gridTemplateColumns: `${chatWidth}px 5px 1fr` } : undefined}
+					className={`main${active && !active.browse ? ' split' : ''}`}
+					style={active && !active.browse ? { gridTemplateColumns: `${chatWidth}px 5px 1fr` } : undefined}
 				>
 					{!active && <div className="placeholder">{t('还没有任何项目会话')}</div>}
-					{active && (
+					{active?.browse && (
+						// Reading a repository: the code pane takes the whole width, no
+						// chat panel and no agent connection behind it.
+						<Workspace key={active.root} root={active.root} projects={projects} revision={revision} openRequest={openRequest} />
+					)}
+					{active && !active.browse && (
 						<>
 							<ChatPanel
 								key={`${active.root}:${active.agent ?? 'default'}:${viewToken}`}
@@ -572,8 +684,9 @@ export function App() {
 				<NewSessionDialog
 					projects={projects}
 					groups={groups}
+					mode={dialogMode}
 					onClose={() => setDialogOpen(false)}
-					onCreate={startSession}
+					onCreate={dialogMode === 'browse' ? openProject : startSession}
 				/>
 			)}
 			{passwordOpen && <PasswordDialog onClose={() => setPasswordOpen(false)} />}

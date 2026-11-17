@@ -13,12 +13,18 @@ import { t } from '../i18n';
 interface NewSessionDialogProps {
 	readonly projects: readonly ProjectInfo[];
 	readonly groups: readonly GroupInfo[];
+	/**
+	 * `browse` picks a folder to read instead of one to start in: no group, no
+	 * conversation, and the folder is the only thing being chosen.
+	 */
+	readonly mode?: 'create' | 'browse';
 	readonly onClose: () => void;
 	/** `groupId` is applied once the conversation has an id of its own. */
 	readonly onCreate: (root: string, groupId?: string) => Promise<void> | void;
 }
 
-export function NewSessionDialog({ projects, groups, onClose, onCreate }: NewSessionDialogProps) {
+export function NewSessionDialog({ projects, groups, mode = 'create', onClose, onCreate }: NewSessionDialogProps) {
+	const browsing = mode === 'browse';
 	const [tab, setTab] = useState<'projects' | 'browse'>('projects');
 	// Chosen up front: a conversation can be filed while it is being created,
 	// instead of having to send a message first and move it afterwards.
@@ -119,8 +125,10 @@ export function NewSessionDialog({ projects, groups, onClose, onCreate }: NewSes
 		setBusy(true);
 		setError(undefined);
 		try {
+			// Registering the folder is not optional: the file APIs resolve paths
+			// against known project roots, so browsing one would open empty.
 			await addProject(root);
-			await onCreate(root, groupId === '' ? undefined : groupId);
+			await onCreate(root, browsing || groupId === '' ? undefined : groupId);
 		} catch (reason) {
 			setError(String(reason));
 			setBusy(false);
@@ -136,7 +144,7 @@ export function NewSessionDialog({ projects, groups, onClose, onCreate }: NewSes
 		<div className="modal-backdrop" onClick={onClose}>
 			<div className="modal" onClick={event => event.stopPropagation()}>
 				<div className="modal-header">
-					<span>{t('新建会话')}</span>
+					<span>{browsing ? t('打开项目') : t('新建会话')}</span>
 					<button type="button" className="modal-close" onClick={onClose}>×</button>
 				</div>
 
@@ -145,7 +153,7 @@ export function NewSessionDialog({ projects, groups, onClose, onCreate }: NewSes
 					<button type="button" className={`modal-tab${tab === 'browse' ? ' active' : ''}`} onClick={() => setTab('browse')}>{t('选择目录')}</button>
 				</div>
 
-				{groups.length > 0 && (
+				{!browsing && groups.length > 0 && (
 					<div className="modal-group">
 						<span className="modal-group-label">{t('会话组')}</span>
 						<div className="modal-group-pick" ref={groupPickerRef}>
@@ -330,7 +338,7 @@ export function NewSessionDialog({ projects, groups, onClose, onCreate }: NewSes
 								disabled={!browse || busy}
 								onClick={() => { if (browse) { void create(browse.path); } }}
 							>
-								{t('在此目录新建会话')}
+								{browsing ? t('打开这个目录') : t('在此目录新建会话')}
 							</button>
 						</div>
 					</div>

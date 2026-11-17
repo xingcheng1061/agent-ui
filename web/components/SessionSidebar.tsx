@@ -49,6 +49,20 @@ interface SessionSidebarProps {
 	readonly activeSessionId: string | undefined;
 	readonly onSelectSession: (session: SessionEntry) => void;
 	readonly onNewSession: () => void;
+	/** Picks a folder to open for reading, without starting a conversation. */
+	readonly onOpenProject: () => void;
+	/**
+	 * Folders opened this way, newest first, remembered across reloads.
+	 *
+	 * Kept separate from the sessions: a conversation list answers "what was I
+	 * doing", this answers "what is open right now", and the two do not have to
+	 * agree.
+	 */
+	readonly openedProjects: readonly string[];
+	/** The root being read right now, if any: highlights its row. */
+	readonly openRoot: string | undefined;
+	readonly onActivateProject: (root: string) => void;
+	readonly onCloseProject: (root: string) => void;
 	/** Empty title restores the generated one; the rail never sends that. */
 	readonly onRenameSession: (session: SessionEntry, title: string) => void;
 	readonly onArchiveSession: (session: SessionEntry, archived: boolean) => void;
@@ -92,6 +106,11 @@ export function SessionSidebar({
 	activeSessionId,
 	onSelectSession,
 	onNewSession,
+	onOpenProject,
+	openedProjects,
+	openRoot,
+	onActivateProject,
+	onCloseProject,
 	onRenameSession,
 	onArchiveSession,
 	onDeleteSession,
@@ -112,6 +131,13 @@ export function SessionSidebar({
 	 * excursion into the filesystem.
 	 */
 	const [showArchived, setShowArchived] = useState(false);
+	/**
+	 * What the rail lists: conversations, or the folders that are open.
+	 *
+	 * One list used to do both, so looking at a repository meant opening (or
+	 * creating) a conversation in it first.
+	 */
+	const [view, setView] = useState<'sessions' | 'projects'>('sessions');
 	const [renamingId, setRenamingId] = useState<string | undefined>(undefined);
 	const [seen, setSeen] = useState<Record<string, number> | undefined>(readSeen);
 	const [draftTitle, setDraftTitle] = useState('');
@@ -456,53 +482,89 @@ export function SessionSidebar({
 	return (
 		<div className="session-rail">
 			<div className="rail-toolbar">
-				<button type="button" className="rail-new" onClick={onNewSession}>
-					{t('＋ 新建会话')}
-				</button>
-				<ProjectFilter
-					projects={projects}
-					labels={labels}
-					value={filter}
-					onChange={setFilter}
-					sessionTotal={sessions.length}
-				/>
-				<div className="rail-search">
-					<input
-						ref={searchRef}
-						value={query}
-						placeholder={t('搜索会话或组（Ctrl+F）')}
-						aria-label={t('搜索会话或组')}
-						onChange={event => setQuery(event.target.value)}
-						onKeyDown={event => {
-							if (event.key === 'Escape') {
-								event.preventDefault();
-								setQuery('');
-								event.currentTarget.blur();
-							}
-						}}
-					/>
-					{query !== '' && (
-						<button
-							type="button"
-							className="rail-search-clear"
-							title={t('清除搜索')}
-							onClick={() => {
-								setQuery('');
-								searchRef.current?.focus();
-							}}
-						>
-							×
-						</button>
-					)}
+				<div className="rail-actions">
+					<button type="button" className="rail-new" onClick={onNewSession}>
+						{t('＋ 新建会话')}
+					</button>
+					<button
+						type="button"
+						className="rail-new rail-open"
+						title={t('只看代码，不新建会话')}
+						onClick={onOpenProject}
+					>
+						{t('打开项目')}
+					</button>
 				</div>
-				<label className="rail-check" title={t('归档的会话仍保留记录，只是默认不在这里列出')}>
-					<input
-						type="checkbox"
-						checked={showArchived}
-						onChange={event => setShowArchived(event.target.checked)}
+				<div className="rail-tabs" role="tablist">
+					<button
+						type="button"
+						role="tab"
+						aria-selected={view === 'sessions'}
+						className={`rail-tab${view === 'sessions' ? ' active' : ''}`}
+						onClick={() => setView('sessions')}
+					>
+						{t('会话')}
+					</button>
+					<button
+						type="button"
+						role="tab"
+						aria-selected={view === 'projects'}
+						className={`rail-tab${view === 'projects' ? ' active' : ''}`}
+						onClick={() => setView('projects')}
+					>
+						{t('项目')}{openedProjects.length > 0 ? `（${openedProjects.length}）` : ''}
+					</button>
+				</div>
+				{view === 'sessions' && (
+					<ProjectFilter
+						projects={projects}
+						labels={labels}
+						value={filter}
+						onChange={setFilter}
+						sessionTotal={sessions.length}
 					/>
-					{t('显示已归档')}{archivedTotal > 0 ? `（${archivedTotal}）` : ''}
-				</label>
+				)}
+				{view === 'sessions' && (
+					<>
+						<div className="rail-search">
+							<input
+								ref={searchRef}
+								value={query}
+								placeholder={t('搜索会话或组（Ctrl+F）')}
+								aria-label={t('搜索会话或组')}
+								onChange={event => setQuery(event.target.value)}
+								onKeyDown={event => {
+									if (event.key === 'Escape') {
+										event.preventDefault();
+										setQuery('');
+										event.currentTarget.blur();
+									}
+								}}
+							/>
+							{query !== '' && (
+								<button
+									type="button"
+									className="rail-search-clear"
+									title={t('清除搜索')}
+									onClick={() => {
+										setQuery('');
+										searchRef.current?.focus();
+									}}
+								>
+									×
+								</button>
+							)}
+						</div>
+						<label className="rail-check" title={t('归档的会话仍保留记录，只是默认不在这里列出')}>
+							<input
+								type="checkbox"
+								checked={showArchived}
+								onChange={event => setShowArchived(event.target.checked)}
+							/>
+							{t('显示已归档')}{archivedTotal > 0 ? `（${archivedTotal}）` : ''}
+						</label>
+					</>
+				)}
 			</div>
 
 			{/*
@@ -510,6 +572,7 @@ export function SessionSidebar({
 			 * row — clicks landed on the toolbar instead of the conversation —
 			 * so the toolbar and the scroll area are siblings now.
 			 */}
+			{view === 'sessions' ? (
 			<div className="rail-list">
 				{/*
 				 * Groups are the one cross-project thing in the rail, and the only
@@ -780,6 +843,29 @@ export function SessionSidebar({
 					);
 				})}
 			</div>
+			) : (
+				<div className="rail-list">
+					{openedProjects.length === 0 && (
+						<div className="rail-empty">{t('还没有打开的项目，点上面的「打开项目」选一个目录')}</div>
+					)}
+					{openedProjects.map(root => (
+						<div key={root} className={`rail-project${root === openRoot ? ' active' : ''}`} title={root}>
+							<button type="button" className="rail-project-main" onClick={() => onActivateProject(root)}>
+								<span className="rail-project-name">{root.split(/[\\/]/).filter(Boolean).pop() ?? root}</span>
+								<span className="rail-project-path">{root}</span>
+							</button>
+							<button
+								type="button"
+								className="rail-project-close"
+								title={t('从列表移除（磁盘上的文件不受影响）')}
+								onClick={() => onCloseProject(root)}
+							>
+								×
+							</button>
+						</div>
+					))}
+				</div>
+			)}
 		</div>
 	);
 }
