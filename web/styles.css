@@ -694,7 +694,11 @@ button {
 .groups-head {
 	display: flex;
 	align-items: center;
+	/* Four controls in a narrow rail: wrap rather than squeeze the title to
+	   nothing or push the last one out of the padding box. */
+	flex-wrap: wrap;
 	gap: 8px;
+	row-gap: 6px;
 	padding: 10px 8px 4px;
 }
 
@@ -731,6 +735,24 @@ button {
 .rail-grouping-item.active {
 	background: var(--bg);
 	color: var(--fg);
+}
+
+/* Order of the project blocks; only present while grouping by project. */
+.rail-sort {
+	flex: none;
+	padding: 1px 6px;
+	background: none;
+	border: 1px solid var(--border);
+	border-radius: 4px;
+	color: var(--fg-dim);
+	font: inherit;
+	font-size: 10.5px;
+	cursor: pointer;
+}
+
+.rail-sort:hover {
+	border-color: var(--accent);
+	color: var(--accent);
 }
 
 /* A folded project reads like a folded group: same caret, same indentation. */

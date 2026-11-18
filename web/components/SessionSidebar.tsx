@@ -67,6 +67,32 @@ function writeGrouping(value: Grouping): void {
 	}
 }
 
+/**
+ * How project blocks are ordered: by their newest conversation, or by name.
+ *
+ * Time is the default because "what did I touch last" is the question a rail
+ * answers most often; name is for people who navigate by remembering where the
+ * project is rather than when it was used.
+ */
+type ProjectSort = 'time' | 'name';
+const PROJECT_SORT_KEY = 'agentui.railProjectSort';
+
+function readProjectSort(): ProjectSort {
+	try {
+		return localStorage.getItem(PROJECT_SORT_KEY) === 'name' ? 'name' : 'time';
+	} catch {
+		return 'time';
+	}
+}
+
+function writeProjectSort(value: ProjectSort): void {
+	try {
+		localStorage.setItem(PROJECT_SORT_KEY, value);
+	} catch {
+		// Same as above: the rail still works, it just forgets.
+	}
+}
+
 interface SessionSidebarProps {
 	readonly projects: readonly ProjectInfo[];
 	readonly sessions: readonly SessionEntry[];
@@ -207,6 +233,8 @@ export function SessionSidebar({
 	const [foldedBlocks, setFoldedBlocks] = useState<ReadonlySet<string> | undefined>(undefined);
 	/** Projects by default; the choice survives a reload. */
 	const [grouping, setGrouping] = useState<Grouping>(readGrouping);
+	/** Order of the project blocks, independent of how sessions are grouped. */
+	const [projectSort, setProjectSort] = useState<ProjectSort>(readProjectSort);
 
 	/**
 	 * Records the open conversation as read, and keeps it read while it grows.
@@ -425,7 +453,7 @@ export function SessionSidebar({
 	const ungrouped = activeSessions.filter(session =>
 		(session.groupId === undefined || !groupIds.has(session.groupId)) && matchesSession(session));
 	const restBuckets = grouping === 'project'
-		? projectBuckets(ungrouped, projectName, projectById)
+		? projectBuckets(ungrouped, projectName, projectById, projectSort)
 		: bucketize(ungrouped);
 
 	// Archived conversations keep the group they were archived with: a group is
@@ -723,7 +751,7 @@ export function SessionSidebar({
 						<button
 							type="button"
 							className={`rail-grouping-item${grouping === 'project' ? ' active' : ''}`}
-							title={t('按工作目录分组，项目按最近活动排序')}
+							title={t('按工作目录分组')}
 							onClick={() => {
 								setGrouping('project');
 								writeGrouping('project');
@@ -743,6 +771,24 @@ export function SessionSidebar({
 							{t('按时间')}
 						</button>
 					</div>
+					{/* Only project blocks have an order of their own: the date
+					    buckets are already chronological by definition. */}
+					{grouping === 'project' && (
+						<button
+							type="button"
+							className="rail-sort"
+							title={projectSort === 'time'
+								? t('项目按最近活动排序，点击改为按名称')
+								: t('项目按名称排序，点击改为按最近活动')}
+							onClick={() => {
+								const next: ProjectSort = projectSort === 'time' ? 'name' : 'time';
+								setProjectSort(next);
+								writeProjectSort(next);
+							}}
+						>
+							{projectSort === 'time' ? t('时间') : t('名称')}
+						</button>
+					)}
 					<button
 						type="button"
 						className="groups-new"
@@ -1114,6 +1160,7 @@ function projectBuckets(
 	sessions: readonly SessionEntry[],
 	nameOf: (projectId: string) => string,
 	projectById: ReadonlyMap<string, ProjectInfo>,
+	sort: ProjectSort,
 ): readonly Bucket[] {
 	const byProject = new Map<string, SessionEntry[]>();
 	for (const session of sessions) {
@@ -1124,16 +1171,20 @@ function projectBuckets(
 			byProject.set(session.projectId, [session]);
 		}
 	}
-	return [...byProject.entries()]
-		.map(([projectId, members]): Bucket => {
-			const sorted = [...members].sort((left, right) => right.updatedAt - left.updatedAt);
-			return {
-				label: nameOf(projectId),
-				project: { id: projectId, label: nameOf(projectId), hint: projectById.get(projectId)?.cwd },
-				sessions: sorted,
-			};
-		})
-		.sort((left, right) => (right.sessions[0]?.updatedAt ?? 0) - (left.sessions[0]?.updatedAt ?? 0));
+	const blocks = [...byProject.entries()].map(([projectId, members]): Bucket => {
+		const sorted = [...members].sort((left, right) => right.updatedAt - left.updatedAt);
+		return {
+			label: nameOf(projectId),
+			project: { id: projectId, label: nameOf(projectId), hint: projectById.get(projectId)?.cwd },
+			sessions: sorted,
+		};
+	});
+	// Sessions inside a block always stay newest-first; this only orders the
+	// blocks. Numeric collation keeps `work2` before `work10`, and `base`
+	// ignores case, which is how a file manager sorts names too.
+	return sort === 'name'
+		? blocks.sort((left, right) => left.label.localeCompare(right.label, undefined, { numeric: true, sensitivity: 'base' }))
+		: blocks.sort((left, right) => (right.sessions[0]?.updatedAt ?? 0) - (left.sessions[0]?.updatedAt ?? 0));
 }
 
 function bucketize(sessions: readonly SessionEntry[]): readonly Bucket[] {
