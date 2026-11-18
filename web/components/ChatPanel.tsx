@@ -429,6 +429,8 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	 * print them twice.
 	 */
 	const queueShownRef = useRef<string[]>([]);
+	/** Entries cancelled here, so the next snapshot does not print them as sent. */
+	const droppedQueuedRef = useRef<Set<string>>(new Set());
 
 	/** Takes one matching entry off the "already on screen" list. */
 	const consumeQueueShown = (text: string): boolean => {
@@ -498,10 +500,15 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	 * with a summary record in the jsonl, and nothing streams that record here —
 	 * before this, the new context only appeared after a reload or a switch.
 	 */
-	const reloadTranscriptRef = useRef<(reason: string) => void>(() => undefined);
-	reloadTranscriptRef.current = (reason: string) => {
+	const reloadTranscriptRef = useRef<(reason: string, silent?: boolean) => void>(() => undefined);
+	reloadTranscriptRef.current = (reason: string, silent = false) => {
 		const id = resumeIdRef.current;
 		if (!id) {
+			return;
+		}
+		// A turn that is being answered writes to `items` through live events;
+		// replacing the list under them would drop whatever arrived mid-flight.
+		if (streamingRef.current) {
 			return;
 		}
 		getTranscript(id)
@@ -509,12 +516,22 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				if (resumeIdRef.current !== id) {
 					return;
 				}
+				// Deltas started arriving while the page was in flight: they are
+				// newer than the jsonl, and replacing the list under them would cut
+				// the message that is being written. Live events win.
+				if (streamingRef.current) {
+					return;
+				}
 				setItems(toChatItems(page.items));
 				setHasMore(page.hasMore);
 				oldestRef.current = page.start ?? 0;
 				reportClientLog({ event: 'transcript-reload', session: id, items: page.items.length, reason });
 			})
-			.catch(error => setStatus(String(error)));
+			.catch(error => {
+				if (!silent) {
+					setStatus(String(error));
+				}
+			});
 	};
 
 	/**
@@ -552,14 +569,23 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		loadedIdRef.current = sessionId;
 		resetTranscript();
 		serverBusyRef.current = undefined;
-		// Read once per page load: coming back to a conversation that is already
-		// in the cache must not cost another full transcript round trip.
+		// The ref still mirrors the conversation that was on screen a moment ago;
+		// until the next render it would read as "this one is answering" and make
+		// the cache refresh below skip itself.
+		streamingRef.current = false;
+		// The cache is painted at once, then checked against the jsonl: a turn
+		// that finished while another conversation was on screen reached this
+		// page through no channel at all — the pooled socket idles out when it is
+		// not watched, and the server keeps no replay buffer — so trusting the
+		// snapshot made a finished turn look like a conversation that died.
 		const cached = transcriptCache.get(sessionId);
 		if (cached) {
 			setItems(cached.items);
 			setHasMore(cached.hasMore);
 			oldestRef.current = cached.oldest;
 			setStatus(t('已载入 {id}', { id: sessionId.slice(0, 8) }));
+			void pruneLiveTurns();
+			reloadTranscriptRef.current('cache-refresh', true);
 			return;
 		}
 		void pruneLiveTurns();
@@ -757,6 +783,11 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					// transcript would read as if the agent answered nothing.
 					const waiting = event.items.map(item => item.text);
 					for (const item of previous) {
+						// Cancelled here: it left the queue on purpose, so it is not a
+						// message that started running.
+						if (droppedQueuedRef.current.delete(item.id)) {
+							continue;
+						}
 						if (waiting.includes(item.text) || consumeQueueShown(item.text)) {
 							continue;
 						}
@@ -925,6 +956,10 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					closeStream();
 					setStreaming(false);
 					setThinkingTokens(0);
+					// The turn is over: whatever approval was on screen belongs to it
+					// and can never be answered now.
+					setPermission(undefined);
+					clearAttention();
 					// An interrupt also ends the turn with a result, but with
 					// `error_during_execution`; that is a user action, not a failure.
 					const interrupted = event.subtype === 'error_during_execution';
@@ -951,7 +986,10 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					return;
 				}
 				case 'permission_cancelled':
-					setPermission(undefined);
+					// A cancel can name one request; any other card must stay.
+					setPermission(current => (event.requestId === undefined || current?.requestId === event.requestId
+						? undefined
+						: current));
 					setStatus(t('已取消审批'));
 					clearAttention();
 					return;
@@ -1189,6 +1227,15 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 
 	/** Drops a queued message; the server answers with the surviving queue. */
 	const dropQueued = (id: string) => {
+		// Removed here first. The server is deliberately silent when the id is
+		// already gone (its turn started), and a click that leaves the row on
+		// screen reads as a broken button rather than as "too late".
+		const remaining = queuedRef.current.filter(item => item.id !== id);
+		queuedRef.current = remaining;
+		setQueued(remaining);
+		// The next snapshot no longer has this id, and the queue handler would
+		// otherwise treat that as "its turn started" and print it as a message.
+		droppedQueuedRef.current.add(id);
 		const target = stopTargetId();
 		send(target ? { type: 'dequeue', id, sessionId: target } : { type: 'dequeue', id });
 	};
@@ -1589,7 +1636,10 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					{queued.map((item, index) => (
 						<span key={item.id} className="queue-item" title={item.text}>
 							<span className="queue-index">{index + 1}</span>
-							{truncateLine(item.text, 90)}
+							{/* The text is its own shrinking box: as a bare child of the
+							    row it pushed the two buttons out of the clipped width,
+							    so a long queued message looked like it had no cancel. */}
+							<span className="queue-text">{truncateLine(item.text, 90)}</span>
 							<button
 								type="button"
 								className="queue-now"

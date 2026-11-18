@@ -137,7 +137,11 @@ export type AgentServerPayload =
 		readonly numTurns?: number;
 		readonly sessionId?: string;
 	}
-	| { readonly type: 'permission_cancelled' }
+	/**
+	 * The pending approval is gone without an answer: timeout, interrupt, or the
+	 * process exited. `requestId` narrows it to one card.
+	 */
+	| { readonly type: 'permission_cancelled'; readonly requestId?: string }
 	| { readonly type: 'error'; readonly message: string }
 	| { readonly type: 'exit'; readonly code: number | null; readonly stderr?: string };
 

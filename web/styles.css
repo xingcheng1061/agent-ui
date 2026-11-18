@@ -3525,11 +3525,12 @@ button {
 	flex: none;
 	display: flex;
 	align-items: center;
+	/* Wrap instead of scrolling the buttons out of reach on a narrow pane. */
+	flex-wrap: wrap;
 	gap: 8px;
 	padding: 5px 16px;
 	background: var(--warn-bg-strong);
 	border-top: 1px solid var(--warn-border);
-	overflow-x: auto;
 }
 
 .queue-title {
@@ -3551,6 +3552,12 @@ button {
 	font-size: 11px;
 	color: var(--warn-text);
 	white-space: nowrap;
+}
+
+/* The message shortens; the buttons next to it never do. */
+.queue-text {
+	flex: 0 1 auto;
+	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 }

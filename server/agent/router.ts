@@ -568,9 +568,10 @@ class AgentConnection {
 					// Buffering is disabled: the browser pool keeps its socket, so a
 					// panel that comes back already has the events it needs.
 					// this._replayTail(entry, lastSeq);
-					if (entry.queued.length > 0) {
-						this._sendQueue(entry);
-					}
+					// Always, including the empty list: a client that shows a queue
+					// entry the server no longer has cannot cancel it, and cancelling
+					// a phantom looks exactly like "cancel does not work".
+					this._sendQueue(entry);
 					return;
 				}
 				this._send({ type: 'session_state', live: false, sessionId: requested });
@@ -607,9 +608,10 @@ class AgentConnection {
 				// release the blocked MCP call, abort the stale turn, then send.
 				if (entry.session.hasPendingPermission()) {
 					this._log('new message while an approval was pending: dropping the approval');
+					// The session announces the cancellation itself, so every tab
+					// showing the card drops it — not just the one that sent this.
 					entry.session.cancelPendingPermissions('用户直接发送了新消息，已取消这次审批。');
 					entry.session.interrupt();
-					this._send({ type: 'permission_cancelled' });
 				} else if (entry.busy && !immediate) {
 					// Default: wait for this turn to end. Writing it into stdin now would
 					// make the CLI absorb it into the current turn, where it never becomes
@@ -646,8 +648,8 @@ class AgentConnection {
 				this._announceBusy(target);
 				target.session.sendUserMessage(item.text);
 				return;
-				}
-				case 'dequeue': {
+			}
+			case 'dequeue': {
 				// Cancelling is a request to make the item go away, not a request for
 				// news about it: an id that already started is simply nothing to do.
 				const target = this._entry ?? (typeof command.sessionId === 'string' ? this._findLive(command.sessionId) : undefined);
@@ -660,7 +662,7 @@ class AgentConnection {
 				this._persistQueue(target);
 				this._log(`dequeued ${removed.id.slice(0, 8)}`);
 				return;
-				}
+			}
 			case 'interrupt': {
 				// Graceful: the CLI aborts the turn but keeps the session (and its
 				// conversation state) alive, so the next message just continues.

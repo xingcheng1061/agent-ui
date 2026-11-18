@@ -210,6 +210,9 @@ export class ClaudeCliSession implements AgentSession {
 
 		this._child.on('close', code => {
 			this._log(`exit code=${code} stderr=${this._stderrLines.slice(-4).join(' | ') || '(none)'}`);
+			// A process that is gone cannot be waiting for an answer, and keeping
+			// the entry would replay the card to every client that attaches.
+			this.cancelPendingPermissions('agent 进程已退出。');
 			this._emit({ type: 'exit', code, stderr: this._stderrLines.slice(-8).join('\n') || undefined });
 		});
 
@@ -235,6 +238,8 @@ export class ClaudeCliSession implements AgentSession {
 		if (this._disposed) {
 			return;
 		}
+		// An aborted turn will not read the answer, so the question goes with it.
+		this.cancelPendingPermissions('本轮已中断，这次审批作废。');
 		const requestId = `ctrl_${++this._controlSeq}`;
 		const timer = setTimeout(() => {
 			this._pendingControl.delete(requestId);
@@ -342,8 +347,12 @@ export class ClaudeCliSession implements AgentSession {
 			return;
 		}
 		this._log(`cancel ${this._pendingPermissions.size} pending approval(s)`);
-		for (const pending of [...this._pendingPermissions.values()]) {
+		for (const [requestId, pending] of [...this._pendingPermissions]) {
 			pending.settle({ behavior: 'deny', message: reason });
+			// The browser is showing a card for this request. Saying so is what
+			// takes it off screen; leaving the card up made it look like the agent
+			// was still waiting for an answer that no longer existed.
+			this._emit({ type: 'permission_cancelled', requestId });
 		}
 		this._pendingPermissions.clear();
 	}
@@ -366,6 +375,10 @@ export class ClaudeCliSession implements AgentSession {
 			const timer = setTimeout(() => {
 				this._pendingPermissions.delete(requestId);
 				this._log('permission timeout -> deny');
+				// Same reason as in `cancelPendingPermissions`: the card has to go.
+				// Without this the page kept showing an approval that could never be
+				// answered, and a reload brought it back while the entry lived on.
+				this._emit({ type: 'permission_cancelled', requestId });
 				resolve({ behavior: 'deny', message: '审批超时。' });
 			}, PERMISSION_TIMEOUT_MS);
 			timer.unref?.();

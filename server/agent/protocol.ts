@@ -180,7 +180,12 @@ export type AgentServerPayload =
 		readonly sessionId?: string;
 	}
 	/** A pending approval was dropped (e.g. the user sent a new message instead). */
-	| { readonly type: 'permission_cancelled' }
+	/**
+	 * The pending approval is gone without the user answering: it timed out, the
+	 * turn was interrupted, or the process exited. `requestId` is set when only
+	 * one request is affected.
+	 */
+	| { readonly type: 'permission_cancelled'; readonly requestId?: string }
 	| { readonly type: 'error'; readonly message: string }
 	| { readonly type: 'exit'; readonly code: number | null; readonly stderr?: string };
 
