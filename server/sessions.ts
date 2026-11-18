@@ -299,10 +299,12 @@ export async function listAllSessions(options: { readonly includeArchived?: bool
 	const config = await readAgentUiConfig();
 	const shown = entries.filter(entry => !underAnyRoot(entry.cwd, config.hide));
 	// A session under an `autoArchive` root is archived without writing meta, so
-	// removing the rule brings it straight back.
+	// removing the rule brings it straight back. A whole-group archive counts the
+	// same way: the group carries the flag, the members only follow it.
 	const archived = (entry: { readonly id: string; readonly projectId: string; readonly cwd: string }): boolean =>
 		meta[metaKey(entry.projectId, entry.id)]?.archivedAt !== undefined
-		|| underAnyRoot(entry.cwd, config.autoArchive);
+		|| underAnyRoot(entry.cwd, config.autoArchive)
+		|| groupForSession(entry.id)?.archivedAt !== undefined;
 
 	shown.sort((a, b) => b.updatedAt - a.updatedAt);
 	const visible = options.includeArchived === true

@@ -47,6 +47,7 @@ import {
 	preloadGroups,
 	readGroupFile,
 	renameGroup,
+	setGroupArchived,
 	setMembership,
 	writeGroupFile,
 } from './groups.js';
@@ -385,11 +386,17 @@ app.post('/api/groups', async (req, res) => {
 });
 
 app.patch('/api/groups/:id', async (req, res) => {
-	const body = req.body as { name?: unknown } | undefined;
-	if (typeof body?.name !== 'string' || body.name.trim() === '') {
-		throw new BadRequestError('`name` is required.');
-	}
+	const body = req.body as { name?: unknown; archived?: unknown } | undefined;
 	requireGroup(req.params.id);
+	// Archiving is whole-group: the members follow the flag, so restoring the
+	// group restores exactly the conversations it took away.
+	if (typeof body?.archived === 'boolean') {
+		res.json({ group: await setGroupArchived(req.params.id, body.archived) });
+		return;
+	}
+	if (typeof body?.name !== 'string' || body.name.trim() === '') {
+		throw new BadRequestError('`name` or `archived` is required.');
+	}
 	res.json({ group: await renameGroup(req.params.id, body.name) });
 });
 

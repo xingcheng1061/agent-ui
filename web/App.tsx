@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+	archiveGroup,
 	archiveSession,
 	createGroup,
 	deleteGroup,
@@ -506,6 +507,13 @@ export function App() {
 			.catch(reason => window.alert(t('重命名会话组失败：{error}', { error: String(reason) })));
 	};
 
+	/** Whole-group archive: the server flags the group, the members follow. */
+	const archiveGroupEntry = (group: GroupInfo, archived: boolean) => {
+		void archiveGroup(group.id, archived)
+			.then(() => refresh())
+			.catch(reason => window.alert(t('归档会话组失败：{error}', { error: String(reason) })));
+	};
+
 	const deleteGroupEntry = (group: GroupInfo) => {
 		const confirmed = window.confirm(t(
 			'删除会话组「{name}」？\n\n组里的会话和记录都保留，只是不再归组；共享的记忆与进度文件会一并删除。',
@@ -617,6 +625,7 @@ export function App() {
 					onAssignGroup={assignGroup}
 					onCreateGroup={createGroupWith}
 					onRenameGroup={renameGroupEntry}
+					onArchiveGroup={archiveGroupEntry}
 					onDeleteGroup={deleteGroupEntry}
 					onOpenGroupFiles={setGroupFiles}
 					onRestartSession={restartSessionEntry}

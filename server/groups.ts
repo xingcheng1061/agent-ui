@@ -25,6 +25,14 @@ export interface GroupInfo {
 	readonly createdAt: number;
 	/** CLI session ids. A session belongs to at most one group. */
 	readonly members: readonly string[];
+	/**
+	 * The whole group is archived.
+	 *
+	 * Kept on the group rather than written into every member's meta: a group is
+	 * archived and restored as one thing, and a member that was archived on its
+	 * own before must stay archived when the group comes back.
+	 */
+	readonly archivedAt?: number;
 }
 
 /** The writable shape `JsonStore.update` hands to its mutator. */
@@ -33,6 +41,7 @@ interface DraftGroup {
 	name: string;
 	createdAt: number;
 	members: string[];
+	archivedAt?: number;
 }
 
 interface GroupsDocument {
@@ -119,6 +128,29 @@ export async function renameGroup(id: string, name: string): Promise<GroupInfo |
 		}
 	});
 	return renamed;
+}
+
+/**
+ * Archives or restores every conversation in the group at once.
+ *
+ * `undefined` on restore, so a member's own archive state (or an `autoArchive`
+ * rule) decides again afterwards.
+ */
+export async function setGroupArchived(id: string, archived: boolean): Promise<GroupInfo | undefined> {
+	let updated: GroupInfo | undefined;
+	await store.update(draft => {
+		const group = draft.groups.find(candidate => candidate.id === id);
+		if (!group) {
+			return;
+		}
+		if (archived) {
+			group.archivedAt = Date.now();
+		} else {
+			delete group.archivedAt;
+		}
+		updated = { ...group, members: [...group.members] };
+	});
+	return updated;
 }
 
 /** Removes the group and its shared files; conversations are untouched. */

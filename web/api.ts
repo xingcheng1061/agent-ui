@@ -32,6 +32,8 @@ export interface GroupInfo {
 	readonly createdAt: number;
 	/** CLI session ids, exclusive: one group per conversation. */
 	readonly members: readonly string[];
+	/** The whole group is archived; its members are hidden with it. */
+	readonly archivedAt?: number;
 }
 
 /** The two files a group shares; the name doubles as the API path segment. */
@@ -151,6 +153,15 @@ export async function renameGroup(groupId: string, name: string): Promise<GroupI
 	const result = await requestJson<{ group: GroupInfo }>(`/api/groups/${encodeURIComponent(groupId)}`, {
 		method: 'PATCH',
 		body: JSON.stringify({ name }),
+	});
+	return result.group;
+}
+
+/** Archives or restores the whole group; its conversations follow the flag. */
+export async function archiveGroup(groupId: string, archived: boolean): Promise<GroupInfo> {
+	const result = await requestJson<{ group: GroupInfo }>(`/api/groups/${encodeURIComponent(groupId)}`, {
+		method: 'PATCH',
+		body: JSON.stringify({ archived }),
 	});
 	return result.group;
 }

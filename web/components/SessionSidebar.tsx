@@ -41,6 +41,32 @@ function writeSeen(seen: Record<string, number>): void {
 	}
 }
 
+/**
+ * How conversations that are not in a manual group are filed.
+ *
+ * `project` by default: a conversation belongs to the folder it runs in, and
+ * that is the axis a person remembers. `time` is the old day-bucketed list,
+ * kept for when "what was I doing yesterday" is the question.
+ */
+type Grouping = 'project' | 'time';
+const GROUPING_KEY = 'agentui.railGrouping';
+
+function readGrouping(): Grouping {
+	try {
+		return localStorage.getItem(GROUPING_KEY) === 'time' ? 'time' : 'project';
+	} catch {
+		return 'project';
+	}
+}
+
+function writeGrouping(value: Grouping): void {
+	try {
+		localStorage.setItem(GROUPING_KEY, value);
+	} catch {
+		// The rail still works; it just forgets the choice.
+	}
+}
+
 interface SessionSidebarProps {
 	readonly projects: readonly ProjectInfo[];
 	readonly sessions: readonly SessionEntry[];
@@ -71,6 +97,8 @@ interface SessionSidebarProps {
 	readonly onAssignGroup: (session: SessionEntry, groupId: string | undefined) => void;
 	readonly onCreateGroup: (name: string, session?: SessionEntry) => void;
 	readonly onRenameGroup: (group: GroupInfo, name: string) => void;
+	/** Whole-group archive and restore; the members follow the group's flag. */
+	readonly onArchiveGroup: (group: GroupInfo, archived: boolean) => void;
 	readonly onDeleteGroup: (group: GroupInfo) => void;
 	/** Opens the shared `memory.md` / `progress.md` editor for a group. */
 	readonly onOpenGroupFiles: (group: GroupInfo) => void;
@@ -117,6 +145,7 @@ export function SessionSidebar({
 	onAssignGroup,
 	onCreateGroup,
 	onRenameGroup,
+	onArchiveGroup,
 	onDeleteGroup,
 	onOpenGroupFiles,
 	onRestartSession,
@@ -168,7 +197,16 @@ export function SessionSidebar({
 	const [projectQuery, setProjectQuery] = useState('');
 	const [renamingGroupId, setRenamingGroupId] = useState<string | undefined>(undefined);
 	const [groupDraft, setGroupDraft] = useState('');
-	const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(() => new Set());
+	/**
+	 * Blocks the user folded, or `undefined` while the defaults apply.
+	 *
+	 * The default is "folded unless a conversation inside is running": a reload
+	 * should show the shape of the rail, not last time's set of open folders.
+	 * Once a block is clicked the choice lasts for this page.
+	 */
+	const [foldedBlocks, setFoldedBlocks] = useState<ReadonlySet<string> | undefined>(undefined);
+	/** Projects by default; the choice survives a reload. */
+	const [grouping, setGrouping] = useState<Grouping>(readGrouping);
 
 	/**
 	 * Records the open conversation as read, and keeps it read while it grows.
@@ -346,41 +384,107 @@ export function SessionSidebar({
 	};
 
 	/**
-	 * Groups first, then everything that is not in one, by date.
+	 * Manual groups first, then everything that is not in one — by project, or
+	 * by date.
 	 *
-	 * A grouped conversation appears *only* under its group. Listing it under
-	 * "today" as well would make the rail read as if it held twice the
-	 * conversations it does.
+	 * A grouped conversation appears *only* under its group. Blocks are ordered
+	 * by their newest conversation: a group created in March is not "above" a
+	 * project touched a minute ago just because its id came first.
 	 */
 	const groupIds = new Set(groups.map(group => group.id));
-	const groupBuckets: Bucket[] = groups.flatMap<Bucket>(group => {
-		const members = activeSessions
-			.filter(session => session.groupId === group.id)
+	const membersOf = (group: GroupInfo) => sessions.filter(session => session.groupId === group.id);
+	const activityOf = (group: GroupInfo) => membersOf(group).reduce(
+		(newest, session) => Math.max(newest, session.updatedAt),
+		group.createdAt,
+	);
+	const orderedGroups = [...groups].sort((left, right) => activityOf(right) - activityOf(left));
+	const groupBucket = (group: GroupInfo): Bucket | undefined => {
+		// An archived group lists its archived members; an active one lists the
+		// conversations that are still in the list.
+		const archived = group.archivedAt !== undefined;
+		const members = membersOf(group)
+			.filter(session => session.archived === archived)
 			.sort((left, right) => right.updatedAt - left.updatedAt);
 		// A hit on the group name keeps the whole group visible; otherwise only
 		// the conversations whose own text matches — searching "parser" should
 		// not drag in every unrelated conversation that shares a group.
 		const nameHit = matchesGroupName(group);
-		const sessions = searching && !nameHit ? members.filter(matchesSession) : members;
+		const shown = searching && !nameHit ? members.filter(matchesSession) : members;
 		// While searching, a group with nothing left in it is just noise.
-		return !searching || nameHit || sessions.length > 0
-			? [{ label: group.name, group, sessions }]
-			: [];
-	});
+		return !searching || nameHit || shown.length > 0
+			? { label: group.name, group, sessions: shown }
+			: undefined;
+	};
+	const groupBuckets = orderedGroups
+		.filter(group => group.archivedAt === undefined)
+		.map(groupBucket)
+		.filter((bucket): bucket is Bucket => bucket !== undefined);
+
 	// A group deleted in another tab leaves sessions pointing at nothing; they
-	// fall back to the date buckets instead of disappearing from the rail.
+	// fall back to the project/date buckets instead of disappearing from the rail.
 	const ungrouped = activeSessions.filter(session =>
 		(session.groupId === undefined || !groupIds.has(session.groupId)) && matchesSession(session));
+	const restBuckets = grouping === 'project'
+		? projectBuckets(ungrouped, projectName, projectById)
+		: bucketize(ungrouped);
 
-	const visibleArchived = searching ? archivedSessions.filter(matchesSession) : archivedSessions;
+	// Archived conversations keep the group they were archived with: a group is
+	// archived and restored as a whole, so it has to come back as a whole too.
+	const archivedGroupIds = new Set(orderedGroups
+		.filter(group => group.archivedAt !== undefined)
+		.map(group => group.id));
+	const archivedGroupBuckets = orderedGroups
+		.filter(group => group.archivedAt !== undefined)
+		.map(groupBucket)
+		.filter((bucket): bucket is Bucket => bucket !== undefined);
+	const looseArchived = archivedSessions.filter(session =>
+		(session.groupId === undefined || !archivedGroupIds.has(session.groupId)) && matchesSession(session));
+	const archivedBuckets: readonly Bucket[] = showArchived
+		? [
+			...archivedGroupBuckets,
+			...(looseArchived.length > 0
+				? [{ label: t('已归档（{count}）', { count: looseArchived.length }), sessions: looseArchived }]
+				: []),
+		]
+		: [];
 
-	const buckets: readonly Bucket[] = [
-		...groupBuckets,
-		...bucketize(ungrouped),
-		...(showArchived && visibleArchived.length > 0
-			? [{ label: t('已归档（{count}）', { count: visibleArchived.length }), sessions: visibleArchived }]
-			: []),
-	];
+	const buckets: readonly Bucket[] = [...groupBuckets, ...restBuckets, ...archivedBuckets];
+
+	/** Fold state of one block: the user's choice, else "open only if running". */
+	const isCollapsed = (bucket: Bucket): boolean => {
+		const key = blockKey(bucket);
+		if (key === undefined || searching) {
+			return false;
+		}
+		if (foldedBlocks !== undefined) {
+			return foldedBlocks.has(key);
+		}
+		// Open by default when something in it is working, and for the block the
+		// conversation on screen lives in — a rail that hides the current row
+		// answers nothing.
+		return !bucket.sessions.some(session =>
+			running?.has(session.id) === true || session.id === activeSessionId);
+	};
+
+	const toggleBlock = (bucket: Bucket) => {
+		const key = blockKey(bucket);
+		if (key === undefined) {
+			return;
+		}
+		setFoldedBlocks(current => {
+			// First click materialises the defaults, otherwise half the rail
+			// would spring open.
+			const next = new Set(current ?? buckets
+				.map(candidate => (isCollapsed(candidate) ? blockKey(candidate) : undefined))
+				.filter((value): value is string => value !== undefined));
+			if (next.has(key)) {
+				next.delete(key);
+			} else {
+				next.add(key);
+			}
+			return next;
+		});
+	};
 
 	/**
 	 * Creates the group from the rail's own field.
@@ -399,25 +503,16 @@ export function SessionSidebar({
 	};
 
 	/** Group title row: fold, rename in place, open the shared files, delete. */
-	const renderGroupTitle = (group: GroupInfo, count: number) => {
-		// A search always shows what it matched; folding only applies when browsing.
-		const collapsed = !searching && collapsedGroups.has(group.id);
+	const renderGroupTitle = (group: GroupInfo, count: number, collapsed: boolean, onToggle: () => void) => {
 		const renaming = renamingGroupId === group.id;
+		const archived = group.archivedAt !== undefined;
 		return (
-			<div className="group-title">
+			<div className={`group-title${archived ? ' archived' : ''}`}>
 				<button
 					type="button"
 					className={`group-fold${collapsed ? '' : ' open'}`}
 					title={collapsed ? t('展开这个组') : t('收起这个组')}
-					onClick={() => setCollapsedGroups(current => {
-						const next = new Set(current);
-						if (next.has(group.id)) {
-							next.delete(group.id);
-						} else {
-							next.add(group.id);
-						}
-						return next;
-					})}
+					onClick={onToggle}
 				>
 					<Icon name="chevron" />
 				</button>
@@ -476,6 +571,15 @@ export function SessionSidebar({
 					>
 						<Icon name="rename" />
 					</button>
+					{/* Whole-group archive: the members move to the archived list with it. */}
+					<button
+						type="button"
+						className="session-action"
+						title={archived ? t('恢复整个组（成员一起回到列表）') : t('归档整个组（成员一起隐藏）')}
+						onClick={() => onArchiveGroup(group, !archived)}
+					>
+						<Icon name={archived ? 'unarchive' : 'archive'} />
+					</button>
 					<button
 						type="button"
 						className="session-action danger"
@@ -488,6 +592,27 @@ export function SessionSidebar({
 			</div>
 		);
 	};
+
+	/** Project block title: fold, and where the folder is. */
+	const renderProjectTitle = (
+		project: NonNullable<Bucket['project']>,
+		count: number,
+		collapsed: boolean,
+		onToggle: () => void,
+	) => (
+		<div className="group-title project-title">
+			<button
+				type="button"
+				className={`group-fold${collapsed ? '' : ' open'}`}
+				title={collapsed ? t('展开这个项目') : t('收起这个项目')}
+				onClick={onToggle}
+			>
+				<Icon name="chevron" />
+			</button>
+			<span className="group-name project-name" title={project.hint ?? project.label}>{project.label}</span>
+			<span className="group-count">{count}</span>
+		</div>
+	);
 
 	return (
 		<div className="session-rail">
@@ -592,7 +717,32 @@ export function SessionSidebar({
 				 * when there are none yet.
 				 */}
 				<div className="groups-head">
-					<span className="groups-title">{t('会话组')}</span>
+					<span className="groups-title">{t('会话')}</span>
+					{/* What the conversations outside a manual group are filed by. */}
+					<div className="rail-grouping" role="group" aria-label={t('其余会话的分组方式')}>
+						<button
+							type="button"
+							className={`rail-grouping-item${grouping === 'project' ? ' active' : ''}`}
+							title={t('按工作目录分组，项目按最近活动排序')}
+							onClick={() => {
+								setGrouping('project');
+								writeGrouping('project');
+							}}
+						>
+							{t('按项目')}
+						</button>
+						<button
+							type="button"
+							className={`rail-grouping-item${grouping === 'time' ? ' active' : ''}`}
+							title={t('按最后活动时间分组（今天 / 昨天 / 本周 / 更早）')}
+							onClick={() => {
+								setGrouping('time');
+								writeGrouping('time');
+							}}
+						>
+							{t('按时间')}
+						</button>
+					</div>
 					<button
 						type="button"
 						className="groups-new"
@@ -654,16 +804,19 @@ export function SessionSidebar({
 					<div className="rail-empty">{t('这个项目还没有会话')}</div>
 				)}
 				{buckets.map(bucket => {
-					const collapsed = !searching && bucket.group !== undefined && collapsedGroups.has(bucket.group.id);
+					const collapsed = isCollapsed(bucket);
+					const key = blockKey(bucket);
 					return (
 					<div
-						key={bucket.group ? `group:${bucket.group.id}` : bucket.label}
-						className={bucket.group ? 'group-block' : undefined}
+						key={key ?? bucket.label}
+						className={`${bucket.group ? 'group-block' : bucket.project ? 'group-block project-block' : ''}${bucket.group?.archivedAt === undefined ? '' : ' archived'}`}
 					>
 						{bucket.group
-							? renderGroupTitle(bucket.group, bucket.sessions.length)
-							: <div className="bucket-title">{bucket.label}</div>}
-						{bucket.group && !collapsed && bucket.sessions.length === 0 && (
+							? renderGroupTitle(bucket.group, bucket.sessions.length, collapsed, () => toggleBlock(bucket))
+							: bucket.project
+								? renderProjectTitle(bucket.project, bucket.sessions.length, collapsed, () => toggleBlock(bucket))
+								: <div className="bucket-title">{bucket.label}</div>}
+						{bucket.group && bucket.group.archivedAt === undefined && !collapsed && bucket.sessions.length === 0 && (
 							<div className="rail-empty group-empty">
 								{t('这个组还没有会话，点会话行上的分组按钮加进来')}
 							</div>
@@ -938,6 +1091,49 @@ interface Bucket {
 	readonly sessions: readonly SessionEntry[];
 	/** Set on a group bucket: its heading carries the group's own actions. */
 	readonly group?: GroupInfo;
+	/** Set on a project bucket in the default grouping: fold + name + count. */
+	readonly project?: { readonly id: string; readonly label: string; readonly hint?: string };
+}
+
+/** Stable key of a foldable block, or `undefined` for a plain title. */
+function blockKey(bucket: Bucket): string | undefined {
+	if (bucket.group) {
+		return `group:${bucket.group.id}`;
+	}
+	return bucket.project ? `project:${bucket.project.id}` : undefined;
+}
+
+/**
+ * Conversations filed by the folder they run in, busiest project first.
+ *
+ * This is the rail's default shape: a conversation belongs to a working
+ * directory, and the folder is what a person looks for. Ordering inside a
+ * project and between projects is the same — most recent activity first.
+ */
+function projectBuckets(
+	sessions: readonly SessionEntry[],
+	nameOf: (projectId: string) => string,
+	projectById: ReadonlyMap<string, ProjectInfo>,
+): readonly Bucket[] {
+	const byProject = new Map<string, SessionEntry[]>();
+	for (const session of sessions) {
+		const members = byProject.get(session.projectId);
+		if (members) {
+			members.push(session);
+		} else {
+			byProject.set(session.projectId, [session]);
+		}
+	}
+	return [...byProject.entries()]
+		.map(([projectId, members]): Bucket => {
+			const sorted = [...members].sort((left, right) => right.updatedAt - left.updatedAt);
+			return {
+				label: nameOf(projectId),
+				project: { id: projectId, label: nameOf(projectId), hint: projectById.get(projectId)?.cwd },
+				sessions: sorted,
+			};
+		})
+		.sort((left, right) => (right.sessions[0]?.updatedAt ?? 0) - (left.sessions[0]?.updatedAt ?? 0));
 }
 
 function bucketize(sessions: readonly SessionEntry[]): readonly Bucket[] {
