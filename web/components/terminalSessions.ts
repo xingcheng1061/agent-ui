@@ -1,5 +1,5 @@
 import { FitAddon } from '@xterm/addon-fit';
-import { Terminal as XTerm, type ILink } from '@xterm/xterm';
+import { Terminal as XTerm, type IBufferRange, type ILink } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { terminalUrl } from '../api';
 import { t } from '../i18n';
@@ -66,6 +66,38 @@ const XTERM_THEMES: Record<ThemeName, {
 		selectionInactiveBackground: '#e5ebf1',
 	},
 };
+
+/** One buffer row of a logical line, and how many characters it contributes. */
+interface RowSegment {
+	readonly y: number;
+	readonly length: number;
+}
+
+/**
+ * The screen ranges a match occupies, one per row it touches.
+ *
+ * xterm resolves a hover against the row under the pointer, so a match that
+ * spans a wrap is emitted as several single-row links rather than one range
+ * crossing the row boundary.
+ */
+function rangesFor(start: number, end: number, segments: readonly RowSegment[], onlyRow: number): IBufferRange[] {
+	const ranges: IBufferRange[] = [];
+	let offset = 0;
+	for (const segment of segments) {
+		const segmentStart = offset;
+		const segmentEnd = offset + segment.length;
+		offset = segmentEnd;
+		if (segment.y !== onlyRow || segmentEnd <= start || segmentStart >= end) {
+			continue;
+		}
+		const from = Math.max(start, segmentStart) - segmentStart;
+		const to = Math.min(end, segmentEnd) - segmentStart;
+		if (to > from) {
+			ranges.push({ start: { x: from + 1, y: segment.y }, end: { x: to, y: segment.y } });
+		}
+	}
+	return ranges;
+}
 
 /** Silent retries before the overlay appears; covers transient blips. */
 const AUTO_RETRIES = 2;
@@ -316,29 +348,51 @@ class LiveScreen implements TerminalSession {
 	 * xterm asks per visible row on every repaint, so this stays a plain regex
 	 * pass; the expensive part — deciding which project owns the path — happens
 	 * on click, in the workspace.
+	 *
+	 * A long path is hard-wrapped by the terminal into several buffer rows, and
+	 * `isWrapped` marks the continuations. Tokenising a row on its own cut such
+	 * a path in half: the first half lost its file name, the second became a
+	 * bare name, and both resolved to files that do not exist. So the wrapped
+	 * rows are joined back into one logical line, matched there, and each match
+	 * is then cut into one link per row it covers.
 	 */
 	private _linksAt(bufferLineNumber: number): ILink[] | undefined {
-		const line = this._term.buffer.active.getLine(bufferLineNumber - 1);
-		if (!line) {
+		const buffer = this._term.buffer.active;
+		const row = bufferLineNumber - 1;
+		if (!buffer.getLine(row)) {
 			return undefined;
 		}
-		const text = line.translateToString(true);
+		let first = row;
+		while (first > 0 && buffer.getLine(first)?.isWrapped) {
+			first--;
+		}
+		let last = row;
+		while (buffer.getLine(last + 1)?.isWrapped) {
+			last++;
+		}
+		const segments: RowSegment[] = [];
+		let text = '';
+		for (let current = first; current <= last; current++) {
+			// Only the last row is padded to the full width, so only it is trimmed.
+			const value = buffer.getLine(current)?.translateToString(current === last) ?? '';
+			segments.push({ y: current + 1, length: value.length });
+			text += value;
+		}
 		const links: ILink[] = [];
 		// A URL needs no base and no code pane: it opens in the browser.
 		for (const url of findUrlTokens(text)) {
-			links.push({
-				range: {
-					start: { x: url.start + 1, y: bufferLineNumber },
-					end: { x: url.end, y: bufferLineNumber },
-				},
-				text: url.text,
-				activate: (event: MouseEvent) => {
-					if (!event.ctrlKey && !event.metaKey) {
-						return;
-					}
-					window.open(url.text, '_blank', 'noopener,noreferrer');
-				},
-			});
+			for (const range of rangesFor(url.start, url.end, segments, bufferLineNumber)) {
+				links.push({
+					range,
+					text: url.text,
+					activate: (event: MouseEvent) => {
+						if (!event.ctrlKey && !event.metaKey) {
+							return;
+						}
+						window.open(url.text, '_blank', 'noopener,noreferrer');
+					},
+				});
+			}
 		}
 		// The live directory wins over the project root; without either there is
 		// nothing to resolve a relative path against.
@@ -346,24 +400,23 @@ class LiveScreen implements TerminalSession {
 		const openTarget = this._openTarget;
 		if (openTarget && base) {
 			for (const token of findPathTokens(text)) {
-				links.push({
-					range: {
-						start: { x: token.start + 1, y: bufferLineNumber },
-						end: { x: token.end, y: bufferLineNumber },
-					},
-					text: token.text,
-					activate: (event: MouseEvent) => {
-						// Same rule as VS Code: hover shows the target, ctrl+click opens it.
-						if (!event.ctrlKey && !event.metaKey) {
-							return;
-						}
-						// `base` is the directory the row was painted under, which is the
-						// one the line was printed in. Resolving at click time instead
-						// would use wherever the shell is *now* — wrong for anything
-						// above the prompt.
-						openTarget(resolveTerminalTarget(token, base));
-					},
-				});
+				for (const range of rangesFor(token.start, token.end, segments, bufferLineNumber)) {
+					links.push({
+						range,
+						text: token.text,
+						activate: (event: MouseEvent) => {
+							// Same rule as VS Code: hover shows the target, ctrl+click opens it.
+							if (!event.ctrlKey && !event.metaKey) {
+								return;
+							}
+							// `base` is the directory the row was painted under, which is
+							// the one the line was printed in. Resolving at click time
+							// instead would use wherever the shell is *now* — wrong for
+							// anything above the prompt.
+							openTarget(resolveTerminalTarget(token, base));
+						},
+					});
+				}
 			}
 		}
 		return links.length > 0 ? links : undefined;
