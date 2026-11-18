@@ -2302,6 +2302,19 @@ button {
 	color: var(--bg-active-fg);
 }
 
+/* Dropping: the outline says where the files will land — a folder row, or the
+   whole tree when the pointer is over empty space (the project root). */
+.file-tree.drop-target {
+	outline: 1px dashed var(--accent);
+	outline-offset: -2px;
+}
+
+.tree-row.drop-target {
+	background: var(--bg-hover);
+	outline: 1px dashed var(--accent);
+	outline-offset: -1px;
+}
+
 .tree-icon {
 	width: 12px;
 	color: var(--fg-dim);

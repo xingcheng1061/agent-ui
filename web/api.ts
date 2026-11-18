@@ -462,6 +462,37 @@ export function createEntry(root: string, filePath: string, type: 'file' | 'dir'
 	});
 }
 
+/**
+ * Sends one file's bytes to `filePath`.
+ *
+ * No multipart: the browser already has the `File`, and posting it as the body
+ * keeps the server side a `Buffer` write. A 409 means the name is taken; the
+ * caller asks, then repeats with `overwrite`.
+ */
+export function uploadFile(
+	root: string,
+	filePath: string,
+	file: Blob,
+	overwrite = false,
+): Promise<{ ok: boolean; path: string; size: number }> {
+	const query = `root=${encodeURIComponent(root)}&path=${encodeURIComponent(filePath)}${overwrite ? '&overwrite=1' : ''}`;
+	return requestJson(`/api/fs/upload?${query}`, {
+		method: 'PUT',
+		headers: { 'Content-Type': 'application/octet-stream' },
+		body: file,
+	});
+}
+
+/**
+ * Where to point a download at.
+ *
+ * A plain navigation, not `fetch`: the browser's own download manager gives
+ * progress and a folder picker for free, and the session cookie rides along.
+ */
+export function downloadFileUrl(root: string, filePath: string): string {
+	return withToken(`/api/fs/download?root=${encodeURIComponent(root)}&path=${encodeURIComponent(filePath)}`);
+}
+
 /** Deletes a file, or a directory with everything inside it. */
 export function deleteEntry(root: string, filePath: string): Promise<{ ok: boolean }> {
 	return requestJson('/api/fs/delete', {

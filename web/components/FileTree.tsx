@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
-import { createEntry, deleteEntry, listDirectory, renameEntry, searchEntries, type FileEntry } from '../api';
+import { useCallback, useEffect, useRef, useState, type DragEvent, type MouseEvent } from 'react';
+import { createEntry, deleteEntry, downloadFileUrl, listDirectory, renameEntry, searchEntries, uploadFile, type FileEntry } from '../api';
 import { t } from '../i18n';
 import { readExpandedDirs, writeExpandedDirs } from './workspaceState';
 
@@ -29,6 +29,65 @@ interface FileTreeProps {
 function parentOf(filePath: string): string {
 	const cut = filePath.lastIndexOf('/');
 	return cut === -1 ? '' : filePath.slice(0, cut);
+}
+
+/** One file on its way to disk, with the path it should take in its directory. */
+interface UploadItem {
+	readonly file: File;
+	readonly name: string;
+}
+
+/** A drag that carries files, as opposed to one dragging text or a row. */
+function dragsFiles(event: DragEvent<HTMLElement>): boolean {
+	return [...event.dataTransfer.types].includes('Files');
+}
+
+/**
+ * Reads one dropped entry, descending into folders.
+ *
+ * `webkitGetAsEntry` is the only API that exposes a dropped folder as a tree —
+ * `dataTransfer.files` flattens it to nothing — so a folder dragged from the
+ * desktop keeps its shape, one upload per file.
+ */
+async function readDropEntry(entry: FileSystemEntry, prefix: string, out: UploadItem[]): Promise<void> {
+	if (entry.isFile) {
+		const file = await new Promise<File>((resolve, reject) => {
+			(entry as FileSystemFileEntry).file(resolve, reject);
+		});
+		out.push({ file, name: `${prefix}${entry.name}` });
+		return;
+	}
+	if (!entry.isDirectory) {
+		return;
+	}
+	const reader = (entry as FileSystemDirectoryEntry).createReader();
+	// `readEntries` answers a page at a time (about 100) and signals the end
+	// with an empty batch, so it has to be driven in a loop.
+	for (;;) {
+		const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
+		if (batch.length === 0) {
+			return;
+		}
+		for (const child of batch) {
+			await readDropEntry(child, `${prefix}${entry.name}/`, out);
+		}
+	}
+}
+
+/** Everything a drop carries, folders flattened into relative names. */
+async function droppedItems(transfer: DataTransfer): Promise<UploadItem[]> {
+	const entries = [...transfer.items]
+		.filter(item => item.kind === 'file')
+		.map(item => item.webkitGetAsEntry?.() ?? null)
+		.filter((entry): entry is FileSystemEntry => entry !== null);
+	if (entries.length === 0) {
+		return [...transfer.files].map(file => ({ file, name: file.name }));
+	}
+	const out: UploadItem[] = [];
+	for (const entry of entries) {
+		await readDropEntry(entry, '', out);
+	}
+	return out;
 }
 
 /**
@@ -92,6 +151,10 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 	const [searching, setSearching] = useState(false);
 	/** The walk hit its budget: the list below is not the whole answer. */
 	const [truncated, setTruncated] = useState(false);
+	/** Upload progress: how many of `total` files have been written. */
+	const [uploading, setUploading] = useState<{ done: number; total: number } | undefined>(undefined);
+	/** Directory highlighted under a drag: `''` is the project root. */
+	const [dropTarget, setDropTarget] = useState<string | undefined>(undefined);
 	const trimmedQuery = query.trim();
 	/**
 	 * The query the tree is actually searched for.
@@ -347,6 +410,89 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 		}
 	};
 
+	/** Writes one file, asking before it replaces a file that is already there. */
+	const uploadOne = async (directory: string, item: UploadItem): Promise<void> => {
+		const target = directory === '' ? item.name : `${directory}/${item.name}`;
+		try {
+			await uploadFile(root, target, item.file);
+		} catch (error) {
+			if ((error as { status?: number }).status !== 409) {
+				throw error;
+			}
+			if (!window.confirm(t('「{path}」已存在，覆盖吗？', { path: target }))) {
+				return;
+			}
+			await uploadFile(root, target, item.file, true);
+		}
+	};
+
+	/** Uploads a batch into one directory, then re-reads what is on screen. */
+	const uploadInto = async (directory: string, items: readonly UploadItem[]): Promise<void> => {
+		if (items.length === 0) {
+			return;
+		}
+		setActionError(undefined);
+		setUploading({ done: 0, total: items.length });
+		let done = 0;
+		try {
+			for (const item of items) {
+				await uploadOne(directory, item);
+				done += 1;
+				setUploading({ done, total: items.length });
+			}
+		} catch (error) {
+			setActionError(String(error));
+		} finally {
+			setUploading(undefined);
+			// Files that did land are on disk either way, and a dropped folder may
+			// have created directories that were not open yet.
+			await load(directory).catch(() => undefined);
+		}
+	};
+
+	/** The menu's upload entries: a file picker, optionally for a whole folder. */
+	const pickUpload = (directory: string, folder: boolean) => {
+		setMenu(undefined);
+		const input = document.createElement('input');
+		input.type = 'file';
+		input.multiple = !folder;
+		if (folder) {
+			// Non-standard, but every browser that can drop a folder has it.
+			input.webkitdirectory = true;
+		}
+		input.addEventListener('change', () => {
+			const items = [...(input.files ?? [])].map(file => ({
+				file,
+				// A folder pick reports the entire path in `webkitRelativePath`.
+				name: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
+			}));
+			void uploadInto(directory, items);
+		});
+		input.click();
+	};
+
+	/** Download is a navigation: the browser owns the save dialog and progress. */
+	const download = (entry: FileEntry) => {
+		setMenu(undefined);
+		const link = document.createElement('a');
+		link.href = downloadFileUrl(root, entry.path);
+		link.download = entry.name;
+		document.body.appendChild(link);
+		link.click();
+		link.remove();
+	};
+
+	/** A drop on a folder row, or on the empty space, which is the root. */
+	const dropOn = (directory: string) => (event: DragEvent<HTMLDivElement>) => {
+		if (!dragsFiles(event)) {
+			return;
+		}
+		event.preventDefault();
+		event.stopPropagation();
+		setDropTarget(undefined);
+		void droppedItems(event.dataTransfer).then(items => uploadInto(directory, items));
+	};
+
 	const draftRow = (key: string, depth: number, icon: string, placeholder: string) => (
 		<div className="tree-row" key={key} style={{ paddingLeft: 8 + depth * 12 }}>
 			<span className="tree-icon">{icon}</span>
@@ -394,10 +540,13 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 					continue;
 				}
 				const isSelected = entry.type === 'file' && entry.path === selectedPath;
+				/** The folder this row stands for when something is dropped on it. */
+				const dropDir = entry.type === 'dir' ? entry.path : parentOf(entry.path);
+				const isDropTarget = entry.type === 'dir' && dropTarget === entry.path;
 				rows.push(
 					<div
 						key={entry.path}
-						className={`tree-row${isSelected ? ' selected' : ''}`}
+						className={`tree-row${isSelected ? ' selected' : ''}${isDropTarget ? ' drop-target' : ''}`}
 						style={{ paddingLeft: 8 + depth * 12 }}
 						onClick={() => {
 							// Dragging across a name is a copy gesture; opening the file
@@ -408,6 +557,23 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 							toggle(entry);
 						}}
 						onContextMenu={event => openMenu(event, entry.type === 'dir' ? entry.path : parentOf(entry.path), entry)}
+						// A row is a drop target for its own folder: the folder itself
+						// for a directory, the one containing it for a file — so a file
+						// dropped next to another lands beside it, not at the root.
+						onDragOver={event => {
+							if (!dragsFiles(event)) {
+								return;
+							}
+							event.preventDefault();
+							event.stopPropagation();
+							event.dataTransfer.dropEffect = 'copy';
+							setDropTarget(dropDir);
+						}}
+						onDragLeave={event => {
+							event.stopPropagation();
+							setDropTarget(current => (current === dropDir ? undefined : current));
+						}}
+						onDrop={dropOn(dropDir)}
 						role="treeitem"
 						aria-expanded={entry.type === 'dir' ? Boolean(directories[entry.path]?.open) : undefined}
 						tabIndex={0}
@@ -451,7 +617,28 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 	const rootLoading = directories['']?.loading;
 
 	return (
-		<div className="file-tree" role="tree" onContextMenu={event => openMenu(event, '')}>
+		<div
+			className={`file-tree${dropTarget === '' ? ' drop-target' : ''}`}
+			role="tree"
+			onContextMenu={event => openMenu(event, '')}
+			// Dropping on the empty space files into the project root; a folder row
+			// handles its own drop and stops the event before it gets here.
+			onDragOver={event => {
+				if (!dragsFiles(event)) {
+					return;
+				}
+				event.preventDefault();
+				event.dataTransfer.dropEffect = 'copy';
+				setDropTarget(current => current ?? '');
+			}}
+			onDragLeave={event => {
+				if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
+					return;
+				}
+				setDropTarget(undefined);
+			}}
+			onDrop={dropOn('')}
+		>
 			<div className="tree-search">
 				<input
 					value={query}
@@ -508,6 +695,11 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 					</svg>
 				</button>
 			</div>
+			{uploading && (
+				<div className="tree-hint">
+					{t('正在上传 {done}/{total}…', { done: uploading.done, total: uploading.total })}
+				</div>
+			)}
 			{submitted === ''
 				? (
 					<>
@@ -607,12 +799,19 @@ export function FileTree({ root, selectedPath, onOpenFile, onPathDeleted, onPath
 				>
 					<button type="button" onClick={() => startCreate(menu.directory, 'file')}>{t('新建文件')}</button>
 					<button type="button" onClick={() => startCreate(menu.directory, 'dir')}>{t('新建文件夹')}</button>
+					{/* Upload lands in the folder whose menu this is: the row's own
+					    folder for a file, the folder itself for a directory. */}
+					<button type="button" onClick={() => pickUpload(menu.directory, false)}>{t('上传文件…')}</button>
+					<button type="button" onClick={() => pickUpload(menu.directory, true)}>{t('上传文件夹…')}</button>
 					{menu.entry && (
 						<>
 							<div className="tree-menu-sep" />
 							<button type="button" onClick={() => startRename(menu.entry!)}>{t('重命名「{name}」', { name: menu.entry.name })}</button>
 							<button type="button" onClick={() => { void copyText(menu.entry!.name); setMenu(undefined); }}>{t('复制文件名')}</button>
 							<button type="button" onClick={() => { void copyText(menu.entry!.path); setMenu(undefined); }}>{t('复制路径')}</button>
+							{menu.entry.type === 'file' && (
+								<button type="button" onClick={() => download(menu.entry!)}>{t('下载「{name}」', { name: menu.entry.name })}</button>
+							)}
 							<div className="tree-menu-sep" />
 							<button
 								type="button"

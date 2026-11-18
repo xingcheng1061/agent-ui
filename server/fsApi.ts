@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import fs, { type FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { Router } from 'express';
+import express, { Router } from 'express';
 import { MAX_FILE_SIZE } from './config.js';
 import { BadRequestError, IGNORED_NAMES, readStringQuery, resolveRoot, shouldIgnore, toAbsolute, toRelative } from './paths.js';
 
@@ -22,6 +22,18 @@ const READ_CHUNK_BYTES = 512 * 1024;
 const READ_LINE_SLACK = 4 * 1024 * 1024;
 /** Largest file the viewer pages through at all; past this a browser tab dies. */
 const MAX_VIEW_SIZE = 64 * 1024 * 1024;
+
+/**
+ * Largest upload accepted in one request.
+ *
+ * The body is buffered before it is written, so this is really a memory cap,
+ * not a disk one. `AGENT_UI_MAX_UPLOAD_MB` raises it for people who drag whole
+ * build outputs around.
+ */
+const MAX_UPLOAD_BYTES = (() => {
+	const configured = Number(process.env['AGENT_UI_MAX_UPLOAD_MB'] ?? '');
+	return Number.isFinite(configured) && configured > 0 ? configured * 1024 * 1024 : 128 * 1024 * 1024;
+})();
 
 interface FileChunk {
 	readonly content: string;
@@ -249,6 +261,68 @@ fsRouter.post('/write', async (req, res) => {
 
 	await fs.writeFile(absolute, content, 'utf8');
 	res.json({ ok: true, path: relative });
+});
+
+/**
+ * One file in; its destination is the `path` query.
+ *
+ * The body is the bytes themselves rather than multipart: the browser already
+ * holds a `File`, and `fetch(url, { body: file })` hands it over without an
+ * encoder in the way. A dropped folder arrives as one request per file, which
+ * is also what keeps a partial upload usable when one file is refused.
+ */
+fsRouter.put(
+	'/upload',
+	express.raw({ type: () => true, limit: MAX_UPLOAD_BYTES }),
+	async (req, res) => {
+		const root = await resolveRoot(readStringQuery(req.query['root'], 'root'));
+		const relative = readStringQuery(req.query['path'], 'path').trim();
+		if (relative === '') {
+			throw new BadRequestError('`path` is required.');
+		}
+		const body: unknown = req.body;
+		if (!Buffer.isBuffer(body)) {
+			throw new BadRequestError('Expected the file bytes as the request body.');
+		}
+		const absolute = toAbsolute(root, relative);
+		if (absolute === root) {
+			throw new BadRequestError('项目根目录不是文件。');
+		}
+		const existing = await fs.stat(absolute).catch(() => undefined);
+		if (existing?.isDirectory()) {
+			throw new BadRequestError(`同名目录已存在：${relative}`);
+		}
+		// Dropping onto an occupied name is one drag away from destroying work, so
+		// replacing is asked for explicitly (`overwrite=1` after the client asks).
+		if (existing && req.query['overwrite'] !== '1') {
+			res.status(409).json({ error: `同名文件已存在：${relative}`, existed: true });
+			return;
+		}
+		// A dropped folder carries its own sub-paths, which may not exist yet.
+		await fs.mkdir(path.dirname(absolute), { recursive: true });
+		await fs.writeFile(absolute, body);
+		res.json({
+			ok: true,
+			path: toRelative(root, absolute),
+			size: body.length,
+			overwritten: existing !== undefined,
+		});
+	},
+);
+
+/** One file out, as an attachment: the browser does the saving and progress. */
+fsRouter.get('/download', async (req, res) => {
+	const root = await resolveRoot(readStringQuery(req.query['root'], 'root'));
+	const relative = readStringQuery(req.query['path'], 'path');
+	const absolute = toAbsolute(root, relative);
+	const stat = await fs.stat(absolute).catch(() => undefined);
+	if (!stat) {
+		throw new BadRequestError(`文件不存在：${relative}`);
+	}
+	if (!stat.isFile()) {
+		throw new BadRequestError(`目录不能直接下载：${relative}`);
+	}
+	res.download(absolute);
 });
 
 /**
