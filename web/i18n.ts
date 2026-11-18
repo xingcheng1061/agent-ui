@@ -112,6 +112,8 @@ const EN: Readonly<Record<string, string>> = {
 	'打开这个目录': 'Open this folder',
 	'还没有打开的项目，点上面的「打开项目」选一个目录': 'No project is open yet — pick a folder with "Open project" above',
 	'从列表移除（磁盘上的文件不受影响）': 'Remove from the list (the folder itself is untouched)',
+	'搜索已打开的项目（名称或路径）': 'Search open projects (name or path)',
+	'搜索已打开的项目': 'Search open projects',
 	'会话': 'Sessions',
 	'{project} · 仅浏览': '{project} · viewing only',
 	'只看代码，不新建会话': 'Just the code — no conversation',

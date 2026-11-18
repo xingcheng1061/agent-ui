@@ -296,17 +296,19 @@ button {
 	background: var(--primary-hover);
 }
 
-/* Opening a folder creates nothing, so it is the quiet one of the two. */
+/* Opening a folder creates nothing, so it is the secondary of the two — but it
+   is still an action, not a disabled control: it carries the accent colour
+   instead of the grey of something you cannot press. */
 .rail-new.rail-open {
-	background: var(--bg);
-	border: 1px solid var(--border);
-	color: var(--fg-dim);
+	background: transparent;
+	border: 1px solid var(--accent-border);
+	color: var(--accent);
 }
 
 .rail-new.rail-open:hover:not(:disabled) {
 	background: var(--bg-hover);
-	border-color: var(--border-strong);
-	color: var(--fg);
+	border-color: var(--accent);
+	color: var(--accent);
 }
 
 /* Conversations / open projects: the rail shows one at a time. */

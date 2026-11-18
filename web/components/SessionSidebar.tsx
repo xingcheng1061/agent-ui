@@ -164,6 +164,8 @@ export function SessionSidebar({
 	 */
 	const [query, setQuery] = useState('');
 	const searchRef = useRef<HTMLInputElement | null>(null);
+	/** Filter over the folders that are open; paths get long, so it earns one. */
+	const [projectQuery, setProjectQuery] = useState('');
 	const [renamingGroupId, setRenamingGroupId] = useState<string | undefined>(undefined);
 	const [groupDraft, setGroupDraft] = useState('');
 	const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(() => new Set());
@@ -272,6 +274,14 @@ export function SessionSidebar({
 	// Both live above the early return below: a hook after a conditional return
 	// changes the hook count between renders, and React then refuses to render
 	// the whole rail — which is what took the project filter down with it.
+	// Path matches the folder name too, so one rule covers both.
+	const visibleOpenProjects = useMemo(() => {
+		const needle = projectQuery.trim().toLowerCase();
+		return needle === ''
+			? openedProjects
+			: openedProjects.filter(root => root.toLowerCase().includes(needle));
+	}, [openedProjects, projectQuery]);
+
 	const labels = useMemo(() => projectLabels(projects), [projects]);
 	const projectById = useMemo(
 		() => new Map(projects.map(project => [project.id, project] as const)),
@@ -844,27 +854,57 @@ export function SessionSidebar({
 				})}
 			</div>
 			) : (
-				<div className="rail-list">
-					{openedProjects.length === 0 && (
-						<div className="rail-empty">{t('还没有打开的项目，点上面的「打开项目」选一个目录')}</div>
-					)}
-					{openedProjects.map(root => (
-						<div key={root} className={`rail-project${root === openRoot ? ' active' : ''}`} title={root}>
-							<button type="button" className="rail-project-main" onClick={() => onActivateProject(root)}>
-								<span className="rail-project-name">{root.split(/[\\/]/).filter(Boolean).pop() ?? root}</span>
-								<span className="rail-project-path">{root}</span>
-							</button>
+				<>
+					<div className="rail-search">
+						<input
+							value={projectQuery}
+							placeholder={t('搜索已打开的项目（名称或路径）')}
+							aria-label={t('搜索已打开的项目')}
+							onChange={event => setProjectQuery(event.target.value)}
+							onKeyDown={event => {
+								if (event.key === 'Escape') {
+									event.preventDefault();
+									setProjectQuery('');
+									event.currentTarget.blur();
+								}
+							}}
+						/>
+						{projectQuery !== '' && (
 							<button
 								type="button"
-								className="rail-project-close"
-								title={t('从列表移除（磁盘上的文件不受影响）')}
-								onClick={() => onCloseProject(root)}
+								className="rail-search-clear"
+								title={t('清除搜索')}
+								onClick={() => setProjectQuery('')}
 							>
 								×
 							</button>
-						</div>
-					))}
-				</div>
+						)}
+					</div>
+					<div className="rail-list">
+						{openedProjects.length === 0 && (
+							<div className="rail-empty">{t('还没有打开的项目，点上面的「打开项目」选一个目录')}</div>
+						)}
+						{openedProjects.length > 0 && visibleOpenProjects.length === 0 && (
+							<div className="rail-empty">{t('没有匹配「{query}」的项目', { query: projectQuery.trim() })}</div>
+						)}
+						{visibleOpenProjects.map(root => (
+							<div key={root} className={`rail-project${root === openRoot ? ' active' : ''}`} title={root}>
+								<button type="button" className="rail-project-main" onClick={() => onActivateProject(root)}>
+									<span className="rail-project-name">{root.split(/[\\/]/).filter(Boolean).pop() ?? root}</span>
+									<span className="rail-project-path">{root}</span>
+								</button>
+								<button
+									type="button"
+									className="rail-project-close"
+									title={t('从列表移除（磁盘上的文件不受影响）')}
+									onClick={() => onCloseProject(root)}
+								>
+									×
+								</button>
+							</div>
+						))}
+					</div>
+				</>
 			)}
 		</div>
 	);
