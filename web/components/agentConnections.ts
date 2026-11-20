@@ -1,6 +1,14 @@
 import type { AgentClientCommand, AgentServerEvent, QueuedMessage } from '../agentTypes';
 import { agentUrl, reportClientLog } from '../api';
-import { deleteLiveTurn, writeLiveTurn } from './liveTurnStore';
+import {
+	appendStreamEvent,
+	clearStreamEvents,
+	clearStreamTask,
+	getStream,
+	setStreamBusy,
+	setStreamQueued,
+	setStreamTask,
+} from './sessionStore';
 
 /**
  * Pool of long-lived agent connections, one per conversation.
@@ -11,23 +19,16 @@ import { deleteLiveTurn, writeLiveTurn } from './liveTurnStore';
  * on this side heard it any more. Owning the sockets here fixes that:
  *
  * - a panel borrows the connection for its session and gives it back on unmount;
- * - an unwatched connection keeps listening while its turn runs, so the
- *   IndexedDB mirror stays complete and no delta is lost;
+ * - an unwatched connection keeps listening while its turn runs, recording every
+ *   event into `sessionStore` — the same log the panel will read when it returns;
  * - it is closed once idle (see `IDLE_GRACE_MS`), so background conversations
- *   cannot pile up sockets forever (`MAX_BACKGROUND` is the hard cap);
- * - reconnecting sends the last applied `seq`, but the server no longer buffers
- *   events, so anything missed while the socket was down is gone; this side's
- *   IndexedDB mirror is what a panel falls back to.
+ *   cannot pile up sockets forever (`MAX_BACKGROUND` is a soft cap);
+ * - reconnecting sends the last applied `seq`, and the server replays exactly the
+ *   events missed while the socket was down into that same log.
  */
 
 /** Reconnect delay after the socket drops. */
 const RETRY_MS = 1500;
-
-/** Batched IndexedDB writes: a stream pushes hundreds of deltas per second. */
-const FLUSH_MS = 250;
-
-/** Cap per session so a chatty turn cannot blow up IndexedDB. */
-const MAX_LIVE_EVENTS = 4000;
 
 /** An unwatched connection closes after this long without a running turn. */
 const IDLE_GRACE_MS = 15_000;
@@ -52,6 +53,8 @@ export interface AgentConnectionHandle {
 	watchState(listener: StateListener): () => void;
 	/** Highest `seq` applied so far, which is what a reattach resumes from. */
 	lastSeq(): number;
+	/** Whether this conversation's turn is being answered right now. */
+	isBusy(): boolean;
 	/**
 	 * The turn this connection has recorded so far.
 	 *
@@ -84,12 +87,10 @@ class AgentConnection implements AgentConnectionHandle {
 	private _socket: WebSocket | undefined;
 	private _retryTimer: number | undefined;
 	private _idleTimer: number | undefined;
-	private _flushTimer: number | undefined;
 	private _refs = 0;
 	private _closed = false;
 	private _busy = false;
 	private _lastSeq = 0;
-	private readonly _events: AgentServerEvent[] = [];
 	/**
 	 * Last `config` the server pushed.
 	 *
@@ -98,18 +99,12 @@ class AgentConnection implements AgentConnectionHandle {
 	 * pickers stay empty until the next turn reports the list again.
 	 */
 	private _lastConfig: AgentServerEvent | undefined;
-	private _queued: readonly QueuedMessage[] = [];
-	private _dirty = false;
 	private readonly _listeners = new Set<EventListener>();
 	private readonly _stateListeners = new Set<StateListener>();
-	private readonly _onPageHide = () => this._flush();
 
 	constructor(root: string, agent: string) {
 		this.root = root;
 		this.agent = agent;
-		this._flushTimer = window.setInterval(() => this._flush(), FLUSH_MS);
-		// A refresh or tab close is exactly when the mirror matters most.
-		window.addEventListener('pagehide', this._onPageHide);
 		this._connect();
 	}
 
@@ -129,15 +124,13 @@ class AgentConnection implements AgentConnectionHandle {
 	release(): void {
 		this._refs = Math.max(0, this._refs - 1);
 		if (this._refs === 0) {
-			// Persist before the panel goes away: whoever opens this conversation
-			// next must not see a mirror that is a flush interval behind.
-			this._flush();
 			this._armIdle();
 		}
 	}
 
 	snapshot(): { readonly events: readonly AgentServerEvent[]; readonly queued: readonly QueuedMessage[]; readonly busy: boolean } {
-		return { events: [...this._events], queued: this._queued, busy: this._busy };
+		const stream = getStream(this.sessionId);
+		return { events: stream ? [...stream.events] : [], queued: stream?.queued ?? [], busy: stream?.busy ?? this._busy };
 	}
 
 	listen(listener: EventListener): () => void {
@@ -176,10 +169,21 @@ class AgentConnection implements AgentConnectionHandle {
 	 * replays nothing it already has.
 	 */
 	follow(sessionId: string | undefined): void {
+		if (sessionId !== this.sessionId) {
+			// Per-session logs live in `sessionStore` under their own key, so no
+			// data has to be cleared here to keep two conversations apart.
+			this._busy = false;
+			this._lastSeq = 0;
+		}
 		this.sessionId = sessionId;
 		if (this._socket?.readyState === WebSocket.OPEN) {
 			this.send({ type: 'attach', sessionId, lastSeq: this._lastSeq > 0 ? this._lastSeq : undefined });
 		}
+	}
+
+	/** Whether a turn is being answered right now, without copying the events. */
+	isBusy(): boolean {
+		return this._busy;
 	}
 
 	markBusy(): void {
@@ -204,12 +208,6 @@ class AgentConnection implements AgentConnectionHandle {
 			window.clearTimeout(this._idleTimer);
 			this._idleTimer = undefined;
 		}
-		if (this._flushTimer) {
-			window.clearInterval(this._flushTimer);
-			this._flushTimer = undefined;
-		}
-		this._flush();
-		window.removeEventListener('pagehide', this._onPageHide);
 		this.send({ type: 'detach' });
 		this._socket?.close();
 		this._socket = undefined;
@@ -292,26 +290,31 @@ class AgentConnection implements AgentConnectionHandle {
 		}
 	}
 
+	/**
+	 * Every event goes into the session keyed log before it reaches the panel.
+	 *
+	 * This runs even when nobody is watching: the panel's listener set can be
+	 * empty and the log still records the whole turn, which is exactly what a
+	 * returning panel reads instead of an old rendering snapshot.
+	 */
 	private _record(event: AgentServerEvent): void {
+		const sessionId = this.sessionId;
 		if (event.type === 'session_state') {
 			this._busy = event.live === true && event.busy === true;
+			setStreamBusy(sessionId, this._busy);
 			if (!this._busy) {
 				this._armIdle();
 			}
 			return;
 		}
 		if (event.type === 'queue') {
-			this._queued = event.items;
-			this._dirty = true;
+			setStreamQueued(sessionId, event.items);
 			return;
 		}
 		if (event.type === 'result' || event.type === 'exit') {
-			// The turn is over: the jsonl owns it now, so the mirror goes away.
-			this._events.length = 0;
-			this._queued = [];
+			// The turn is over: the jsonl owns it from here, so the log is dropped.
+			clearStreamEvents(sessionId);
 			this._busy = false;
-			this._dirty = true;
-			this._flush();
 			this._armIdle();
 			return;
 		}
@@ -322,33 +325,28 @@ class AgentConnection implements AgentConnectionHandle {
 		if (event.type === 'system') {
 			return;
 		}
-		this._events.push(event);
-		if (this._events.length > MAX_LIVE_EVENTS) {
-			this._events.shift();
+		if (event.type === 'task_started') {
+			setStreamTask(sessionId, {
+				taskId: event.taskId,
+				status: 'running',
+				description: event.description,
+				subagentType: event.subagentType,
+				startedAt: Date.now(),
+			});
+		} else if (event.type === 'task_updated' || event.type === 'task_progress') {
+			const current = getStream(sessionId)?.tasks.find(item => item.taskId === event.taskId);
+			if (current) {
+				setStreamTask(sessionId, {
+					...current,
+					status: event.type === 'task_updated' ? event.status : current.status,
+					description: ('description' in event ? event.description : undefined) ?? current.description,
+				});
+			}
+		} else if (event.type === 'task_notification') {
+			// Completion drops the task from the live panel; the transcript keeps it.
+			clearStreamTask(sessionId, event.taskId);
 		}
-		this._dirty = true;
-	}
-
-	private _flush(): void {
-		if (!this._dirty) {
-			return;
-		}
-		this._dirty = false;
-		const sessionId = this.sessionId;
-		if (!sessionId) {
-			return;
-		}
-		if (this._events.length === 0) {
-			void deleteLiveTurn(sessionId);
-			return;
-		}
-		void writeLiveTurn({
-			sessionId,
-			events: this._events,
-			queued: this._queued,
-			busy: this._busy,
-			updatedAt: Date.now(),
-		});
+		appendStreamEvent(sessionId, event);
 	}
 
 	/**
@@ -392,11 +390,23 @@ function closeConnection(connection: AgentConnection): void {
 	}
 }
 
-/** Keeps the number of unwatched background streams bounded, oldest first. */
+/**
+ * Keeps the number of unwatched background streams bounded.
+ *
+ * Only idle conversations are closed. A running one is never dropped: the
+ * server keeps no event buffer, so this socket is the only place the rest of
+ * that answer exists — closing it loses the tail for good. When every
+ * background conversation happens to be running, the cap is exceeded on
+ * purpose; the real bound is however many turns the user has going.
+ */
 function pruneBackground(): void {
 	const background = [...pool.values()].filter(connection => !connection.watched);
 	while (background.length > MAX_BACKGROUND) {
-		const oldest = background.reduce((left, right) => left.createdAt <= right.createdAt ? left : right);
+		const idle = background.filter(connection => !connection.isBusy());
+		if (idle.length === 0) {
+			return;
+		}
+		const oldest = idle.reduce((left, right) => (left.createdAt <= right.createdAt ? left : right));
 		background.splice(background.indexOf(oldest), 1);
 		closeConnection(oldest);
 	}
@@ -425,3 +435,4 @@ export function acquireAgentConnection(
 	pruneBackground();
 	return created.retain();
 }
+

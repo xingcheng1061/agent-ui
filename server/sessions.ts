@@ -699,6 +699,173 @@ function stringifyToolResult(content: unknown): string {
 	return content === undefined ? '' : JSON.stringify(content);
 }
 
+/** One content hit inside a conversation, enough to locate it in the panel. */
+export interface SessionMatch {
+	readonly sessionId: string;
+	readonly projectId: string;
+	readonly cwd: string;
+	readonly title: string;
+	readonly updatedAt: number;
+	readonly archived: boolean;
+	/** `user`, `assistant`, `thinking` or a tool name. */
+	readonly kind: string;
+	/** Text around the match, with the query highlighted by the client. */
+	readonly snippet: string;
+	/** API message id, used by the client to scroll to the exact bubble. */
+	readonly messageId?: string;
+	/** Tool-call id when the hit came from a tool's input/result. */
+	readonly toolUseId?: string;
+	/** Zero-based index of the message in the transcript, for page loading. */
+	readonly index: number;
+}
+
+const SEARCH_SNIPPET = 160;
+const MAX_MATCHES_PER_SESSION = 6;
+
+/** Pulls searchable text out of one content block. */
+function searchableText(block: ContentBlock): { readonly text: string; readonly kind: string; readonly toolUseId?: string } | undefined {
+	if (block.type === 'text' && typeof block.text === 'string' && !isMetaText(block.text)) {
+		return { text: block.text, kind: 'text' };
+	}
+	if (block.type === 'thinking' && typeof block.thinking === 'string') {
+		return { text: block.thinking, kind: 'thinking' };
+	}
+	if (block.type === 'tool_use' && block.name) {
+		const input = typeof block.input === 'string' ? block.input : JSON.stringify(block.input ?? {});
+		return { text: input, kind: block.name, toolUseId: block.id };
+	}
+	return undefined;
+}
+
+/** Fields shared by every hit from one session. */
+type SearchContext = Omit<SessionMatch, 'kind' | 'snippet' | 'messageId' | 'toolUseId' | 'index'>;
+
+/** Matches one jsonl line, appending hits into `matches`. */
+function collectLineMatches(line: string, needle: string, index: number, context: SearchContext, matches: SessionMatch[]): void {
+	if (matches.length >= MAX_MATCHES_PER_SESSION || !line.toLowerCase().includes(needle)) {
+		return;
+	}
+	const entry = parseLine(line);
+	if (!entry || (entry.type !== 'user' && entry.type !== 'assistant')) {
+		return;
+	}
+	const messageId = entry.message?.id;
+	for (const block of blocksOf(entry)) {
+		const content = searchableText(block);
+		if (!content) {
+			continue;
+		}
+		const lower = content.text.toLowerCase();
+		let from = 0;
+		while (matches.length < MAX_MATCHES_PER_SESSION) {
+			const at = lower.indexOf(needle, from);
+			if (at < 0) {
+				break;
+			}
+			const start = Math.max(0, at - SEARCH_SNIPPET / 2);
+			const stop = at + needle.length + SEARCH_SNIPPET / 2;
+			const snippet = content.text.slice(start, stop).replace(/\s+/g, ' ').trim();
+			matches.push({
+				...context,
+				kind: content.kind === 'text' ? (entry.type ?? 'message') : content.kind,
+				snippet: `${start > 0 ? '…' : ''}${snippet}${stop < content.text.length ? '…' : ''}`,
+				messageId,
+				toolUseId: content.toolUseId,
+				index,
+			});
+			from = at + needle.length;
+		}
+		if (matches.length >= MAX_MATCHES_PER_SESSION) {
+			return;
+		}
+	}
+}
+
+/**
+ * Searches message content across every transcript.
+ *
+ * Runs a cheap `includes` on each raw line before parsing, so a large history
+ * stays responsive and no file is loaded whole. Hits are capped per session;
+ * the goal is to find *which* conversations to open, not to index every word.
+ */
+export async function searchSessions(query: string, options: { readonly limit?: number; readonly includeArchived?: boolean } = {}): Promise<readonly SessionMatch[]> {
+	const needle = query.trim().toLowerCase();
+	if (!needle) {
+		return [];
+	}
+	await metaReady;
+	const meta = metaStore.snapshot;
+	const config = await readAgentUiConfig();
+	const projects = await listProjects();
+	const found: SessionMatch[] = [];
+	const limit = options.limit ?? 40;
+
+	for (const project of projects) {
+		if (found.length >= limit) {
+			break;
+		}
+		const directory = path.join(projectsDir(), project.id);
+		const files = (await fs.readdir(directory).catch(() => [])).filter(file => file.endsWith('.jsonl'));
+		for (const file of files) {
+			if (found.length >= limit) {
+				break;
+			}
+			const filePath = path.join(directory, file);
+			const stat = await fs.stat(filePath).catch(() => undefined);
+			if (!stat) {
+				continue;
+			}
+			const sessionId = file.replace(/\.jsonl$/, '');
+			const custom = meta[metaKey(project.id, sessionId)];
+			const archived = custom?.archivedAt !== undefined
+				|| underAnyRoot(project.cwd, config.autoArchive)
+				|| groupForSession(sessionId)?.archivedAt !== undefined;
+			if (underAnyRoot(project.cwd, config.hide) || (archived && options.includeArchived !== true)) {
+				continue;
+			}
+			const context: SearchContext = {
+				sessionId,
+				projectId: project.id,
+				cwd: project.cwd,
+				title: custom?.title ?? await readTitle(filePath),
+				updatedAt: stat.mtimeMs,
+				archived,
+			};
+			const matches: SessionMatch[] = [];
+			let index = 0;
+			const handle = await fs.open(filePath, 'r').catch(() => undefined);
+			if (!handle) {
+				continue;
+			}
+			try {
+				const buffer = Buffer.allocUnsafe(64 * 1024);
+				let carry = '';
+				let bytesRead = 0;
+				while ((bytesRead = (await handle.read(buffer, 0, buffer.length, null)).bytesRead) > 0) {
+					carry += buffer.subarray(0, bytesRead).toString('utf8');
+					const lines = carry.split('\n');
+					carry = lines.pop() ?? '';
+					for (const line of lines) {
+						collectLineMatches(line, needle, index, context, matches);
+						index += 1;
+					}
+				}
+				// The jsonl is appended to and may not end in a newline. The last
+				// fragment is a complete record there — search it before closing.
+				if (carry.trim() !== '') {
+					collectLineMatches(carry, needle, index, context, matches);
+				}
+			} finally {
+				await handle.close();
+			}
+			if (matches.length > 0) {
+				found.push(...matches);
+			}
+		}
+	}
+	return found.slice(0, limit);
+}
+
 function truncate(value: string, limit: number): string {
 	return value.length > limit ? `${value.slice(0, limit)}… (${value.length - limit} chars trimmed)` : value;
 }

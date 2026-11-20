@@ -21,6 +21,7 @@ import {
 	type ProjectInfo,
 	type RestartOutcome,
 	type SessionEntry,
+	type SessionMatch,
 } from './api';
 import { AuthPage } from './components/AuthPage';
 import { ChatPanel } from './components/ChatPanel';
@@ -28,6 +29,7 @@ import { GroupFilesDialog } from './components/GroupFilesDialog';
 import { NewSessionDialog } from './components/NewSessionDialog';
 import { PasswordDialog } from './components/PasswordDialog';
 import { SessionSidebar } from './components/SessionSidebar';
+import { TaskMonitor } from './components/TaskMonitor';
 import { Splitter, clamp, usePersistedSize } from './components/Splitter';
 import { attentionEnabled, onAttentionChange, setAttentionEnabled } from './attention';
 import { setLang, t, useLang } from './i18n';
@@ -163,6 +165,8 @@ export function App() {
 	 * events never reach this page, so the server has to be asked.
 	 */
 	const [running, setRunning] = useState<ReadonlyMap<string, boolean>>(() => new Map());
+	/** Full running snapshot, so a task panel jump can locate a brand-new session. */
+	const runningRef = useRef<Awaited<ReturnType<typeof runningSessions>>>([]);
 	/**
 	 * Session id → the tool it is blocked on, waiting for the user to decide.
 	 * Polled with `running` for the same reason: the approval may belong to a
@@ -238,6 +242,7 @@ export function App() {
 	const refreshRunning = useCallback(async () => {
 		try {
 			const list = await runningSessions();
+			runningRef.current = list;
 			setRunning(new Map(list.map(session => [session.sessionId, session.busy])));
 			setApprovals(new Map(list.flatMap(session => session.pendingTool === undefined
 				? []
@@ -348,10 +353,46 @@ export function App() {
 	 * only a live tail (or a stale selection) would never reload its history.
 	 */
 	const [viewToken, setViewToken] = useState(0);
+	/**
+	 * A content-search hit to scroll to after the target conversation opens.
+	 * The token makes clicking the same hit twice act again.
+	 */
+	const [focusMatch, setFocusMatch] = useState<{ readonly match: SessionMatch; readonly token: number } | undefined>(undefined);
 
 	const selectSession = (session: SessionEntry) => {
 		setActive({ root: session.cwd, sessionId: session.id, agent: HISTORY_AGENT });
 		setViewToken(value => value + 1);
+	};
+
+	/** Jumps from the global task panel to the conversation that owns a task. */
+	const openTaskSession = (sessionId: string) => {
+		const session = sessions.find(entry => entry.id === sessionId);
+		if (session) {
+			selectSession(session);
+			return;
+		}
+		// A brand-new session may not be in the list yet; the running snapshot
+		// carries its root, so fall back to that instead of doing nothing.
+		const running = runningRef.current.find(entry => entry.sessionId === sessionId);
+		if (running) {
+			setActive({ root: running.root, sessionId, agent: running.agent });
+			setViewToken(value => value + 1);
+		}
+	};
+
+	/** Opens the conversation behind a content-search hit and asks it to scroll. */
+	const openMatch = (match: SessionMatch) => {
+		const session = sessions.find(entry => entry.id === match.sessionId);
+		if (session) {
+			selectSession(session);
+		} else {
+			const running = runningRef.current.find(entry => entry.sessionId === match.sessionId);
+			setActive(running
+				? { root: running.root, sessionId: match.sessionId, agent: running.agent }
+				: { root: match.cwd, sessionId: match.sessionId, agent: HISTORY_AGENT });
+			setViewToken(value => value + 1);
+		}
+		setFocusMatch(current => ({ match, token: (current?.token ?? 0) + 1 }));
 	};
 
 	/**
@@ -579,6 +620,7 @@ export function App() {
 					</button>
 				</span>
 				<span className="spacer" />
+				<TaskMonitor onOpenSession={openTaskSession} />
 				<button
 					type="button"
 					className="toggle"
@@ -613,6 +655,7 @@ export function App() {
 					groups={groups}
 					activeSessionId={active?.sessionId}
 					onSelectSession={selectSession}
+					onOpenMatch={openMatch}
 					onNewSession={() => openDialog('create')}
 					onOpenProject={() => openDialog('browse')}
 					openedProjects={openedProjects}
@@ -639,11 +682,6 @@ export function App() {
 					style={active && !active.browse ? { gridTemplateColumns: `${chatWidth}px 5px 1fr` } : undefined}
 				>
 					{!active && <div className="placeholder">{t('还没有任何项目会话')}</div>}
-					{active?.browse && (
-						// Reading a repository: the code pane takes the whole width, no
-						// chat panel and no agent connection behind it.
-						<Workspace key={active.root} root={active.root} projects={projects} revision={revision} openRequest={openRequest} />
-					)}
 					{active && !active.browse && (
 						<>
 							<ChatPanel
@@ -651,6 +689,7 @@ export function App() {
 								root={active.root}
 								sessionId={active.sessionId}
 								agent={active.agent}
+								focusMatch={focusMatch?.match.sessionId === active.sessionId ? focusMatch : undefined}
 								onAgentChange={nextAgent => setActive({ root: active.root, agent: nextAgent })}
 								onSessionStarted={sessionId => {
 									setActive(current => current ? { ...current, sessionId } : current);
@@ -682,11 +721,26 @@ export function App() {
 									void refresh().catch(() => undefined);
 								}}
 							/>
-							<Splitter axis="x" onResize={delta => setChatWidth(clamp(chatWidth + delta, 320, 1200))} />
-							<Workspace key={active.root} root={active.root} projects={projects} revision={revision} openRequest={openRequest} />
-						</>
-					)}
-				</main>
+						<Splitter axis="x" onResize={delta => setChatWidth(clamp(chatWidth + delta, 320, 1200))} />
+					</>
+				)}
+				{/*
+				 * One Workspace for both browse and chat mode, kept at the same
+				 * position in the tree. Previously the two modes rendered it in
+				 * separate branches, so every switch unmounted it — tearing down
+				 * the terminal view and losing its state — even when the project
+				 * was the same. The pool kept the shell alive, but the pane reset.
+				 */}
+				{active && (
+					<Workspace
+						key={active.root}
+						root={active.root}
+						projects={projects}
+						revision={revision}
+						openRequest={openRequest}
+					/>
+				)}
+			</main>
 			</div>
 
 			{dialogOpen && (

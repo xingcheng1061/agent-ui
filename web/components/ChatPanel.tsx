@@ -1,12 +1,12 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentClientCommand, AgentInfo, AgentServerEvent, AgentTaskUsage, ModelOption, QueuedMessage } from '../agentTypes';
-import { getTranscript, reportClientLog, searchFiles, type TranscriptItem } from '../api';
+import { getTranscript, reportClientLog, searchFiles, type SessionMatch, type TranscriptItem } from '../api';
 import { clearAttention, requestAttention } from '../attention';
 import { t, useLang } from '../i18n';
 import { acquireAgentConnection, type AgentConnectionHandle } from './agentConnections';
 import { CodeHighlight, guessLanguage } from './CodeHighlight';
 import { draftKey, readDraft, writeDraft } from './composerDrafts';
-import { deleteLiveTurn, pruneLiveTurns, readLiveTurn } from './liveTurnStore';
+import { getStream, pruneStreams } from './sessionStore';
 import { Markdown } from './Markdown';
 import { Splitter, clamp, usePersistedSize } from './Splitter';
 
@@ -126,23 +126,6 @@ type Item =
 	}
 	| { readonly kind: 'error'; readonly id: string; readonly text: string };
 
-interface CachedTranscript {
-	readonly items: readonly Item[];
-	readonly hasMore: boolean;
-	/** Index of the oldest item in the whole transcript, for "load more". */
-	readonly oldest: number;
-}
-
-/**
- * What each conversation last rendered as, kept for the life of the page.
- *
- * Switching away and back used to re-read the entire transcript from the
- * server, which on a long conversation is megabytes of jsonl for an answer that
- * cannot have changed. A reload starts from an empty cache, which is exactly
- * when asking the server again is right.
- */
-const transcriptCache = new Map<string, CachedTranscript>();
-
 interface ChatPanelProps {
 	readonly root: string;
 	readonly sessionId: string | undefined;
@@ -157,6 +140,11 @@ interface ChatPanelProps {
 	 * hit. Absent when there is no code pane to open it in.
 	 */
 	readonly onOpenPath?: (filePath: string, line?: number) => void;
+	/** A content-search hit to scroll to; the token makes repeat clicks act again. */
+	readonly focusMatch?: {
+		readonly match: SessionMatch;
+		readonly token: number;
+	};
 }
 
 /**
@@ -275,17 +263,6 @@ function toChatItems(items: readonly TranscriptItem[]): Item[] {
 	return result;
 }
 
-/** Highest `seq` in a batch, so a replay can skip whatever is already applied. */
-function maxSeqOf(events: readonly AgentServerEvent[] | null | undefined): number {
-	let max = 0;
-	for (const event of events ?? []) {
-		if (typeof event.seq === 'number' && event.seq > max) {
-			max = event.seq;
-		}
-	}
-	return max;
-}
-
 /**
  * Drops the replayed deltas of messages the jsonl already holds.
  *
@@ -315,7 +292,7 @@ function dropDurableDeltas(
 	});
 }
 
-export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStarted, onTurnEnd, onOpenPath }: ChatPanelProps) {
+export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStarted, onTurnEnd, onOpenPath, focusMatch }: ChatPanelProps) {
 	// The `/` menu caches translated labels in a memo; see its dependency list.
 	const lang = useLang();
 	const [items, setItems] = useState<readonly Item[]>([]);
@@ -553,8 +530,12 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		}
 	};
 
-	// Load history when a different session is selected. A session we just
-	// created ourselves is already in `items`, so its id is marked as loaded.
+	// Load history when a different session is selected.
+	//
+	// One path, no rendering snapshot: the jsonl tail is the durable base and the
+	// session's stream log — written by the pooled socket even while this panel
+	// was showing another conversation — is replayed on top. That log is the only
+	// live copy, so there is no cached list to go stale and silently refresh.
 	useEffect(() => {
 		if (!sessionId) {
 			if (loadedIdRef.current !== undefined) {
@@ -569,26 +550,12 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		loadedIdRef.current = sessionId;
 		resetTranscript();
 		serverBusyRef.current = undefined;
-		// The ref still mirrors the conversation that was on screen a moment ago;
-		// until the next render it would read as "this one is answering" and make
-		// the cache refresh below skip itself.
 		streamingRef.current = false;
-		// The cache is painted at once, then checked against the jsonl: a turn
-		// that finished while another conversation was on screen reached this
-		// page through no channel at all — the pooled socket idles out when it is
-		// not watched, and the server keeps no replay buffer — so trusting the
-		// snapshot made a finished turn look like a conversation that died.
-		const cached = transcriptCache.get(sessionId);
-		if (cached) {
-			setItems(cached.items);
-			setHasMore(cached.hasMore);
-			oldestRef.current = cached.oldest;
-			setStatus(t('已载入 {id}', { id: sessionId.slice(0, 8) }));
-			void pruneLiveTurns();
-			reloadTranscriptRef.current('cache-refresh', true);
-			return;
-		}
-		void pruneLiveTurns();
+		// Arm before the request: frames arriving while the transcript loads are
+		// held here and replayed once the durable tail is on screen. This effect
+		// is declared before the one that subscribes the socket.
+		replayBuffer.current = [];
+		pruneStreams();
 		getTranscript(sessionId)
 			.then(async page => {
 				if (loadedIdRef.current !== sessionId) {
@@ -610,50 +577,32 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						.map(item => item.kind === 'tool' ? `${item.name}${item.parentToolUseId ? '*' : ''}` : item.kind)
 						.join(','),
 				});
-				const buffered = replayBuffer.current;
+				const buffered = replayBuffer.current ?? [];
 				replayBuffer.current = null;
-				if (buffered) {
-					flushReplay(buffered);
-				}
-				// Everything up to `seenSeq` is on screen already; the mirror is a
-				// superset (the pooled connection keeps recording while history loads).
-				const seenSeq = maxSeqOf(buffered);
-				// Then the mirror of the turn that was streaming when the page went away
-				// or another conversation was open. The connection's own buffer is a beat
-				// newer than IndexedDB, so it wins when it has anything.
-				const liveSnapshot = connectionRef.current?.snapshot();
-				const local = liveSnapshot && liveSnapshot.events.length > 0 ? liveSnapshot : await readLiveTurn(sessionId);
-				if (loadedIdRef.current !== sessionId || !local || local.events.length === 0) {
+				flushReplay(buffered);
+				// Frames that arrived while the transcript loaded were just flushed;
+				// the log holds those too. Skip exactly those seqs — not "everything
+				// below the highest", which would also drop a longer tail recorded
+				// while this panel was showing another conversation.
+				const bufferedSeqs = new Set(buffered.map(event => event.seq));
+				const stream = getStream(sessionId);
+				if (loadedIdRef.current !== sessionId) {
 					return;
 				}
-				if (local.events[local.events.length - 1]?.type === 'result') {
-					// The turn finished but the mirror was not deleted in time (the
-					// tab died inside the flush window). The jsonl already has that
-					// turn, so replaying it would duplicate it.
-					void deleteLiveTurn(sessionId);
-					return;
-				}
-				if (serverBusyRef.current === false) {
-					// The server already said nothing is running. The mirror therefore
-					// outlived its turn — the tab went away before `result` arrived —
-					// and replaying it kept the spinner on forever.
-					void deleteLiveTurn(sessionId);
-					return;
-				}
-				for (const event of dropDurableDeltas(local.events, transcript)) {
-					if (typeof event.seq === 'number' && event.seq <= seenSeq) {
-						continue;
+				if (stream) {
+					for (const event of dropDurableDeltas(stream.events, transcript)) {
+						if (event.seq !== undefined && bufferedSeqs.has(event.seq)) {
+							continue;
+						}
+						handleEventRef.current(event);
 					}
-					handleEventRef.current(event);
-				}
-				if (local.queued.length > 0) {
-					setQueued(local.queued);
-					// The mirror is the baseline the next snapshot is compared with;
-					// without it the first shrink would replay nothing.
-					queuedRef.current = local.queued;
-				}
-				if (local.busy) {
-					setStreaming(true);
+					if (stream.queued.length > 0) {
+						setQueued(stream.queued);
+						queuedRef.current = stream.queued;
+					}
+					if (stream.busy) {
+						setStreaming(true);
+					}
 				}
 			})
 			.catch(error => {
@@ -667,16 +616,6 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			});
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [sessionId, root]);
-
-	// Keep the page-level copy in step with what is on screen, so returning to a
-	// conversation shows exactly what was left behind instead of asking again.
-	useEffect(() => {
-		const id = resumeIdRef.current;
-		if (!id || items.length === 0) {
-			return;
-		}
-		transcriptCache.set(id, { items, hasMore, oldest: oldestRef.current });
-	}, [items, hasMore]);
 
 	/**
 	 * Pulls the page before the oldest message on screen.
@@ -702,6 +641,80 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			.catch(error => setStatus(String(error)))
 			.finally(() => setLoadingMore(false));
 	};
+
+	// Scroll to a message picked from the content-search results. The hit may
+	// live on an older page, so load backwards until its anchor is on screen (or
+	// history runs out). The token makes clicking the same hit again work.
+	const handledFocusRef = useRef(0);
+	useEffect(() => {
+		if (!focusMatch || handledFocusRef.current === focusMatch.token) {
+			return;
+		}
+		const id = focusMatch.match.sessionId;
+		if (id !== sessionId) {
+			return;
+		}
+		const target = focusMatch.match.toolUseId
+			? `tool:${focusMatch.match.toolUseId}`
+			: focusMatch.match.messageId ? `msg:${focusMatch.match.messageId}` : undefined;
+		if (!target) {
+			return;
+		}
+		const reveal = () => {
+			const node = listRef.current?.querySelector(`[data-anchor="${CSS.escape(target)}"]`);
+			if (!node) {
+				return false;
+			}
+			node.scrollIntoView({ block: 'center' });
+			node.classList.add('chat-hit');
+			window.setTimeout(() => node.classList.remove('chat-hit'), 2200);
+			return true;
+		};
+		if (reveal()) {
+			handledFocusRef.current = focusMatch.token;
+			return;
+		}
+		// Not on the newest page. Ask for older slices until it appears; stop
+		// when there is nothing left above.
+		let attempts = 0;
+		let cancelled = false;
+		const step = () => {
+			if (cancelled) {
+				return;
+			}
+			if (loadedIdRef.current !== sessionId) {
+				// The transcript for this session is still being read; try again
+				// shortly instead of giving up on the jump.
+				window.setTimeout(step, 60);
+				return;
+			}
+			if (reveal()) {
+				handledFocusRef.current = focusMatch.token;
+				return;
+			}
+			if (attempts >= 12 || !hasMore || loadingMore) {
+				return;
+			}
+			attempts += 1;
+			const current = resumeIdRef.current;
+			if (!current) {
+				return;
+			}
+			void getTranscript(current, { before: oldestRef.current })
+				.then(page => {
+					if (cancelled || resumeIdRef.current !== current) {
+						return;
+					}
+					setItems(previous => [...toChatItems(page.items), ...previous]);
+					oldestRef.current = page.start ?? 0;
+					setHasMore(page.hasMore);
+					window.setTimeout(step, 0);
+				})
+				.catch(() => undefined);
+		};
+		window.setTimeout(step, 0);
+		return () => { cancelled = true; };
+	}, [focusMatch, sessionId, hasMore, loadingMore]);
 
 	const sendRef = useRef<(command: AgentClientCommand) => void>(() => undefined);
 
@@ -1014,6 +1027,11 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		// no longer closes it, so a turn that is still running keeps streaming
 		// into this connection and the IndexedDB mirror. Coming back re-renders
 		// from that snapshot — the server keeps no buffer to replay from.
+		//
+		// One connection per conversation comes from the remount: `App` keys this
+		// panel by `viewToken`, which `selectSession` bumps, so switching
+		// conversations runs this effect again with the new id. That is why the
+		// dependency list stays `[root, agent]`.
 		const connection = acquireAgentConnection(root, agent, resumeIdRef.current);
 		connectionRef.current = connection;
 		const stopState = connection.watchState(state => {
@@ -1225,17 +1243,49 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		send(target ? { type: 'promote', id, sessionId: target } : { type: 'promote', id });
 	};
 
-	/** Drops a queued message; the server answers with the surviving queue. */
-	const dropQueued = (id: string) => {
-		// Removed here first. The server is deliberately silent when the id is
-		// already gone (its turn started), and a click that leaves the row on
-		// screen reads as a broken button rather than as "too late".
-		const remaining = queuedRef.current.filter(item => item.id !== id);
+	/**
+	 * Removes a queued message, puts its text back into the composer, and drops
+	 * the bubble that `submitText` painted the moment it was queued.
+	 *
+	 * That bubble is the whole bug: cancelling only ever touched the queue
+	 * snapshot and the server, so a message that was never sent stayed on screen
+	 * as if the agent had been handed it. Recalling it here makes the visual
+	 * state match the real one — and the text is not lost, it goes back for
+	 * editing. A snapshot from another tab (where no bubble was painted) simply
+	 * finds nothing to remove.
+	 */
+	const recallQueued = (id: string) => {
+		const item = queuedRef.current.find(candidate => candidate.id === id);
+		const remaining = queuedRef.current.filter(candidate => candidate.id !== id);
 		queuedRef.current = remaining;
 		setQueued(remaining);
 		// The next snapshot no longer has this id, and the queue handler would
 		// otherwise treat that as "its turn started" and print it as a message.
 		droppedQueuedRef.current.add(id);
+		if (item) {
+			setItems(previous => {
+				// The bubble was appended by submitText, so it is the last user
+				// item with this text. Walk backwards to avoid dropping an older,
+				// already-executed message that happened to read the same.
+				for (let index = previous.length - 1; index >= 0; index -= 1) {
+					const candidate = previous[index];
+					if (candidate && candidate.kind === 'user' && candidate.text === item.text) {
+						return [...previous.slice(0, index), ...previous.slice(index + 1)];
+					}
+				}
+				return previous;
+			});
+			const shown = queueShownRef.current.indexOf(item.text);
+			if (shown >= 0) {
+				queueShownRef.current.splice(shown, 1);
+			}
+			const restored = draftRef.current.trim()
+				? `${draftRef.current.replace(/[\r\n]+$/, '')}\n${item.text}`
+				: item.text;
+			changeDraft(restored);
+			setCursor(restored.length);
+		}
+		inputRef.current?.focus();
 		const target = stopTargetId();
 		send(target ? { type: 'dequeue', id, sessionId: target } : { type: 'dequeue', id });
 	};
@@ -1549,6 +1599,9 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 							item={item}
 							childrenOf={childrenOf}
 							outputOf={outputOf}
+							anchor={item.kind === 'tool'
+								? `tool:${item.id}`
+								: 'messageId' in item && item.messageId ? `msg:${item.messageId}` : undefined}
 							live={streaming && index === roots.length - 1}
 							onDismiss={id => setItems(previous => previous.filter(entry => entry.id !== id))}
 						/>
@@ -1651,10 +1704,10 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 							<button
 								type="button"
 								className="queue-drop"
-								title={t('从队列里去掉这条消息')}
-								onClick={() => dropQueued(item.id)}
+								title={t('从队列里移除，并把文字放回输入框以便修改')}
+								onClick={() => recallQueued(item.id)}
 							>
-								{t('取消')}
+								{t('取回编辑')}
 							</button>
 						</span>
 					))}
@@ -1829,7 +1882,7 @@ function hasMermaidDiagram(text: string): boolean {
 	return /^[ \t]*```+[ \t]*mermaid\b[\s\S]*?^[ \t]*```+[ \t]*$/im.test(text);
 }
 
-function ChatItemView({ item, childrenOf, outputOf, live = false, onDismiss }: {
+function ChatItemView({ item, childrenOf, outputOf, live = false, onDismiss, anchor }: {
 	readonly item: Item;
 	readonly childrenOf: (id: string) => readonly Item[];
 	readonly outputOf: (taskId: string) => string | undefined;
@@ -1837,7 +1890,10 @@ function ChatItemView({ item, childrenOf, outputOf, live = false, onDismiss }: {
 	readonly live?: boolean;
 	/** Error bubbles are transient news, not history: they can be closed. */
 	readonly onDismiss?: (id: string) => void;
+	/** DOM marker used by content-search to scroll to this item. */
+	readonly anchor?: string;
 }) {
+	const body = (() => {
 	switch (item.kind) {
 		case 'user':
 			// A message steered into a running turn is worth marking: it was never a
@@ -1883,6 +1939,10 @@ function ChatItemView({ item, childrenOf, outputOf, live = false, onDismiss }: {
 				</div>
 			);
 	}
+	})();
+	return anchor === undefined
+		? body
+		: <div className="chat-anchor" data-anchor={anchor}>{body}</div>;
 }
 
 /**

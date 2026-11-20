@@ -69,18 +69,18 @@ claude --print --verbose \
 
 1. **`seq` 每条会话单调递增，永不重置**。流式事件带 `seq`；`session_state` / `config` / `queue` / `system` 描述状态，不带 `seq`。
 2. **观众是集合，不是独占**。`attach` 把 socket 加进 `entry.sockets`，`detach` 移出；`emit` 广播给集合里所有活着的 socket。两个标签看同一会话互不顶掉。
-3. **服务端不缓冲事件**。`LiveSession.log` 的写入已注释停用（`MAX_LOG_EVENTS`、`_replayTail` 一并保留为注释，需要时可整块恢复）。原因：切会话根本不断 socket，回来看的是客户端自己的镜像；而服务端那份缓冲没有字节上限（`tool_result` 不截断），且一轮跑完后要等到下一轮才清空，活着的会话越多越占内存。代价是 socket 真的断开时，正在流式输出的那一段会丢——jsonl 是逐条落盘的，已完成的 message 不受影响。
+3. **服务端保留一轮的有界日志**。`LiveSession.log` 收最近 2000 条带 `seq` 的事件；新一轮开始与 `result`/`exit` 时清空。`attach` 带 `lastSeq` 时只回放 `seq > lastSeq` 的事件，覆盖不到就由客户端回退到 jsonl。
 
 由此得到的行为：
 
 ```
-A 正在跑 → 切到 B：A 的连接不关（只是没人渲染），事件继续进 A 的镜像
-        → 切回 A：重放 A 自己的镜像（连接 snapshot / IndexedDB），不需要服务端
-刷新页面：靠 jsonl + IndexedDB 镜像
-断线重连：断线期间正在流式的那一段丢失，服务端不补
+A 正在跑 → 切到 B：A 的连接不关（只是没人渲染），事件继续写进 A 的会话日志
+        → 切回 A：jsonl 最新一页 + A 的日志回放，不需要本地持久化镜像
+刷新页面：完全靠 jsonl（正在流式、尚未落盘的那条要等它写完才出现）
+断线重连：attach 带 lastSeq，服务端补发断线期间的事件，落进同一份日志
 ```
 
-前端由 `web/components/agentConnections.ts` 的连接池负责：每个会话一条连接，面板借用再归还，切走不关；没人看时若这一轮还在跑就继续收，跑完 15 秒后关闭（最多保留 4 条后台连接）。
+前端由 `web/components/agentConnections.ts` 的连接池负责：每个会话一条连接，面板借用再归还，切走不关；没人看时若这一轮还在跑就继续收，跑完 15 秒后关闭（空闲后台连接最多 4 条，正在跑的永不主动关闭）。日志在 `web/components/sessionStore.ts`，按会话分槽、只在页面内存里。
 
 ## 控制通道
 

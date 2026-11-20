@@ -12,7 +12,7 @@
 │  App ─┬─ SessionSidebar   会话列表（项目分组）                     │
 │       ├─ ChatPanel        对话主流程                               │
 │       │    ├─ Markdown / CodeHighlight / BashCard / ThinkingBlock │
-│       │    └─ liveTurnStore ──► IndexedDB（进行中轮次的镜像）       │
+│       │    └─ sessionStore   按会话分槽的流日志（仅页面内存）        │
 │       └─ Workspace ─┬─ FileTree / ChangesList                    │
 │                     ├─ Editor / DiffView（Monaco）                │
 │                     └─ Terminal（xterm）                          │

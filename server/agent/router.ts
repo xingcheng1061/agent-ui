@@ -52,19 +52,16 @@ interface LiveSession {
 	/** A turn is being answered; reaping now would silently kill the work. */
 	busy: boolean;
 	/**
-	 * Buffered events of the turn in flight, each already carrying its `seq`.
+	 * Events of the most recent turn, each already carrying its `seq`.
 	 *
-	 * DISABLED: nothing is written here any more. Switching conversations never
-	 * closes the socket (the browser pool keeps it, see `agentConnections.ts`),
-	 * so the panel coming back has its own copy already, and a finished turn
-	 * belongs to the jsonl. The server-side copy therefore only cost memory on
-	 * every session that still had a process — up to `MAX_LOG_EVENTS` events,
-	 * with no byte cap, kept until the next turn started.
+	 * A reconnect sends its highest applied seq on `attach`, and this log is what
+	 * lets the server hand back only the events it missed. The browser keeps no
+	 * transcript on disk, so without this a dropped socket loses every delta
+	 * produced while it was down — the jsonl does not have them until the
+	 * message finishes.
 	 *
-	 * The field, the `entry.log.push` block, `MAX_LOG_EVENTS` and `_replayTail`
-	 * are kept commented/empty so the mechanism can be restored as a unit: the
-	 * price of turning it back on is that a dropped socket loses whatever the
-	 * browser missed mid-stream, which the jsonl does not have yet.
+	 * Bounded by count and cleared when the next turn starts, so this is a
+	 * per-turn relay buffer, not a second history.
 	 */
 	readonly log: AgentServerEvent[];
 	/** Highest `seq` handed out for this session; never reset. */
@@ -77,16 +74,29 @@ interface LiveSession {
 	 * of their own in the transcript. See {@link QueuedMessage}.
 	 */
 	queued: QueuedMessage[];
+	/** Running tasks / subagents, keyed by task id, for the global task panel. */
+	tasks: Map<string, RunningTaskInfo>;
 }
 
-// /** Upper bound on the in-flight event log; deltas are numerous. */
-// const MAX_LOG_EVENTS = 4000;
+/** Upper bound on the in-flight event log; a turn can produce thousands of deltas. */
+const MAX_LOG_EVENTS = 2000;
 
 /** How often dead peers are probed; a missed pong terminates the socket. */
 const KEEP_ALIVE_INTERVAL_MS = 30_000;
 
 /** Tracks liveness per socket without leaking a parallel map. */
 type TrackedSocket = WebSocket & { _agentAlive?: boolean };
+
+/** A background task / subagent the CLI reported for one conversation. */
+export interface RunningTaskInfo {
+	readonly taskId: string;
+	readonly toolUseId?: string;
+	readonly status: string;
+	readonly description?: string;
+	readonly subagentType?: string;
+	readonly taskType?: string;
+	readonly startedAt: number;
+}
 
 /** What the sidebar needs to know about a conversation that still has a process. */
 export interface RunningSessionInfo {
@@ -99,6 +109,20 @@ export interface RunningSessionInfo {
 	readonly pendingTool?: string;
 	readonly permissionMode?: string;
 	readonly lastSeq: number;
+	/** Tasks still running in this conversation; finished ones drop off. */
+	readonly tasks: readonly RunningTaskInfo[];
+}
+
+/**
+ * Force-stop hook keyed by task id. The CLI only lets the model call `TaskStop`,
+ * so the closest thing to a per-task stop is ending the owning conversation's
+ * turn/process. Exposed through the HTTP side for the global task panel.
+ */
+let stopTaskLive: (taskId: string, hard: boolean) => boolean = () => false;
+
+/** Ends the work behind a task; `hard` kills the process instead of interrupting. */
+export function stopRunningTask(taskId: string, hard = false): boolean {
+	return stopTaskLive(taskId, hard);
 }
 
 /**
@@ -182,6 +206,7 @@ export function createAgentServer(options: Omit<AgentServerOptions, 'cwd'>): Web
 				pendingTool: entry.session.pendingPermission?.()?.prompt.toolName,
 				permissionMode: entry.permissionMode,
 				lastSeq: entry.lastSeq,
+				tasks: [...entry.tasks.values()],
 			});
 		}
 		return running;
@@ -209,6 +234,24 @@ export function createAgentServer(options: Omit<AgentServerOptions, 'cwd'>): Web
 			if (value === entry) {
 				live.delete(key);
 			}
+		}
+		return true;
+	};
+	stopTaskLive = (taskId, hard) => {
+		const entry = [...live.values()].find(item => item.tasks.has(taskId));
+		if (!entry) {
+			return false;
+		}
+		if (hard) {
+			// The hard path is the same one DELETE uses: announce the exit, drop
+			// the watchers, then dispose. Reusing the hook keeps that sequence in
+			// one place instead of duplicating it under a different code path.
+			const cliId = entry.cliSessionId;
+			if (cliId) {
+				killRunningSession(cliId);
+			}
+		} else {
+			entry.session.interrupt();
 		}
 		return true;
 	};
@@ -480,6 +523,7 @@ class AgentConnection {
 		this._persistQueue(entry);
 		this._log(`starting queued message ${next.id.slice(0, 8)} (${entry.queued.length} left)`);
 		entry.busy = true;
+		entry.log.length = 0;
 		// The client just saw `result` (which ends a turn) and the queue shrink;
 		// without this it would think nothing is running while this one works.
 		this._announceBusy(entry);
@@ -562,12 +606,18 @@ class AgentConnection {
 					}
 				}
 				if (entry) {
+					// A socket follows one conversation at a time. Without this the
+					// previous entry kept the socket in its `sockets` set, so its
+					// events kept arriving at a panel that had already moved on.
+					if (this._entry && this._entry !== entry) {
+						this._detach();
+					}
 					this._attach(entry);
 					const lastSeq = typeof command.lastSeq === 'number' && command.lastSeq > 0 ? command.lastSeq : undefined;
 					this._log(`attach adopted ${entry.cliSessionId?.slice(0, 8) ?? '(pending)'} busy=${entry.busy} lastSeq=${lastSeq ?? '-'}`);
-					// Buffering is disabled: the browser pool keeps its socket, so a
-					// panel that comes back already has the events it needs.
-					// this._replayTail(entry, lastSeq);
+					// A socket that dropped out while the turn was running comes back
+					// with its last applied seq; hand it only what it has not seen.
+					this._replayTail(entry, lastSeq);
 					// Always, including the empty list: a client that shows a queue
 					// entry the server no longer has cannot cancel it, and cancelling
 					// a phantom looks exactly like "cancel does not work".
@@ -624,6 +674,9 @@ class AgentConnection {
 					return;
 				}
 				entry.busy = true;
+				// The log is per-turn: the previous turn's events are already in the
+				// jsonl and replaying them would duplicate its tail here.
+				entry.log.length = 0;
 				// The attach above already told this client `busy: false`; correct it
 				// before the turn's first event, or the button stays on 发送.
 				this._announceBusy(entry);
@@ -848,6 +901,7 @@ class AgentConnection {
 				entry.permissionMode = event.permissionMode ?? entry.permissionMode;
 			} else if (event.type === 'result') {
 				entry.busy = false;
+				entry.tasks.clear();
 				this._log(`result ${event.subtype}${event.text ? '' : ' (no text)'}`);
 				// The turn is over, so the next queued message can start one of its
 				// own; it must go out before the reap check, or an unwatched session
@@ -866,6 +920,31 @@ class AgentConnection {
 				this._log(`error ${event.message}`);
 			}
 
+			// Track running tasks for the global panel. Completion removes them;
+			// the CLI's own transcript keeps the full history.
+			if (event.type === 'task_started') {
+				entry.tasks.set(event.taskId, {
+					taskId: event.taskId,
+					toolUseId: event.toolUseId,
+					status: 'running',
+					description: event.description,
+					subagentType: event.subagentType,
+					taskType: event.taskType,
+					startedAt: Date.now(),
+				});
+			} else if (event.type === 'task_updated' || event.type === 'task_progress') {
+				const existing = entry.tasks.get(event.taskId);
+				if (existing) {
+					entry.tasks.set(event.taskId, {
+						...existing,
+						status: event.type === 'task_updated' ? event.status : existing.status,
+						description: ('description' in event ? event.description : undefined) ?? existing.description,
+					});
+				}
+			} else if (event.type === 'task_notification') {
+				entry.tasks.delete(event.taskId);
+			}
+
 			// Config snapshots describe state, not a step of the stream, so they are
 			// delivered without consuming a sequence number.
 			if (event.type === 'config' || event.type === 'queue' || event.type === 'session_state') {
@@ -875,16 +954,20 @@ class AgentConnection {
 
 			entry.lastSeq += 1;
 			const outbound = { ...event, seq: entry.lastSeq } satisfies AgentServerEvent;
-			// Buffering is disabled (see `LiveSession.log`): events go straight to
-			// the watchers. Only the turn in flight used to be kept, and it was
-			// cleared when the next turn started.
-			// if (entry.busy || event.type === 'result' || event.type === 'exit') {
-			// 	entry.log.push(outbound);
-			// 	if (entry.log.length > MAX_LOG_EVENTS) {
-			// 		entry.log.splice(0, entry.log.length - MAX_LOG_EVENTS);
-			// 	}
-			// }
+			// Keep the tail of the turn so a reconnecting socket can ask for
+			// exactly what it missed. `result`/`exit` are kept too: they are the
+			// last thing a client that dropped out mid-answer needs to see.
+			entry.log.push(outbound);
+			if (entry.log.length > MAX_LOG_EVENTS) {
+				entry.log.splice(0, entry.log.length - MAX_LOG_EVENTS);
+			}
 			this._broadcast(entry, JSON.stringify(outbound));
+			// The turn is now durable in the jsonl. Keeping its events would replay
+			// a finished turn into the next page that attaches, duplicating the
+			// result card on top of the transcript's copy.
+			if (event.type === 'result' || event.type === 'exit') {
+				entry.log.length = 0;
+			}
 		};
 
 		entry = {
@@ -906,9 +989,10 @@ class AgentConnection {
 			sockets: new Set(),
 			busy: false,
 			log: [],
-			lastSeq: 0,
-			queued: [],
-		};
+				lastSeq: 0,
+				queued: [],
+				tasks: new Map(),
+			};
 		entry.model = model;
 		entry.permissionMode = permissionMode;
 		this._live.set(resumeSessionId ?? entry.session.id, entry);
@@ -1000,26 +1084,25 @@ class AgentConnection {
 	}
 
 	/**
-	 * DISABLED with the buffer itself — there is nothing to replay.
+	 * Sends only the events the reconnecting client has not applied.
 	 *
-	 * What it used to do: replay the part of the running turn a returning client
-	 * had not seen, using the client's own high-water mark so only the missed
-	 * tail was sent. Kept here so the mechanism can be restored as a unit
-	 * together with `LiveSession.log` and the `entry.log.push` block.
+	 * With no `lastSeq` (a fresh page) there is nothing to resume from, so the
+	 * client falls back to the jsonl tail; replaying the whole turn here would
+	 * duplicate what the transcript already carries.
 	 */
-	// private _replayTail(entry: LiveSession, lastSeq: number | undefined): void {
-	// 	if (lastSeq === undefined || !entry.busy) {
-	// 		return;
-	// 	}
-	// 	const tail = entry.log.filter(event => (event.seq ?? 0) > lastSeq);
-	// 	if (tail.length === 0) {
-	// 		return;
-	// 	}
-	// 	this._log(`replaying ${tail.length} buffered events after seq ${lastSeq}`);
-	// 	for (const event of tail) {
-	// 		this._send(event);
-	// 	}
-	// }
+	private _replayTail(entry: LiveSession, lastSeq: number | undefined): void {
+		if (lastSeq === undefined) {
+			return;
+		}
+		const tail = entry.log.filter(event => (event.seq ?? 0) > lastSeq);
+		if (tail.length === 0) {
+			return;
+		}
+		this._log(`replaying ${tail.length} buffered events after seq ${lastSeq}`);
+		for (const event of tail) {
+			this._send(event);
+		}
+	}
 
 	private _detach(): void {
 		const entry = this._entry;

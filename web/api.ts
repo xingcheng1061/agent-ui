@@ -25,6 +25,30 @@ export interface SessionEntry {
 	readonly groupId?: string;
 }
 
+/** One content hit from the full-text search across transcripts. */
+export interface SessionMatch {
+	readonly sessionId: string;
+	readonly projectId: string;
+	readonly cwd: string;
+	readonly title: string;
+	readonly updatedAt: number;
+	readonly archived: boolean;
+	readonly kind: string;
+	readonly snippet: string;
+	readonly messageId?: string;
+	readonly toolUseId?: string;
+	readonly index: number;
+}
+
+export async function searchSessions(query: string, includeArchived = false): Promise<readonly SessionMatch[]> {
+	const params = new URLSearchParams({ q: query });
+	if (includeArchived) {
+		params.set('includeArchived', '1');
+	}
+	const result = await requestJson<{ matches: SessionMatch[] }>(`/api/search?${params.toString()}`);
+	return result.matches;
+}
+
 /** A named bundle of conversations that may come from different projects. */
 export interface GroupInfo {
 	readonly id: string;
@@ -622,6 +646,16 @@ export async function changePassword(current: string, next: string): Promise<voi
 // ------------------------------------------------------------ agent sessions
 
 /** One conversation that still has a process, even if no tab is showing it. */
+export interface RunningTask {
+	readonly taskId: string;
+	readonly toolUseId?: string;
+	readonly status: string;
+	readonly description?: string;
+	readonly subagentType?: string;
+	readonly taskType?: string;
+	readonly startedAt: number;
+}
+
 export interface RunningSession {
 	readonly sessionId: string;
 	readonly root: string;
@@ -630,11 +664,25 @@ export interface RunningSession {
 	/** Set while the process is blocked on an approval the user has not given. */
 	readonly pendingTool?: string;
 	readonly permissionMode?: string;
+	/** Background tasks / subagents still running in this conversation. */
+	readonly tasks: readonly RunningTask[];
 }
 
 export async function runningSessions(): Promise<readonly RunningSession[]> {
 	const result = await requestJson<{ sessions: RunningSession[] }>('/api/agents/running');
 	return result.sessions;
+}
+
+/**
+ * Stops the work behind a task. The CLI cannot stop one task in isolation, so
+ * `hard: false` interrupts the owning turn and `hard: true` kills its process.
+ */
+export async function stopRunningTask(taskId: string, hard = false): Promise<'killed' | 'interrupted'> {
+	const result = await requestJson<{ stopped: 'killed' | 'interrupted' }>(`/api/agents/tasks/${encodeURIComponent(taskId)}/stop`, {
+		method: 'POST',
+		body: JSON.stringify({ hard }),
+	});
+	return result.stopped;
 }
 
 // --------------------------------------------------------------- terminals

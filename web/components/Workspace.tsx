@@ -5,6 +5,7 @@ import { ChangesList } from './ChangesList';
 import { DiffView } from './DiffView';
 import { Editor } from './Editor';
 import { attachLsp } from './editorLsp';
+import { FileBreadcrumbs } from './FileBreadcrumbs';
 import { FileTree } from './FileTree';
 import { Splitter, clamp, usePersistedSize } from './Splitter';
 import { TerminalView } from './Terminal';
@@ -33,8 +34,13 @@ interface OpenFile {
 	readonly column?: number;
 }
 
-/** The terminal a project lands on when nothing was remembered. */
-const PREFERRED_TERMINAL_KEY = 'agentui.terminal.active';
+/**
+ * The terminal a project lands on when nothing was remembered. Scoped per root:
+ * one global key meant switching projects overwrote the other's choice, and
+ * coming back selected the project's first terminal instead of the last used.
+ */
+const preferredTerminalKey = (root: string): string =>
+	`agentui.terminal.active.${root.replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase()}`;
 
 /**
  * Terminal records are keyed by the root the server resolved, while the
@@ -188,7 +194,7 @@ export function Workspace({ root, projects, revision, openRequest }: WorkspacePr
 		let cancelled = false;
 		void (async () => {
 			const existing = await listTerminals();
-			const remembered = localStorage.getItem(PREFERRED_TERMINAL_KEY) ?? undefined;
+			const remembered = localStorage.getItem(preferredTerminalKey(root)) ?? undefined;
 			if (cancelled) {
 				return;
 			}
@@ -212,9 +218,9 @@ export function Workspace({ root, projects, revision, openRequest }: WorkspacePr
 
 	useEffect(() => {
 		if (activeTerminal) {
-			localStorage.setItem(PREFERRED_TERMINAL_KEY, activeTerminal);
+			localStorage.setItem(preferredTerminalKey(root), activeTerminal);
 		}
-	}, [activeTerminal]);
+	}, [activeTerminal, root]);
 
 	const addTerminal = async () => {
 		const created = await createTerminal(root);
@@ -433,6 +439,13 @@ export function Workspace({ root, projects, revision, openRequest }: WorkspacePr
 			<Splitter axis="x" onResize={delta => setTreeWidth(clamp(treeWidth + delta, 120, 520))} />
 
 			<div className="code-pane">
+				{opened && !diffPath && (
+					<FileBreadcrumbs
+						root={opened.root}
+						path={opened.path}
+						onOpenFile={filePath => openFileFrom({ root: opened.root, path: filePath })}
+					/>
+				)}
 				<div className="tabbar">
 					{diffPath
 						? <span className="tab">diff · {diffPath}</span>

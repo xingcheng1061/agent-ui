@@ -161,9 +161,11 @@ npm start
 
 **这是区分「用户刷新」和「标签页崩溃」的唯一手段**：刷新一定先有 `pagehide`，崩溃只有 `ws-close code=1006`。
 
-### 查看 IndexedDB 镜像
+### 查看进行中轮次的日志
 
-DevTools → Application → IndexedDB → `agent-ui-live` → `turns`。每条记录是 `{sessionId, events, queued, busy, updatedAt}`。轮次结束后记录会被删掉，所以只有进行中的会话在这里看得见。
+`web/components/sessionStore.ts` 的模块级 `Map<sessionId, SessionStream>`，仅在页面内存中，DevTools 的 Storage 面板看不到（可打断点看 `getStream(id)`，或用 Heap snapshot 搜 `SessionStream`）。每条是 `{events, queued, busy, updatedAt}`；`result`/`exit` 到达时 `events` 被清空。
+
+浏览器存储里不再有会话内容：localStorage 只有草稿、偏好等首帧镜像。服务端的回放日志可看 `server/agent/router.ts` 的 `LiveSession.log`（有 DEBUG 日志 `attach adopted … lastSeq=…` 和 `replaying N buffered events`）。
 
 ### 查看 CLI 的原始会话
 
@@ -184,7 +186,9 @@ DevTools → Application → IndexedDB → `agent-ui-live` → `turns`。每条�
 
 ### 刷新后看不到进行中的那半轮
 
-IndexedDB 镜像只在**同一个浏览器**有效。换浏览器看不到是设计使然。同浏览器也不行的话，检查 DevTools 里 IndexedDB 是否被禁用（隐私模式）。
+浏览器不再保存会话内容，刷新后只有 jsonl 里已落盘的消息——CLI 要等一条消息写完才追加，所以正在流的那条要等它完成后才出现。这是设计使然，不是故障；换浏览器也看不到尚未落盘的部分。
+
+如果同一会话刷新后**已完成**的内容也缺，检查 `GET /api/sessions/:id` 是否返回了最新一页，以及客户端日志里 `transcript` / `transcript-error` 的项数和 shape。断线期间的输出由服务端 `seq` 回放补齐，可看日志里的 `replaying N buffered events`。
 
 ### 端口被占用
 

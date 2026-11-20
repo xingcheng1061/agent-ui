@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { preloadAgentState } from './agent/agentState.js';
 import { requestPermissionFromBrowser } from './agent/permissionGateway.js';
-import { createAgentServer, killRunningSession, listRunningSessions, restartRunningSession } from './agent/router.js';
+import { createAgentServer, killRunningSession, listRunningSessions, restartRunningSession, stopRunningTask } from './agent/router.js';
 import { createAgentRuntime, disposeAgentRuntime } from './agent/runtime.js';
 import {
 	ACCESS_TOKEN,
@@ -56,7 +56,7 @@ import { resolveModels } from './models.js';
 import { BadRequestError, PathOutsideRootError, readStringQuery, resolveRoot, shouldIgnore, toAbsolute } from './paths.js';
 import { addPersistedRoot } from './projectStore.js';
 import { invalidateProjectsCache, listProjects, slugFor } from './projects.js';
-import { deleteSession, listAllSessions, readTranscriptById, renameSession, setSessionArchived } from './sessions.js';
+import { deleteSession, listAllSessions, readTranscriptById, renameSession, searchSessions, setSessionArchived } from './sessions.js';
 import {
 	closeTerminal,
 	createTerminal,
@@ -324,6 +324,23 @@ app.get('/api/agents/running', async (_req, res) => {
 	res.json({ sessions: listRunningSessions() });
 });
 
+/**
+ * Stops the work behind a background task/subagent.
+ *
+ * The CLI cannot stop an individual task from outside — `TaskStop` is a tool
+ * only the model may call — so this interrupts the owning conversation's turn
+ * (`hard=false`) or kills its process (`hard=true`). The caller is told which
+ * happened: the button must not imply a precision the CLI does not offer.
+ */
+app.post('/api/agents/tasks/:taskId/stop', async (req, res) => {
+	const hard = req.body?.['hard'] === true;
+	const stopped = stopRunningTask(req.params.taskId, hard);
+	if (!stopped) {
+		throw new BadRequestError('任务已结束，或其会话没有运行中的进程。');
+	}
+	res.json({ ok: true, stopped: hard ? 'killed' : 'interrupted' });
+});
+
 /** Projects are derived from the CLI's own session store, so nothing needs registering. */
 app.get('/api/projects', async (_req, res) => {
 	res.json({ projects: await listProjects() });
@@ -498,6 +515,17 @@ async function systemRoots(): Promise<readonly string[]> {
 app.get('/api/sessions', async (req, res) => {
 	const includeArchived = req.query['includeArchived'] === '1';
 	res.json({ sessions: await listAllSessions({ includeArchived }) });
+});
+
+/** Full-text search over transcript messages across all projects. */
+app.get('/api/search', async (req, res) => {
+	const query = typeof req.query['q'] === 'string' ? readStringQuery(req.query['q'], 'q') : '';
+	if (!query.trim()) {
+		res.json({ matches: [] });
+		return;
+	}
+	const includeArchived = req.query['includeArchived'] === '1';
+	res.json({ matches: await searchSessions(query, { includeArchived }) });
 });
 
 /**

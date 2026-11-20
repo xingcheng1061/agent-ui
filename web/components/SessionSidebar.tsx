@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { GroupInfo, ProjectInfo, SessionEntry } from '../api';
+import { searchSessions, type GroupInfo, type ProjectInfo, type SessionEntry, type SessionMatch } from '../api';
 import { t, useLang } from '../i18n';
 import { ALL, ProjectFilter } from './ProjectFilter';
 import { projectLabels } from '../projectNames';
@@ -93,6 +93,21 @@ function writeProjectSort(value: ProjectSort): void {
 	}
 }
 
+/** Marks the query inside a result snippet without using dangerouslySetInnerHTML. */
+function Highlighted({ text, query }: { readonly text: string; readonly query: string }) {
+	const at = text.toLowerCase().indexOf(query.trim().toLowerCase());
+	if (at < 0 || query.trim() === '') {
+		return <>{text}</>;
+	}
+	return (
+		<>
+			{text.slice(0, at)}
+			<mark>{text.slice(at, at + query.trim().length)}</mark>
+			{text.slice(at + query.trim().length)}
+		</>
+	);
+}
+
 interface SessionSidebarProps {
 	readonly projects: readonly ProjectInfo[];
 	readonly sessions: readonly SessionEntry[];
@@ -100,6 +115,8 @@ interface SessionSidebarProps {
 	readonly groups: readonly GroupInfo[];
 	readonly activeSessionId: string | undefined;
 	readonly onSelectSession: (session: SessionEntry) => void;
+	/** Opens a content-search hit and scrolls the chat to the matching message. */
+	readonly onOpenMatch: (match: SessionMatch) => void;
 	readonly onNewSession: () => void;
 	/** Picks a folder to open for reading, without starting a conversation. */
 	readonly onOpenProject: () => void;
@@ -159,6 +176,7 @@ export function SessionSidebar({
 	groups,
 	activeSessionId,
 	onSelectSession,
+	onOpenMatch,
 	onNewSession,
 	onOpenProject,
 	openedProjects,
@@ -219,6 +237,13 @@ export function SessionSidebar({
 	 */
 	const [query, setQuery] = useState('');
 	const searchRef = useRef<HTMLInputElement | null>(null);
+	/**
+	 * Message-body hits from the server, kept separate from the title filter:
+	 * a title match is a conversation to open, a body match is a specific line
+	 * to jump to. Empty while the query is short or the search is still running.
+	 */
+	const [contentMatches, setContentMatches] = useState<readonly SessionMatch[]>([]);
+	const [searchingContent, setSearchingContent] = useState(false);
 	/** Filter over the folders that are open; paths get long, so it earns one. */
 	const [projectQuery, setProjectQuery] = useState('');
 	const [renamingGroupId, setRenamingGroupId] = useState<string | undefined>(undefined);
@@ -378,6 +403,38 @@ export function SessionSidebar({
 	const matchesSession = (session: SessionEntry) => !searching
 		|| `${session.title} ${projectName(session.projectId)}`.toLowerCase().includes(search);
 	const matchesGroupName = (group: GroupInfo) => group.name.toLowerCase().includes(search);
+
+	// Full-text search runs on the server because the message bodies live in
+	// jsonl, not in this list. Debounced so typing does not scan every project
+	// on every keystroke; an outdated reply is ignored by matching the query.
+	useEffect(() => {
+		const term = query.trim();
+		if (term.length < 2) {
+			setContentMatches([]);
+			setSearchingContent(false);
+			return;
+		}
+		setSearchingContent(true);
+		const timer = window.setTimeout(() => {
+			void searchSessions(term, showArchived)
+				.then(matches => {
+					if (query.trim() === term) {
+						setContentMatches(matches);
+					}
+				})
+				.catch(() => {
+					if (query.trim() === term) {
+						setContentMatches([]);
+					}
+				})
+				.finally(() => {
+					if (query.trim() === term) {
+						setSearchingContent(false);
+					}
+				});
+		}, 250);
+		return () => window.clearTimeout(timer);
+	}, [query, showArchived]);
 
 	/**
 	 * Ctrl+F focuses the filter, unless something already owns that key.
@@ -693,8 +750,8 @@ export function SessionSidebar({
 							<input
 								ref={searchRef}
 								value={query}
-								placeholder={t('搜索会话或组（Ctrl+F）')}
-								aria-label={t('搜索会话或组')}
+								placeholder={t('搜索会话、组或消息内容（Ctrl+F）')}
+								aria-label={t('搜索会话、组或消息内容')}
 								onChange={event => setQuery(event.target.value)}
 								onKeyDown={event => {
 									if (event.key === 'Escape') {
@@ -737,6 +794,32 @@ export function SessionSidebar({
 			 */}
 			{view === 'sessions' ? (
 			<div className="rail-list">
+				{searching && (
+					<div className="content-search">
+						<div className="content-search-head">
+							<span>{searchingContent ? t('搜索消息内容…') : t('消息内容 · {count}', { count: contentMatches.length })}</span>
+						</div>
+						{contentMatches.map((match, index) => (
+							<button
+								type="button"
+								key={`${match.sessionId}:${match.index}:${index}`}
+								className="content-hit"
+								title={`${match.snippet}\n${match.cwd}`}
+								onClick={() => onOpenMatch(match)}
+							>
+								<span className="content-hit-meta">
+									<span className="content-hit-kind">{match.kind}</span>
+									<span className="content-hit-title">{match.title}</span>
+									<span className="content-hit-project">{projectName(match.projectId)}</span>
+								</span>
+								<span className="content-hit-snippet"><Highlighted text={match.snippet} query={query} /></span>
+							</button>
+						))}
+						{!searchingContent && contentMatches.length === 0 && (
+							<div className="content-search-empty">{t('没有在消息内容里找到匹配')}</div>
+						)}
+					</div>
+				)}
 				{/*
 				 * Groups are the one cross-project thing in the rail, and the only
 				 * way to make one used to be a hover button on a conversation row

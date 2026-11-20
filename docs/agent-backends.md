@@ -216,7 +216,7 @@ const agents = await createAgentRuntime({
 - `system`：至少带 `sessionId`。没有它前端拿不到会话 id，刷新后无法续接；`supportsResume: false` 时也要给一个稳定 id（用内部 id 即可）
 - `assistant_delta` / `thinking_delta`：流式文本
 - `tool_use` / `tool_result`：工具调用与返回，`id` 必须能配对
-- `result`：一轮结束。前端靠它退出 streaming 状态、刷新代码面板、清掉 IndexedDB 镜像
+- `result`：一轮结束。前端靠它退出 streaming 状态、刷新代码面板、清掉会话日志；服务端也用它在广播后清空回放缓冲
 - `error` / `exit`：失败与进程终止
 
 **语义约定**
