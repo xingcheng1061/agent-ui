@@ -40,10 +40,13 @@ export interface SessionMatch {
 	readonly index: number;
 }
 
-export async function searchSessions(query: string, includeArchived = false): Promise<readonly SessionMatch[]> {
+export async function searchSessions(query: string, includeArchived = false, sessionId?: string): Promise<readonly SessionMatch[]> {
 	const params = new URLSearchParams({ q: query });
 	if (includeArchived) {
 		params.set('includeArchived', '1');
+	}
+	if (sessionId) {
+		params.set('sessionId', sessionId);
 	}
 	const result = await requestJson<{ matches: SessionMatch[] }>(`/api/search?${params.toString()}`);
 	return result.matches;

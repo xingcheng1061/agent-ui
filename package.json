@@ -48,6 +48,7 @@
 		"prepack": "npm run build"
 	},
 	"dependencies": {
+		"@xterm/addon-search": "^0.15.0",
 		"cordis": "^3.18.1",
 		"express": "^5.1.0",
 		"node-pty": "^1.0.0",

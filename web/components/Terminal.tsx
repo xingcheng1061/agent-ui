@@ -20,7 +20,11 @@ interface TerminalViewProps {
  */
 export function TerminalView({ terminalId, root, onOpenTarget }: TerminalViewProps) {
 	const slotRef = useRef<HTMLDivElement | null>(null);
+	const hostRef = useRef<HTMLDivElement | null>(null);
 	const sessionRef = useRef<TerminalSession | undefined>(undefined);
+	const [findOpen, setFindOpen] = useState(false);
+	const [findTerm, setFindTerm] = useState('');
+	const findInputRef = useRef<HTMLInputElement | null>(null);
 	// The screen outlives this component, so the handler it calls is read
 	// through a ref: re-registering one on every render would be churn, and a
 	// stale closure would open files against the previous project root.
@@ -29,6 +33,35 @@ export function TerminalView({ terminalId, root, onOpenTarget }: TerminalViewPro
 	// Seeded from the pool: coming back to a live screen must not paint an
 	// overlay first and hide it again on the next tick.
 	const [state, setState] = useState<TerminalState>(() => peekTerminalState(terminalId));
+
+	// Ctrl+F while the terminal has focus opens a find box on this screen.
+	useEffect(() => {
+		const onFind = () => {
+			setFindOpen(true);
+			window.setTimeout(() => findInputRef.current?.focus(), 0);
+		};
+		window.addEventListener('agentui:find-terminal', onFind);
+		return () => window.removeEventListener('agentui:find-terminal', onFind);
+	}, []);
+
+	// A different terminal tab came up: this box belongs to the old screen.
+	useEffect(() => {
+		setFindOpen(false);
+		setFindTerm('');
+		sessionRef.current?.clearFind();
+	}, [terminalId]);
+
+	const runFind = (term: string, backwards = false) => {
+		setFindTerm(term);
+		if (term !== '') {
+			sessionRef.current?.find(term, backwards);
+		}
+	};
+
+	const closeFind = () => {
+		setFindOpen(false);
+		sessionRef.current?.clearFind();
+	};
 
 	useEffect(() => {
 		const slot = slotRef.current;
@@ -55,8 +88,31 @@ export function TerminalView({ terminalId, root, onOpenTarget }: TerminalViewPro
 	}, [terminalId, root]);
 
 	return (
-		<div className="terminal-host">
+		<div className="terminal-host" ref={hostRef}>
 			<div className="terminal-host-slot" ref={slotRef} />
+			{findOpen && (
+				<div className="terminal-find">
+					<input
+						ref={findInputRef}
+						value={findTerm}
+						placeholder={t('在终端中查找…')}
+						aria-label={t('在终端中查找')}
+						onChange={event => runFind(event.target.value)}
+						onKeyDown={event => {
+							if (event.key === 'Enter') {
+								event.preventDefault();
+								runFind(findTerm, event.shiftKey);
+							} else if (event.key === 'Escape') {
+								event.preventDefault();
+								closeFind();
+							}
+						}}
+					/>
+					<button type="button" title={t('上一个（Shift+Enter）')} onClick={() => runFind(findTerm, true)}>↑</button>
+					<button type="button" title={t('下一个（Enter）')} onClick={() => runFind(findTerm, false)}>↓</button>
+					<button type="button" title={t('关闭（Esc）')} onClick={closeFind}>×</button>
+				</div>
+			)}
 			{state === 'closed' && (
 				<div className="terminal-overlay">
 					<span className="terminal-overlay-text">{t('连接已断开，shell 仍在服务端运行')}</span>

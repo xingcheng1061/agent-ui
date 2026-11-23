@@ -525,7 +525,8 @@ app.get('/api/search', async (req, res) => {
 		return;
 	}
 	const includeArchived = req.query['includeArchived'] === '1';
-	res.json({ matches: await searchSessions(query, { includeArchived }) });
+	const sessionId = typeof req.query['sessionId'] === 'string' ? req.query['sessionId'] : undefined;
+	res.json({ matches: await searchSessions(query, { includeArchived, sessionId }) });
 });
 
 /**

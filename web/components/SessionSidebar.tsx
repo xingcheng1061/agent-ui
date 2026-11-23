@@ -437,28 +437,17 @@ export function SessionSidebar({
 	}, [query, showArchived]);
 
 	/**
-	 * Ctrl+F focuses the filter, unless something already owns that key.
-	 *
-	 * Monaco's find widget and the composer's own editing live inside their
-	 * elements; stealing the key there would break them, so only presses that
-	 * land on the shell itself are captured.
+	 * Ctrl+F is now dispatched centrally in App: the key belongs to whichever
+	 * pane has focus (chat / terminal / editor / this rail), not always to us.
+	 * Listen for the rail's signal instead of grabbing every Ctrl+F globally.
 	 */
 	useEffect(() => {
-		const onKeyDown = (event: KeyboardEvent) => {
-			if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') {
-				return;
-			}
-			const target = event.target;
-			if (target instanceof HTMLElement
-				&& target.closest('.monaco-editor, input, textarea, [contenteditable="true"]') !== null) {
-				return;
-			}
-			event.preventDefault();
+		const onFind = () => {
 			searchRef.current?.focus();
 			searchRef.current?.select();
 		};
-		document.addEventListener('keydown', onKeyDown);
-		return () => document.removeEventListener('keydown', onKeyDown);
+		window.addEventListener('agentui:find-rail', onFind);
+		return () => window.removeEventListener('agentui:find-rail', onFind);
 	}, []);
 
 	const beginRename = (session: SessionEntry) => {

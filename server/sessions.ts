@@ -330,6 +330,7 @@ export async function listAllSessions(options: { readonly includeArchived?: bool
 
 interface FoundSession {
 	readonly projectId: string;
+	readonly cwd: string;
 	readonly filePath: string;
 }
 
@@ -343,7 +344,7 @@ async function findSession(sessionId: string): Promise<FoundSession | undefined>
 		const filePath = path.join(projectsDir(), project.id, `${sessionId}.jsonl`);
 		try {
 			await fs.access(filePath);
-			return { projectId: project.id, filePath };
+			return { projectId: project.id, cwd: project.cwd, filePath };
 		} catch {
 			// keep looking
 		}
@@ -781,6 +782,41 @@ function collectLineMatches(line: string, needle: string, index: number, context
 	}
 }
 
+/** Scans one jsonl file for a needle; used by both global and session-scoped search. */
+async function searchFile(filePath: string, sessionId: string, context: SearchContext, needle: string, limit: number): Promise<readonly SessionMatch[]> {
+	const matches: SessionMatch[] = [];
+	let index = 0;
+	const handle = await fs.open(filePath, 'r').catch(() => undefined);
+	if (!handle) {
+		return matches;
+	}
+	try {
+		const buffer = Buffer.allocUnsafe(64 * 1024);
+		let carry = '';
+		let bytesRead = 0;
+		while ((bytesRead = (await handle.read(buffer, 0, buffer.length, null)).bytesRead) > 0) {
+			carry += buffer.subarray(0, bytesRead).toString('utf8');
+			const lines = carry.split('\n');
+			carry = lines.pop() ?? '';
+			for (const line of lines) {
+				collectLineMatches(line, needle, index, context, matches);
+				index += 1;
+				if (matches.length >= limit) {
+					return matches.slice(0, limit);
+				}
+			}
+		}
+		// The jsonl is appended to and may not end in a newline: the last
+		// fragment is a complete record, so search it before closing.
+		if (carry.trim() !== '') {
+			collectLineMatches(carry, needle, index, context, matches);
+		}
+	} finally {
+		await handle.close();
+	}
+	return matches.slice(0, limit);
+}
+
 /**
  * Searches message content across every transcript.
  *
@@ -788,13 +824,31 @@ function collectLineMatches(line: string, needle: string, index: number, context
  * stays responsive and no file is loaded whole. Hits are capped per session;
  * the goal is to find *which* conversations to open, not to index every word.
  */
-export async function searchSessions(query: string, options: { readonly limit?: number; readonly includeArchived?: boolean } = {}): Promise<readonly SessionMatch[]> {
+export async function searchSessions(query: string, options: { readonly limit?: number; readonly includeArchived?: boolean; readonly sessionId?: string } = {}): Promise<readonly SessionMatch[]> {
 	const needle = query.trim().toLowerCase();
 	if (!needle) {
 		return [];
 	}
 	await metaReady;
 	const meta = metaStore.snapshot;
+	// A session-scoped search must not scan other projects: findSession() already
+	// validates the id, and a single file keeps the chat's find fast.
+	if (options.sessionId !== undefined) {
+		const found = await findSession(options.sessionId);
+		if (!found) {
+			return [];
+		}
+		const custom = meta[metaKey(found.projectId, options.sessionId)];
+		return searchFile(found.filePath, options.sessionId, {
+			sessionId: options.sessionId,
+			projectId: found.projectId,
+			cwd: found.cwd,
+			title: custom?.title ?? await readTitle(found.filePath),
+			archived: custom?.archivedAt !== undefined
+				|| groupForSession(options.sessionId)?.archivedAt !== undefined,
+			updatedAt: (await fs.stat(found.filePath).catch(() => undefined))?.mtimeMs ?? 0,
+		}, needle, options.limit ?? 40);
+	}
 	const config = await readAgentUiConfig();
 	const projects = await listProjects();
 	const found: SessionMatch[] = [];
@@ -831,36 +885,7 @@ export async function searchSessions(query: string, options: { readonly limit?: 
 				updatedAt: stat.mtimeMs,
 				archived,
 			};
-			const matches: SessionMatch[] = [];
-			let index = 0;
-			const handle = await fs.open(filePath, 'r').catch(() => undefined);
-			if (!handle) {
-				continue;
-			}
-			try {
-				const buffer = Buffer.allocUnsafe(64 * 1024);
-				let carry = '';
-				let bytesRead = 0;
-				while ((bytesRead = (await handle.read(buffer, 0, buffer.length, null)).bytesRead) > 0) {
-					carry += buffer.subarray(0, bytesRead).toString('utf8');
-					const lines = carry.split('\n');
-					carry = lines.pop() ?? '';
-					for (const line of lines) {
-						collectLineMatches(line, needle, index, context, matches);
-						index += 1;
-					}
-				}
-				// The jsonl is appended to and may not end in a newline. The last
-				// fragment is a complete record there — search it before closing.
-				if (carry.trim() !== '') {
-					collectLineMatches(carry, needle, index, context, matches);
-				}
-			} finally {
-				await handle.close();
-			}
-			if (matches.length > 0) {
-				found.push(...matches);
-			}
+			found.push(...await searchFile(filePath, sessionId, context, needle, Math.min(MAX_MATCHES_PER_SESSION, limit - found.length)));
 		}
 	}
 	return found.slice(0, limit);

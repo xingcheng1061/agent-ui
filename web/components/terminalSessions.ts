@@ -1,4 +1,5 @@
 import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon } from '@xterm/addon-search';
 import { Terminal as XTerm, type IBufferRange, type ILink } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { terminalUrl } from '../api';
@@ -132,6 +133,10 @@ export interface TerminalSession {
 	/** Pulls the screen out of the DOM; socket, scrollback and size survive. */
 	detach(slot: HTMLElement): void;
 	fit(): void;
+	/** Finds a string in the scrollback; returns whether anything matched. */
+	find(term: string, backwards?: boolean): boolean;
+	/** Clears search highlights and dismisses the decoration. */
+	clearFind(): void;
 	watchState(listener: (state: TerminalState) => void): () => void;
 	/** After the fallback overlay appeared: try again without a reload. */
 	reconnect(): void;
@@ -150,6 +155,7 @@ class LiveScreen implements TerminalSession {
 	private readonly _host: HTMLDivElement;
 	private readonly _term: XTerm;
 	private readonly _fit: FitAddon;
+	private readonly _search: SearchAddon;
 	private readonly _listeners = new Set<(state: TerminalState) => void>();
 	private readonly _onTheme: () => void;
 	private _socket: WebSocket | undefined;
@@ -233,6 +239,8 @@ class LiveScreen implements TerminalSession {
 		});
 		this._fit = new FitAddon();
 		this._term.loadAddon(this._fit);
+		this._search = new SearchAddon();
+		this._term.loadAddon(this._search);
 		this._term.onData(data => this._type(data));
 		// Ctrl+C / Ctrl+V are xterm's business only when it has nothing better to
 		// do: without this hook it sends ^C and ^V to the shell and the browser's
@@ -314,6 +322,34 @@ class LiveScreen implements TerminalSession {
 			// Mid-layout; the next ResizeObserver tick will do it.
 		}
 		this._sendResize();
+	}
+
+	find(term: string, backwards = false): boolean {
+		if (this._disposed || term === '') {
+			return false;
+		}
+		try {
+			const options = {
+				caseSensitive: false,
+				decorations: {
+					matchBackground: '#264f78',
+					activeMatchBackground: '#515c6a',
+					matchOverviewRuler: '#264f78',
+					activeMatchColorOverviewRuler: '#515c6a',
+				},
+			};
+			return backwards
+				? this._search.findPrevious(term, options)
+				: this._search.findNext(term, options);
+		} catch {
+			return false;
+		}
+	}
+
+	clearFind(): void {
+		if (!this._disposed) {
+			this._search.clearDecorations();
+		}
 	}
 
 	watchState(listener: (state: TerminalState) => void): () => void {

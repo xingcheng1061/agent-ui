@@ -4,6 +4,7 @@ import { getTranscript, reportClientLog, searchFiles, type SessionMatch, type Tr
 import { clearAttention, requestAttention } from '../attention';
 import { t, useLang } from '../i18n';
 import { acquireAgentConnection, type AgentConnectionHandle } from './agentConnections';
+import { ChatFind } from './ChatFind';
 import { CodeHighlight, guessLanguage } from './CodeHighlight';
 import { draftKey, readDraft, writeDraft } from './composerDrafts';
 import { getStream, pruneStreams } from './sessionStore';
@@ -1541,6 +1542,10 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 
 	return (
 		<section className="chat">
+			<ChatFind
+				sessionId={sessionId}
+				onJump={match => window.dispatchEvent(new CustomEvent('agentui:focus-match', { detail: match }))}
+			/>
 			<div className="chat-header">
 				<span className={`dot ${connection}`} />
 				<span className="chat-status">

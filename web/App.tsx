@@ -261,6 +261,52 @@ export function App() {
 		return () => window.clearInterval(timer);
 	}, [auth.kind, refreshRunning]);
 
+	/**
+	 * One place decides who owns Ctrl+F. Which pane has focus determines which
+	 * search box opens — the chat, the terminal, the editor, or the session rail.
+	 * Monaco owns Ctrl+F inside its own widget, so a press there is left alone;
+	 * text inputs are left alone too (typing 'f' must stay plain text).
+	 */
+	useEffect(() => {
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') {
+				return;
+			}
+			const target = event.target;
+			if (target instanceof HTMLElement) {
+				// A real editor/input handles its own find or plain text.
+				if (target.closest('.monaco-editor, input, textarea, [contenteditable="true"]')) {
+					return;
+				}
+				if (target.closest('.terminal-host')) {
+					event.preventDefault();
+					window.dispatchEvent(new CustomEvent('agentui:find-terminal'));
+					return;
+				}
+				if (target.closest('.terminal-panel')) {
+					event.preventDefault();
+					window.dispatchEvent(new CustomEvent('agentui:find-terminal'));
+					return;
+				}
+				if (target.closest('.chat')) {
+					event.preventDefault();
+					window.dispatchEvent(new CustomEvent('agentui:find-chat'));
+					return;
+				}
+				if (target.closest('.rail')) {
+					event.preventDefault();
+					window.dispatchEvent(new CustomEvent('agentui:find-rail'));
+					return;
+				}
+			}
+			// Focus on the shell/topbar: open the chat's find, the work area.
+			event.preventDefault();
+			window.dispatchEvent(new CustomEvent('agentui:find-chat'));
+		};
+		document.addEventListener('keydown', onKeyDown);
+		return () => document.removeEventListener('keydown', onKeyDown);
+	}, []);
+
 	// Resolve the session before anything else: every other call is 401 without it.
 	useEffect(() => {
 		let cancelled = false;
@@ -379,6 +425,17 @@ export function App() {
 			setViewToken(value => value + 1);
 		}
 	};
+
+	// ChatFind (Ctrl+F inside the conversation) asks us to scroll to a hit. It
+	// is always in the session on screen, so no navigation is needed.
+	useEffect(() => {
+		const onJump = (event: Event) => {
+			const match = (event as CustomEvent<SessionMatch>).detail;
+			setFocusMatch(current => ({ match, token: (current?.token ?? 0) + 1 }));
+		};
+		window.addEventListener('agentui:focus-match', onJump);
+		return () => window.removeEventListener('agentui:focus-match', onJump);
+	}, []);
 
 	/** Opens the conversation behind a content-search hit and asks it to scroll. */
 	const openMatch = (match: SessionMatch) => {
