@@ -242,11 +242,11 @@ export function createAgentServer(options: Omit<AgentServerOptions, 'cwd'>): Web
 		if (!entry) {
 			return false;
 		}
-		if (hard) {
-			// The hard path is the same one DELETE uses: announce the exit, drop
-			// the watchers, then dispose. Reusing the hook keeps that sequence in
-			// one place instead of duplicating it under a different code path.
-			const cliId = entry.cliSessionId;
+		// A graceful interrupt only lands while a turn is being answered — after
+		// `result` there is no turn to abort, and the background task keeps going.
+		// In that case the only way to stop it is to end the owning process.
+		const cliId = entry.cliSessionId;
+		if (hard || !entry.busy) {
 			if (cliId) {
 				killRunningSession(cliId);
 			}
@@ -901,7 +901,10 @@ class AgentConnection {
 				entry.permissionMode = event.permissionMode ?? entry.permissionMode;
 			} else if (event.type === 'result') {
 				entry.busy = false;
-				entry.tasks.clear();
+				// A turn ending is NOT the end of its background tasks: a Bash
+				// `run_in_background` or an Agent outlives the turn that spawned it.
+				// Keep them in the registry until their own task_notification arrives,
+				// or the global panel loses sight of work that is still running.
 				this._log(`result ${event.subtype}${event.text ? '' : ' (no text)'}`);
 				// The turn is over, so the next queued message can start one of its
 				// own; it must go out before the reap check, or an unwatched session
@@ -943,6 +946,12 @@ class AgentConnection {
 				}
 			} else if (event.type === 'task_notification') {
 				entry.tasks.delete(event.taskId);
+				// The last background task just ended. The turn already finished and
+				// nobody is watching, so this is the moment to schedule the reap that
+				// was skipped when the task was still running.
+				if (entry.tasks.size === 0 && !entry.busy && entry.sockets.size === 0) {
+					this._armReap(entry);
+				}
 			}
 
 			// Config snapshots describe state, not a step of the stream, so they are
@@ -1126,6 +1135,12 @@ class AgentConnection {
 	private _armReap(entry: LiveSession): void {
 		if (entry.reapTimer) {
 			clearTimeout(entry.reapTimer);
+		}
+		// Reaping kills the CLI process, which would also kill background tasks
+		// that outlived their turn. Keep the process alive until they report back.
+		if (entry.tasks.size > 0) {
+			this._log('reap skipped: background tasks still running');
+			return;
 		}
 		entry.reapTimer = setTimeout(() => this._finalize(entry, 'reap'), REAP_DELAY_MS);
 		entry.reapTimer.unref?.();
