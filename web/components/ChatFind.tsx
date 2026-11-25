@@ -39,14 +39,14 @@ export function ChatFind({ sessionId, onJump }: ChatFindProps) {
 		setOpen(false);
 		setMatches([]);
 		setQuery('');
-		setIndex(0);
+		setIndex(-1);
 	}, [sessionId]);
 
 	useEffect(() => {
 		const term = query.trim();
 		if (!open || term === '' || sessionId === undefined) {
 			setMatches([]);
-			setIndex(0);
+			setIndex(-1);
 			return;
 		}
 		let cancelled = false;
@@ -56,7 +56,7 @@ export function ChatFind({ sessionId, onJump }: ChatFindProps) {
 				.then(hits => {
 					if (!cancelled) {
 						setMatches(hits);
-						setIndex(0);
+						setIndex(-1);
 					}
 				})
 				.catch(() => { if (!cancelled) setMatches([]); })
@@ -72,7 +72,7 @@ export function ChatFind({ sessionId, onJump }: ChatFindProps) {
 		if (matches.length === 0) {
 			return;
 		}
-		const wrapped = (next + matches.length) % matches.length;
+		const wrapped = ((next % matches.length) + matches.length) % matches.length;
 		setIndex(wrapped);
 		onJump(matches[wrapped]!);
 	};
@@ -103,7 +103,7 @@ export function ChatFind({ sessionId, onJump }: ChatFindProps) {
 				}}
 			/>
 			<span className="chat-find-count">
-				{searching ? '…' : query.trim() === '' ? '' : matches.length === 0 ? t('无结果') : `${index + 1}/${matches.length}`}
+				{searching ? '…' : query.trim() === '' ? '' : matches.length === 0 ? t('无结果') : index < 0 ? `${matches.length}` : `${index + 1}/${matches.length}`}
 			</span>
 			<button type="button" title={t('上一个（Shift+Enter）')} onClick={() => jumpTo(index - 1)} disabled={matches.length === 0}>↑</button>
 			<button type="button" title={t('下一个（Enter）')} onClick={() => jumpTo(index + 1)} disabled={matches.length === 0}>↓</button>

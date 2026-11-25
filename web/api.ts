@@ -37,6 +37,7 @@ export interface SessionMatch {
 	readonly snippet: string;
 	readonly messageId?: string;
 	readonly toolUseId?: string;
+	readonly parentToolUseId?: string;
 	readonly index: number;
 }
 

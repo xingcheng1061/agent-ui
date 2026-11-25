@@ -101,10 +101,10 @@ function questionsOf(permission: PendingPermission | undefined): readonly Questi
 
 type Item =
 	/** `queued` marks a message that was steered into a turn already running. */
-	| { readonly kind: 'user'; readonly id: string; readonly text: string; readonly queued?: boolean }
+	| { readonly kind: 'user'; readonly id: string; readonly text: string; readonly queued?: boolean; readonly idx?: number }
 	/** `messageId` is the API message the text belongs to, mirroring the jsonl. */
-	| { readonly kind: 'assistant'; readonly id: string; readonly text: string; readonly parentToolUseId?: string; readonly messageId?: string }
-	| { readonly kind: 'thinking'; readonly id: string; readonly text: string; readonly parentToolUseId?: string; readonly messageId?: string }
+	| { readonly kind: 'assistant'; readonly id: string; readonly text: string; readonly parentToolUseId?: string; readonly messageId?: string; readonly idx?: number }
+	| { readonly kind: 'thinking'; readonly id: string; readonly text: string; readonly parentToolUseId?: string; readonly messageId?: string; readonly idx?: number }
 	| {
 		readonly kind: 'tool';
 		readonly id: string;
@@ -113,6 +113,7 @@ type Item =
 		readonly parentToolUseId?: string;
 		readonly result?: ToolResultInfo;
 		readonly task?: TaskState;
+		readonly idx?: number;
 	}
 	| {
 		readonly kind: 'result';
@@ -124,8 +125,9 @@ type Item =
 		readonly isError: boolean;
 		/** The turn was aborted by a user interrupt rather than failing. */
 		readonly interrupted?: boolean;
+		readonly idx?: number;
 	}
-	| { readonly kind: 'error'; readonly id: string; readonly text: string };
+	| { readonly kind: 'error'; readonly id: string; readonly text: string; readonly idx?: number };
 
 interface ChatPanelProps {
 	readonly root: string;
@@ -235,9 +237,10 @@ let counter = 0;
 const nextId = () => `m${++counter}`;
 const taskKey = (taskId: string) => `task:${taskId}`;
 
-function toChatItems(items: readonly TranscriptItem[]): Item[] {
+function toChatItems(items: readonly TranscriptItem[], start = 0): Item[] {
 	const result: Item[] = [];
-	for (const item of items) {
+	items.forEach((item, offset) => {
+		const idx = start + offset;
 		if (item.kind === 'tool' && item.id && item.name) {
 			result.push({
 				kind: 'tool',
@@ -249,6 +252,7 @@ function toChatItems(items: readonly TranscriptItem[]): Item[] {
 				// Subagent steps are stored per session; the badge travels with the
 				// card so a reloaded transcript looks like the live one.
 				task: item.task ? { ...item.task, startedAt: 0 } : undefined,
+				idx,
 			});
 		} else if (item.text) {
 			result.push({
@@ -258,9 +262,10 @@ function toChatItems(items: readonly TranscriptItem[]): Item[] {
 				messageId: item.messageId,
 				parentToolUseId: item.parentToolUseId,
 				...(item.kind === 'user' && item.queued ? { queued: true } : {}),
+				idx,
 			});
 		}
-	}
+	});
 	return result;
 }
 
@@ -500,7 +505,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				if (streamingRef.current) {
 					return;
 				}
-				setItems(toChatItems(page.items));
+				setItems(toChatItems(page.items, page.start));
 				setHasMore(page.hasMore);
 				oldestRef.current = page.start ?? 0;
 				reportClientLog({ event: 'transcript-reload', session: id, items: page.items.length, reason });
@@ -563,7 +568,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					return;
 				}
 				const transcript = page.items;
-				setItems(toChatItems(transcript));
+				setItems(toChatItems(transcript, page.start));
 				setHasMore(page.hasMore);
 				oldestRef.current = page.start ?? 0;
 				setStatus(t('已载入 {id}', { id: sessionId.slice(0, 8) }));
@@ -635,7 +640,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				if (resumeIdRef.current !== id) {
 					return;
 				}
-				setItems(previous => [...toChatItems(page.items), ...previous]);
+				setItems(previous => [...toChatItems(page.items, page.start), ...previous]);
 				oldestRef.current = page.start ?? 0;
 				setHasMore(page.hasMore);
 			})
@@ -643,26 +648,30 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			.finally(() => setLoadingMore(false));
 	};
 
-	// Scroll to a message picked from the content-search results. The hit may
-	// live on an older page, so load backwards until its anchor is on screen (or
-	// history runs out). The token makes clicking the same hit again work.
+	// Scroll to a message picked from the content-search results. The search
+	// API and transcript paging share one coordinate: the parsed item index.
+	// Load older pages until that index is on screen, then scroll + flash it.
 	const handledFocusRef = useRef(0);
 	useEffect(() => {
 		if (!focusMatch || handledFocusRef.current === focusMatch.token) {
 			return;
 		}
-		const id = focusMatch.match.sessionId;
-		if (id !== sessionId) {
+		if (focusMatch.match.sessionId !== sessionId) {
 			return;
 		}
-		const target = focusMatch.match.toolUseId
-			? `tool:${focusMatch.match.toolUseId}`
-			: focusMatch.match.messageId ? `msg:${focusMatch.match.messageId}` : undefined;
-		if (!target) {
-			return;
+		const wanted = focusMatch.match.index;
+		// `idx:` is the anchor every parsed transcript item carries; a subagent
+		// step folded into a card also has its parent tool card as a fallback.
+		const targets = [`idx:${wanted}`];
+		const parent = focusMatch.match.parentToolUseId ?? focusMatch.match.toolUseId;
+		if (parent) {
+			targets.push(`tool:${parent}`);
 		}
-		const reveal = () => {
-			const node = listRef.current?.querySelector(`[data-anchor="${CSS.escape(target)}"]`);
+		let cancelled = false;
+		const reveal = (): boolean => {
+			const node = targets
+				.map(t => listRef.current?.querySelector(`[data-anchor="${CSS.escape(t)}"]`))
+				.find((n): n is Element => n !== undefined && n !== null);
 			if (!node) {
 				return false;
 			}
@@ -671,21 +680,11 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			window.setTimeout(() => node.classList.remove('chat-hit'), 2200);
 			return true;
 		};
-		if (reveal()) {
-			handledFocusRef.current = focusMatch.token;
-			return;
-		}
-		// Not on the newest page. Ask for older slices until it appears; stop
-		// when there is nothing left above.
-		let attempts = 0;
-		let cancelled = false;
 		const step = () => {
 			if (cancelled) {
 				return;
 			}
 			if (loadedIdRef.current !== sessionId) {
-				// The transcript for this session is still being read; try again
-				// shortly instead of giving up on the jump.
 				window.setTimeout(step, 60);
 				return;
 			}
@@ -693,21 +692,23 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				handledFocusRef.current = focusMatch.token;
 				return;
 			}
-			if (attempts >= 12 || !hasMore || loadingMore) {
+			// The hit is above the loaded window: fetch the page ending just
+			// before our oldest item. Repeat until the index falls inside a page.
+			if (!hasMore || oldestRef.current <= wanted) {
 				return;
 			}
-			attempts += 1;
 			const current = resumeIdRef.current;
 			if (!current) {
 				return;
 			}
 			void getTranscript(current, { before: oldestRef.current })
 				.then(page => {
-					if (cancelled || resumeIdRef.current !== current) {
+					if (cancelled || resumeIdRef.current !== current || page.items.length === 0) {
 						return;
 					}
-					setItems(previous => [...toChatItems(page.items), ...previous]);
-					oldestRef.current = page.start ?? 0;
+					const start = page.start ?? 0;
+					setItems(previous => [...toChatItems(page.items, start), ...previous]);
+					oldestRef.current = start;
 					setHasMore(page.hasMore);
 					window.setTimeout(step, 0);
 				})
@@ -715,7 +716,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		};
 		window.setTimeout(step, 0);
 		return () => { cancelled = true; };
-	}, [focusMatch, sessionId, hasMore, loadingMore]);
+	}, [focusMatch, sessionId]); // paging state is read live inside step()
 
 	const sendRef = useRef<(command: AgentClientCommand) => void>(() => undefined);
 
@@ -1604,9 +1605,14 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 							item={item}
 							childrenOf={childrenOf}
 							outputOf={outputOf}
-							anchor={item.kind === 'tool'
-								? `tool:${item.id}`
-								: 'messageId' in item && item.messageId ? `msg:${item.messageId}` : undefined}
+							// A parsed transcript index is the one stable coordinate
+							// shared with the search API; fall back to ids for live
+							// items, which have no transcript position yet.
+							anchor={item.idx !== undefined
+								? `idx:${item.idx}`
+								: item.kind === 'tool'
+									? `tool:${item.id}`
+									: 'messageId' in item && item.messageId ? `msg:${item.messageId}` : undefined}
 							live={streaming && index === roots.length - 1}
 							onDismiss={id => setItems(previous => previous.filter(entry => entry.id !== id))}
 						/>
@@ -1914,7 +1920,7 @@ function ChatItemView({ item, childrenOf, outputOf, live = false, onDismiss, anc
 		case 'assistant':
 			return (
 				<div className="msg assistant rich">
-					<Markdown text={item.text} streaming={live} mermaid={hasMermaidDiagram(item.text)} />
+					<Markdown text={item.text} streaming={live} mermaid={hasMermaidDiagram(item.text)} diagramZoomRequiresCtrl />
 				</div>
 			);
 		case 'thinking':
@@ -2749,7 +2755,13 @@ function ToolCard({ item, childrenOf, outputOf }: {
 				    so the work that produced the numbers sat at the very bottom. */}
 				{nested && (
 					<div className="tool-nested">
-						{children.map(child => <ChatItemView key={child.id} item={child} childrenOf={childrenOf} outputOf={outputOf} />)}
+						{children.map(child => <ChatItemView
+							key={child.id}
+							item={child}
+							childrenOf={childrenOf}
+							outputOf={outputOf}
+							anchor={child.idx !== undefined ? `idx:${child.idx}` : undefined}
+						/>)}
 					</div>
 				)}
 

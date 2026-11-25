@@ -1,5 +1,5 @@
 import { math } from '@streamdown/math';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Streamdown, type Components, type DiagramPlugin, type MermaidErrorComponentProps } from 'streamdown';
 import 'katex/dist/katex.min.css';
 import 'streamdown/styles.css';
@@ -13,6 +13,12 @@ interface MarkdownProps {
 	readonly mermaid?: boolean;
 	/** Off for document previews, where streamdown's per-block chrome is noise. */
 	readonly controls?: boolean;
+	/**
+	 * Require Ctrl/Cmd + wheel to zoom a diagram; a plain wheel scrolls the
+	 * surrounding pane. On in chat messages, where a diagram sits inline and
+	 * would otherwise swallow every scroll. Full-screen diagrams keep both.
+	 */
+	readonly diagramZoomRequiresCtrl?: boolean;
 }
 
 /**
@@ -46,9 +52,36 @@ function mermaidConfig(theme: ThemeName) {
  * compiled by `web/tailwind.css` (mapped onto this app's theme tokens), and the
  * typography comes from the `.md` rules in `styles.css`, which outrank them.
  */
-export function Markdown({ text, streaming = false, mermaid = false, controls }: MarkdownProps) {
+export function Markdown({ text, streaming = false, mermaid = false, controls, diagramZoomRequiresCtrl = false }: MarkdownProps) {
 	const [diagram, setDiagram] = useState<DiagramPlugin | undefined>(undefined);
 	const [theme, setTheme] = useState(getTheme);
+	const hostRef = useRef<HTMLDivElement | null>(null);
+
+	// streamdown's zoom container listens for `wheel` and zooms unconditionally,
+	// so an inline diagram eats every scroll in the chat. In capture phase we can
+	// stop that event before it reaches the container when Ctrl/Cmd is not held;
+	// the browser then scrolls the chat as usual. With Ctrl/Cmd we let it through
+	// so streamdown zooms. Full-screen diagrams don't set this flag.
+	useEffect(() => {
+		if (!diagramZoomRequiresCtrl) {
+			return;
+		}
+		const host = hostRef.current;
+		if (!host) {
+			return;
+		}
+		const onWheel = (event: WheelEvent) => {
+			if (event.ctrlKey || event.metaKey) {
+				return;
+			}
+			const target = event.target;
+			if (target instanceof Node && (target instanceof Element ? target : target.parentElement)?.closest?.('[data-streamdown="mermaid"]')) {
+				event.stopPropagation();
+			}
+		};
+		host.addEventListener('wheel', onWheel, { capture: true });
+		return () => host.removeEventListener('wheel', onWheel, { capture: true });
+	}, [diagramZoomRequiresCtrl, diagram]);
 
 	useEffect(() => {
 		if (!mermaid) {
@@ -83,7 +116,7 @@ export function Markdown({ text, streaming = false, mermaid = false, controls }:
 	const diagramOptions = useMemo(() => ({ errorComponent: MermaidFallback }), []);
 
 	return (
-		<div className="md">
+		<div className="md" ref={hostRef}>
 			<Streamdown
 				mode={streaming ? 'streaming' : 'static'}
 				parseIncompleteMarkdown

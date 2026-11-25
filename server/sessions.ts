@@ -716,105 +716,90 @@ export interface SessionMatch {
 	readonly messageId?: string;
 	/** Tool-call id when the hit came from a tool's input/result. */
 	readonly toolUseId?: string;
-	/** Zero-based index of the message in the transcript, for page loading. */
+	/** Parent tool card when the hit is a subagent step folded into a card. */
+	readonly parentToolUseId?: string;
+	/**
+	 * Zero-based index in the parsed transcript item list — the same coordinate
+	 * `readTranscriptById` pages by and the browser uses as its `idx:` anchor.
+	 * Not a jsonl line number: those include system records and subagent files.
+	 */
 	readonly index: number;
 }
 
 const SEARCH_SNIPPET = 160;
 const MAX_MATCHES_PER_SESSION = 6;
 
-/** Pulls searchable text out of one content block. */
-function searchableText(block: ContentBlock): { readonly text: string; readonly kind: string; readonly toolUseId?: string } | undefined {
-	if (block.type === 'text' && typeof block.text === 'string' && !isMetaText(block.text)) {
-		return { text: block.text, kind: 'text' };
-	}
-	if (block.type === 'thinking' && typeof block.thinking === 'string') {
-		return { text: block.thinking, kind: 'thinking' };
-	}
-	if (block.type === 'tool_use' && block.name) {
-		const input = typeof block.input === 'string' ? block.input : JSON.stringify(block.input ?? {});
-		return { text: input, kind: block.name, toolUseId: block.id };
-	}
-	return undefined;
+/** Fields shared by every hit from one session. */
+type SearchContext = Omit<SessionMatch, 'kind' | 'snippet' | 'messageId' | 'toolUseId' | 'parentToolUseId' | 'index'>;
+
+/** Searchable text carried by one parsed transcript item. */
+interface ItemSearchPart {
+	readonly text: string;
+	readonly kind: string;
+	readonly toolUseId?: string;
 }
 
-/** Fields shared by every hit from one session. */
-type SearchContext = Omit<SessionMatch, 'kind' | 'snippet' | 'messageId' | 'toolUseId' | 'index'>;
-
-/** Matches one jsonl line, appending hits into `matches`. */
-function collectLineMatches(line: string, needle: string, index: number, context: SearchContext, matches: SessionMatch[]): void {
-	if (matches.length >= MAX_MATCHES_PER_SESSION || !line.toLowerCase().includes(needle)) {
-		return;
-	}
-	const entry = parseLine(line);
-	if (!entry || (entry.type !== 'user' && entry.type !== 'assistant')) {
-		return;
-	}
-	const messageId = entry.message?.id;
-	for (const block of blocksOf(entry)) {
-		const content = searchableText(block);
-		if (!content) {
-			continue;
+/** Pulls searchable text out of a transcript item, matching how it is rendered. */
+function itemSearchParts(item: TranscriptItem): readonly ItemSearchPart[] {
+	if (item.kind === 'tool') {
+		const parts: ItemSearchPart[] = [];
+		const input = typeof item.input === 'string' ? item.input : JSON.stringify(item.input ?? {});
+		parts.push({ text: input, kind: item.name, toolUseId: item.id });
+		if (item.result) {
+			parts.push({ text: item.result.content, kind: `${item.name} 结果`, toolUseId: item.id });
 		}
-		const lower = content.text.toLowerCase();
-		let from = 0;
-		while (matches.length < MAX_MATCHES_PER_SESSION) {
-			const at = lower.indexOf(needle, from);
-			if (at < 0) {
+		return parts;
+	}
+	if (item.kind === 'thinking') {
+		return [{ text: item.text, kind: 'thinking' }];
+	}
+	return [{ text: item.text, kind: item.kind }];
+}
+
+/**
+ * Scans one transcript's parsed items for a needle.
+ *
+ * The index assigned here is the parsed-item index — the same coordinate
+ * `readTranscriptById` pages by — so the browser can load exactly the page
+ * containing a hit and jump to `idx:<index>`. Searching raw jsonl lines would
+ * yield line numbers, a different system that cannot be paged to.
+ */
+async function searchFile(filePath: string, context: SearchContext, needle: string, limit: number): Promise<readonly SessionMatch[]> {
+	const matches: SessionMatch[] = [];
+	const { items } = await readTranscript(filePath);
+	for (let index = 0; index < items.length && matches.length < limit; index += 1) {
+		const item = items[index]!;
+		for (const part of itemSearchParts(item)) {
+			if (!part.text) {
+				continue;
+			}
+			const lower = part.text.toLowerCase();
+			let from = 0;
+			while (matches.length < limit) {
+				const at = lower.indexOf(needle, from);
+				if (at < 0) {
+					break;
+				}
+				const start = Math.max(0, at - SEARCH_SNIPPET / 2);
+				const stop = at + needle.length + SEARCH_SNIPPET / 2;
+				const snippet = part.text.slice(start, stop).replace(/\s+/g, ' ').trim();
+				matches.push({
+					...context,
+					kind: part.kind,
+					snippet: `${start > 0 ? '…' : ''}${snippet}${stop < part.text.length ? '…' : ''}`,
+					messageId: item.kind !== 'tool' && 'messageId' in item ? item.messageId : undefined,
+					toolUseId: part.toolUseId,
+					parentToolUseId: 'parentToolUseId' in item ? item.parentToolUseId : undefined,
+					index,
+				});
+				from = at + needle.length;
+			}
+			if (matches.length >= limit) {
 				break;
 			}
-			const start = Math.max(0, at - SEARCH_SNIPPET / 2);
-			const stop = at + needle.length + SEARCH_SNIPPET / 2;
-			const snippet = content.text.slice(start, stop).replace(/\s+/g, ' ').trim();
-			matches.push({
-				...context,
-				kind: content.kind === 'text' ? (entry.type ?? 'message') : content.kind,
-				snippet: `${start > 0 ? '…' : ''}${snippet}${stop < content.text.length ? '…' : ''}`,
-				messageId,
-				toolUseId: content.toolUseId,
-				index,
-			});
-			from = at + needle.length;
-		}
-		if (matches.length >= MAX_MATCHES_PER_SESSION) {
-			return;
 		}
 	}
-}
-
-/** Scans one jsonl file for a needle; used by both global and session-scoped search. */
-async function searchFile(filePath: string, sessionId: string, context: SearchContext, needle: string, limit: number): Promise<readonly SessionMatch[]> {
-	const matches: SessionMatch[] = [];
-	let index = 0;
-	const handle = await fs.open(filePath, 'r').catch(() => undefined);
-	if (!handle) {
-		return matches;
-	}
-	try {
-		const buffer = Buffer.allocUnsafe(64 * 1024);
-		let carry = '';
-		let bytesRead = 0;
-		while ((bytesRead = (await handle.read(buffer, 0, buffer.length, null)).bytesRead) > 0) {
-			carry += buffer.subarray(0, bytesRead).toString('utf8');
-			const lines = carry.split('\n');
-			carry = lines.pop() ?? '';
-			for (const line of lines) {
-				collectLineMatches(line, needle, index, context, matches);
-				index += 1;
-				if (matches.length >= limit) {
-					return matches.slice(0, limit);
-				}
-			}
-		}
-		// The jsonl is appended to and may not end in a newline: the last
-		// fragment is a complete record, so search it before closing.
-		if (carry.trim() !== '') {
-			collectLineMatches(carry, needle, index, context, matches);
-		}
-	} finally {
-		await handle.close();
-	}
-	return matches.slice(0, limit);
+	return matches;
 }
 
 /**
@@ -839,7 +824,7 @@ export async function searchSessions(query: string, options: { readonly limit?: 
 			return [];
 		}
 		const custom = meta[metaKey(found.projectId, options.sessionId)];
-		return searchFile(found.filePath, options.sessionId, {
+		return searchFile(found.filePath, {
 			sessionId: options.sessionId,
 			projectId: found.projectId,
 			cwd: found.cwd,
@@ -885,7 +870,7 @@ export async function searchSessions(query: string, options: { readonly limit?: 
 				updatedAt: stat.mtimeMs,
 				archived,
 			};
-			found.push(...await searchFile(filePath, sessionId, context, needle, Math.min(MAX_MATCHES_PER_SESSION, limit - found.length)));
+			found.push(...await searchFile(filePath, context, needle, Math.min(MAX_MATCHES_PER_SESSION, limit - found.length)));
 		}
 	}
 	return found.slice(0, limit);

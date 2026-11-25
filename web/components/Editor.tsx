@@ -460,7 +460,7 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 			<div className={`editor-host${preview ? ' is-hidden' : ''}`} ref={containerRef} />
 			{preview && (
 				<div className="markdown-preview">
-					<Markdown text={previewText} mermaid controls={false} />
+					<Markdown text={previewText} mermaid controls={false} diagramZoomRequiresCtrl />
 				</div>
 			)}
 		</>
