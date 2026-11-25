@@ -12,6 +12,7 @@
  * those events land here the same way.
  */
 import type { AgentServerEvent, QueuedMessage } from '../agentTypes';
+import { readCachedStreams, writeCachedStream } from './sessionCache';
 
 /** A task the CLI reported for this conversation, kept until it finishes. */
 export interface StreamTask {
@@ -52,6 +53,11 @@ function slot(sessionId: string): SessionStream {
 	return stream;
 }
 
+/** Mirrors a mutated slot into IndexedDB so a reload can resume a live turn. */
+function persist(sessionId: string, stream: SessionStream): void {
+	writeCachedStream(sessionId, stream);
+}
+
 /** Appends one event; a replayed seq that was already applied is ignored. */
 export function appendStreamEvent(sessionId: string | undefined, event: AgentServerEvent): void {
 	if (!sessionId) {
@@ -69,6 +75,7 @@ export function appendStreamEvent(sessionId: string | undefined, event: AgentSer
 		stream.events.splice(0, stream.events.length - MAX_EVENTS);
 	}
 	stream.updatedAt = Date.now();
+	persist(sessionId, stream);
 }
 
 /** Replaces the queue snapshot for one session. */
@@ -79,6 +86,7 @@ export function setStreamQueued(sessionId: string | undefined, items: readonly Q
 	const stream = slot(sessionId);
 	stream.queued = items;
 	stream.updatedAt = Date.now();
+	persist(sessionId, stream);
 }
 
 /** Mirrors task start/progress/notification events into the session slot. */
@@ -90,6 +98,7 @@ export function setStreamTask(sessionId: string | undefined, task: StreamTask | 
 	const others = stream.tasks.filter(item => item.taskId !== task?.taskId);
 	stream.tasks = task ? [...others, task] : others;
 	stream.updatedAt = Date.now();
+	persist(sessionId, stream);
 }
 
 /** Removes one finished task from the live panel. */
@@ -103,6 +112,7 @@ export function clearStreamTask(sessionId: string | undefined, taskId: string): 
 	}
 	stream.tasks = stream.tasks.filter(item => item.taskId !== taskId);
 	stream.updatedAt = Date.now();
+	persist(sessionId, stream);
 }
 
 /** Records whether a turn is running. */
@@ -113,6 +123,7 @@ export function setStreamBusy(sessionId: string | undefined, busy: boolean): voi
 	const stream = slot(sessionId);
 	stream.busy = busy;
 	stream.updatedAt = Date.now();
+	persist(sessionId, stream);
 }
 
 /**
@@ -130,11 +141,26 @@ export function clearStreamEvents(sessionId: string | undefined): void {
 	stream.events = [];
 	stream.busy = false;
 	stream.updatedAt = Date.now();
+	persist(sessionId, stream);
 }
 
 /** The log for one session, or `undefined` when nothing has been recorded. */
 export function getStream(sessionId: string | undefined): Readonly<SessionStream> | undefined {
 	return sessionId === undefined ? undefined : streams.get(sessionId);
+}
+
+/**
+ * Restores cached slots once on startup. Only fills sessions not already seen:
+ * a live event that arrived first is newer than anything in storage.
+ */
+export async function hydrateStreams(): Promise<void> {
+	const cached = await readCachedStreams();
+	for (const entry of cached) {
+		if (!streams.has(entry.sessionId)) {
+			const { sessionId: _id, ...stream } = entry;
+			streams.set(entry.sessionId, { ...stream, updatedAt: stream.updatedAt ?? Date.now() });
+		}
+	}
 }
 
 /** Forgets sessions nothing has touched in a long while. */

@@ -36,6 +36,7 @@ import { setLang, t, useLang } from './i18n';
 import { getTheme, toggleTheme } from './theme';
 import { Workspace } from './components/Workspace';
 import { disposeAllTerminalSessions } from './components/terminalSessions';
+import { hydrateStreams } from './components/sessionStore';
 
 interface ActiveView {
 	readonly root: string;
@@ -305,6 +306,11 @@ export function App() {
 		};
 		document.addEventListener('keydown', onKeyDown);
 		return () => document.removeEventListener('keydown', onKeyDown);
+	}, []);
+
+	// Restore the browser-side stream cache before panels read it.
+	useEffect(() => {
+		void hydrateStreams();
 	}, []);
 
 	// Resolve the session before anything else: every other call is 401 without it.

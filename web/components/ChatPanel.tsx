@@ -1,12 +1,13 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentClientCommand, AgentInfo, AgentServerEvent, AgentTaskUsage, ModelOption, QueuedMessage } from '../agentTypes';
-import { getTranscript, reportClientLog, searchFiles, type SessionMatch, type TranscriptItem } from '../api';
+import { getTranscript, reportClientLog, searchFiles, type SessionMatch, type TranscriptItem, type TranscriptPage } from '../api';
 import { clearAttention, requestAttention } from '../attention';
 import { t, useLang } from '../i18n';
 import { acquireAgentConnection, type AgentConnectionHandle } from './agentConnections';
 import { ChatFind } from './ChatFind';
 import { CodeHighlight, guessLanguage } from './CodeHighlight';
 import { draftKey, readDraft, writeDraft } from './composerDrafts';
+import { readCachedTranscript, writeCachedTranscript } from './sessionCache';
 import { getStream, pruneStreams } from './sessionStore';
 import { Markdown } from './Markdown';
 import { Splitter, clamp, usePersistedSize } from './Splitter';
@@ -508,6 +509,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				setItems(toChatItems(page.items, page.start));
 				setHasMore(page.hasMore);
 				oldestRef.current = page.start ?? 0;
+				void writeCachedTranscript(id, page);
 				reportClientLog({ event: 'transcript-reload', session: id, items: page.items.length, reason });
 			})
 			.catch(error => {
@@ -536,12 +538,27 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		}
 	};
 
+	/**
+	 * Reads the newest page from the browser cache when present, otherwise from
+	 * the server's jsonl. A cache hit still revalidates in the background so a
+	 * finished turn written by another tab eventually shows up; `messageId`
+	 * dedup in the replay keeps that from printing anything twice.
+	 */
+	const loadPage = async (id: string): Promise<{ readonly page: TranscriptPage; readonly cached: boolean }> => {
+		const cached = await readCachedTranscript(id);
+		if (cached) {
+			return { page: cached, cached: true };
+		}
+		const page = await getTranscript(id);
+		void writeCachedTranscript(id, page);
+		return { page, cached: false };
+	};
+
 	// Load history when a different session is selected.
 	//
-	// One path, no rendering snapshot: the jsonl tail is the durable base and the
+	// The browser cache is the fast path; the jsonl is authoritative. The
 	// session's stream log — written by the pooled socket even while this panel
-	// was showing another conversation — is replayed on top. That log is the only
-	// live copy, so there is no cached list to go stale and silently refresh.
+	// was showing another conversation — is replayed on top of either source.
 	useEffect(() => {
 		if (!sessionId) {
 			if (loadedIdRef.current !== undefined) {
@@ -562,8 +579,8 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		// is declared before the one that subscribes the socket.
 		replayBuffer.current = [];
 		pruneStreams();
-		getTranscript(sessionId)
-			.then(async page => {
+		loadPage(sessionId)
+			.then(async ({ page, cached }) => {
 				if (loadedIdRef.current !== sessionId) {
 					return;
 				}
@@ -609,6 +626,12 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					if (stream.busy) {
 						setStreaming(true);
 					}
+				}
+				// A cached page may miss a turn that finished elsewhere. Refresh
+				// from the jsonl in the background, silently; the reload helper
+				// already refuses to replace a turn that is still streaming.
+				if (cached) {
+					window.setTimeout(() => reloadTranscriptRef.current('cache-revalidate', true), 0);
 				}
 			})
 			.catch(error => {

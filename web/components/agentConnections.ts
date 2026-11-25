@@ -1,5 +1,6 @@
 import type { AgentClientCommand, AgentServerEvent, QueuedMessage } from '../agentTypes';
-import { agentUrl, reportClientLog } from '../api';
+import { agentUrl, getTranscript, reportClientLog } from '../api';
+import { writeCachedTranscript } from './sessionCache';
 import {
 	appendStreamEvent,
 	clearStreamEvents,
@@ -314,6 +315,20 @@ class AgentConnection implements AgentConnectionHandle {
 		if (event.type === 'result' || event.type === 'exit') {
 			// The turn is over: the jsonl owns it from here, so the log is dropped.
 			clearStreamEvents(sessionId);
+			// Refresh the cached page *while nobody is watching*, so switching back
+			// reads the finished turn from cache instead of the stale snapshot from
+			// before this turn. Without this, clearing the log leaves the browser
+			// with old text and no events to replay until a background revalidate.
+			if (sessionId) {
+				// The CLI writes the final record just before `result`, but a small
+				// delay covers the filesystem flush; a revalidate later corrects it
+				// anyway if this read lands too early.
+				window.setTimeout(() => {
+					void getTranscript(sessionId)
+						.then(page => writeCachedTranscript(sessionId, page))
+						.catch(() => undefined);
+				}, 300);
+			}
 			this._busy = false;
 			this._armIdle();
 			return;
