@@ -387,28 +387,44 @@ button {
 	white-space: nowrap;
 }
 
-.rail-project-close {
+/* Archived folders stay visibly dimmed while the archive view is open. */
+.rail-project.archived .rail-project-name,
+.rail-project.archived .rail-project-path {
+	opacity: 0.6;
+}
+
+.rail-project-action {
 	flex: none;
 	width: 20px;
 	height: 20px;
-	margin-right: 4px;
+	padding: 3px;
+	margin-right: 2px;
 	background: none;
 	border: none;
 	border-radius: 3px;
 	color: var(--fg-dim);
-	font-size: 14px;
-	line-height: 1;
 	cursor: pointer;
 	opacity: 0;
 }
 
-.rail-project:hover .rail-project-close {
+.rail-project:hover .rail-project-action,
+.rail-project-action:focus-visible {
 	opacity: 1;
 }
 
-.rail-project-close:hover {
+.rail-project-action:hover {
 	background: var(--bg-hover);
 	color: var(--fg);
+}
+
+.rail-archive-toggle {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	padding: 2px 8px 4px;
+	font-size: 10.5px;
+	color: var(--fg-dim);
+	cursor: pointer;
 }
 
 /* Searchable project filter: a `<select>` cannot be typed into, and this rail
@@ -839,6 +855,50 @@ button {
 .rail-sort:hover {
 	border-color: var(--accent);
 	color: var(--accent);
+}
+
+/* Three-way sort pickers: name / created / updated, all visible at once. */
+.rail-sort-row {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 4px 8px;
+	padding: 2px 8px 6px;
+}
+
+.rail-sort-label {
+	flex: none;
+	font-size: 10.5px;
+	color: var(--fg-dim);
+}
+
+.rail-sort-picker {
+	display: flex;
+	flex: none;
+	gap: 2px;
+	padding: 1px;
+	border-radius: 5px;
+	background: var(--bg-hover);
+}
+
+.rail-sort-item {
+	padding: 1px 6px;
+	background: none;
+	border: none;
+	border-radius: 4px;
+	color: var(--fg-dim);
+	font: inherit;
+	font-size: 10.5px;
+	cursor: pointer;
+}
+
+.rail-sort-item:hover {
+	color: var(--fg);
+}
+
+.rail-sort-item.active {
+	background: var(--bg);
+	color: var(--fg);
 }
 
 /* A folded project reads like a folded group: same caret, same indentation. */

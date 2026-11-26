@@ -18,6 +18,7 @@ export interface SessionEntry {
 	readonly cwd: string;
 	readonly title: string;
 	readonly updatedAt: number;
+	readonly createdAt: number;
 	readonly size: number;
 	/** Archived sessions keep their transcript but stay out of the default list. */
 	readonly archived: boolean;
@@ -134,6 +135,41 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
 export async function listProjects(): Promise<readonly ProjectInfo[]> {
 	const result = await requestJson<{ projects: ProjectInfo[] }>('/api/projects');
 	return result.projects;
+}
+
+/** A folder opened for reading. Stored on the service, per account. */
+export interface OpenedProject {
+	readonly root: string;
+	readonly addedAt: number;
+	readonly openedAt: number;
+	readonly archivedAt?: number;
+}
+
+export async function listOpenedProjects(): Promise<readonly OpenedProject[]> {
+	const result = await requestJson<{ projects: OpenedProject[] }>('/api/opened-projects');
+	return result.projects;
+}
+
+export async function touchOpenedProject(root: string): Promise<readonly OpenedProject[]> {
+	const result = await requestJson<{ projects: OpenedProject[] }>('/api/opened-projects', {
+		method: 'POST',
+		body: JSON.stringify({ root }),
+	});
+	return result.projects;
+}
+
+export async function setOpenedProjectArchived(root: string, archived: boolean): Promise<void> {
+	await requestJson('/api/opened-projects/archive', {
+		method: 'POST',
+		body: JSON.stringify({ root, archived }),
+	});
+}
+
+export async function deleteOpenedProject(root: string): Promise<void> {
+	await requestJson('/api/opened-projects', {
+		method: 'DELETE',
+		body: JSON.stringify({ root }),
+	});
 }
 
 export interface BrowseResult {

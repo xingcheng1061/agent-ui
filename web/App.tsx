@@ -5,10 +5,12 @@ import {
 	createGroup,
 	deleteGroup,
 	deleteSession,
+	deleteOpenedProject,
 	fetchMe,
 	joinGroup,
 	leaveGroup,
 	listGroups,
+	listOpenedProjects,
 	listProjects,
 	listSessions,
 	logout,
@@ -16,7 +18,10 @@ import {
 	renameSession,
 	restartSession,
 	runningSessions,
+	setOpenedProjectArchived,
+	touchOpenedProject,
 	type GroupInfo,
+	type OpenedProject,
 	type MembershipResult,
 	type ProjectInfo,
 	type RestartOutcome,
@@ -37,6 +42,7 @@ import { getTheme, toggleTheme } from './theme';
 import { Workspace } from './components/Workspace';
 import { disposeAllTerminalSessions } from './components/terminalSessions';
 import { hydrateStreams } from './components/sessionStore';
+import { readRailSortPrefs, writeRailSortPref, type RailSortPrefs, type SortMode } from './components/railSortPrefs';
 
 interface ActiveView {
 	readonly root: string;
@@ -84,29 +90,6 @@ function readActiveView(): ActiveView | undefined {
 	}
 }
 
-/** Folders opened for reading, newest first; survives a reload. */
-const OPENED_KEY = 'agentui.opened';
-
-function readOpenedProjects(): readonly string[] {
-	try {
-		const raw = localStorage.getItem(OPENED_KEY);
-		if (!raw) {
-			return [];
-		}
-		const parsed: unknown = JSON.parse(raw);
-		return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
-	} catch {
-		return [];
-	}
-}
-
-function writeOpenedProjects(projects: readonly string[]): void {
-	try {
-		localStorage.setItem(OPENED_KEY, JSON.stringify(projects));
-	} catch {
-		// Storage blocked: the list lives for this page only.
-	}
-}
 
 /** `undefined` means "still checking"; everything else is a settled answer. */
 type AuthState = { readonly kind: 'loading' }
@@ -126,16 +109,23 @@ export function App() {
 	const [dialogOpen, setDialogOpen] = useState(false);
 	/** The same dialog picks a folder either to start in or to read. */
 	const [dialogMode, setDialogMode] = useState<'create' | 'browse'>('create');
-	const [openedProjects, setOpenedProjects] = useState<readonly string[]>(readOpenedProjects);
+	/** Opened folders, from the service; one record per account, shared by tabs. */
+	const [openedProjects, setOpenedProjects] = useState<readonly OpenedProject[]>([]);
+	const [railSortPrefs, setRailSortPrefs] = useState<RailSortPrefs>(readRailSortPrefs);
+	const setRailSort = (key: keyof RailSortPrefs, value: SortMode) => {
+		setRailSortPrefs(current => {
+			const next = { ...current, [key]: value };
+			writeRailSortPref(key, value);
+			return next;
+		});
+	};
+	// A reload can land on a folder opened in another tab: adopt it so the
+	// record exists on the service even if this tab refreshes before seeing it.
 	useEffect(() => {
-		writeOpenedProjects(openedProjects);
-	}, [openedProjects]);
-	// A reload can land on a folder that was opened before the list was ever
-	// written (or after storage was cleared): adopt it instead of showing a
-	// project that the "项目" tab does not know about.
-	useEffect(() => {
-		if (active?.browse && !openedProjects.includes(active.root)) {
-			setOpenedProjects(current => [active.root, ...current]);
+		if (active?.browse && !openedProjects.some(item => item.root === active.root)) {
+			void touchOpenedProject(active.root)
+				.then(setOpenedProjects)
+				.catch(() => undefined);
 		}
 	}, [active, openedProjects]);
 	const [passwordOpen, setPasswordOpen] = useState(false);
@@ -203,10 +193,14 @@ export function App() {
 	}, [active]);
 
 	const refresh = useCallback(async () => {
-		const [nextProjects, nextSessions, nextGroups] = await Promise.all([listProjects(), listSessions(), listGroups()]);
+		const [nextProjects, nextSessions, nextGroups, nextOpened] = await Promise.all([
+			listProjects(), listSessions(), listGroups(),
+			listOpenedProjects().catch(() => [] as readonly OpenedProject[]),
+		]);
 		setProjects(nextProjects);
 		setSessions(nextSessions);
 		setGroups(nextGroups);
+		setOpenedProjects(nextOpened);
 		setLoaded(true);
 		setActive(current => {
 			if (current) {
@@ -261,6 +255,47 @@ export function App() {
 		const timer = window.setInterval(() => void refreshRunning(), 3000);
 		return () => window.clearInterval(timer);
 	}, [auth.kind, refreshRunning]);
+
+	/** Opened folders are per-account, so another tab's change must show up here. */
+	useEffect(() => {
+		if (auth.kind !== 'ready') {
+			return;
+		}
+		const sync = () => void listOpenedProjects()
+			.then(setOpenedProjects)
+			.catch(() => undefined);
+		const timer = window.setInterval(sync, 10_000);
+		return () => window.clearInterval(timer);
+	}, [auth.kind]);
+
+	/** One-shot migration of the old browser-local list into the account store. */
+	useEffect(() => {
+		if (auth.kind !== 'ready') {
+			return;
+		}
+		let roots: readonly string[] = [];
+		try {
+			const raw = localStorage.getItem('agentui.opened');
+			const parsed: unknown = raw ? JSON.parse(raw) : undefined;
+			if (Array.isArray(parsed)) {
+				roots = parsed.filter((item): item is string => typeof item === 'string');
+			}
+		} catch {
+			// Corrupt data: nothing worth migrating.
+		}
+		localStorage.removeItem('agentui.opened');
+		localStorage.removeItem('agentui.openedAt');
+		if (roots.length === 0) {
+			return;
+		}
+		void (async () => {
+			let migrated: readonly OpenedProject[] = [];
+			for (const root of roots) {
+				migrated = await touchOpenedProject(root);
+			}
+			setOpenedProjects(migrated);
+		})().catch(() => undefined);
+	}, [auth.kind]);
 
 	/**
 	 * One place decides who owns Ctrl+F. Which pane has focus determines which
@@ -523,35 +558,47 @@ export function App() {
 	};
 
 	const openProject = async (root: string) => {
-		setOpenedProjects(current => [root, ...current.filter(item => item !== root)]);
 		showProject(root);
 		setDialogOpen(false);
-		await refresh();
+		await touchOpenedProject(root).then(setOpenedProjects).catch(() => undefined);
 	};
 
 	/** Switches to a folder that is already open, without re-picking it. */
 	const activateProject = async (root: string) => {
-		setOpenedProjects(current => [root, ...current.filter(item => item !== root)]);
 		showProject(root);
-		await refresh();
+		await touchOpenedProject(root).then(setOpenedProjects).catch(() => undefined);
 	};
 
 	/**
-	 * Drops a folder from the list. The files are untouched; if it was the one
-	 * on screen, the next open folder takes over.
+	 * Archives a folder: it leaves the list but the record (and the disk files)
+	 * stay, so it can be restored later.
 	 */
-	const closeProject = (root: string) => {
-		const remaining = openedProjects.filter(item => item !== root);
-		setOpenedProjects(remaining);
-		setActive(current => {
-			if (!current?.browse || current.root !== root) {
-				return current;
+	const archiveProject = async (root: string, archived: boolean) => {
+		try {
+			await setOpenedProjectArchived(root, archived);
+			setOpenedProjects(current => current.map(item => item.root === root
+				? { ...item, archivedAt: archived ? Date.now() : undefined }
+				: item));
+			if (archived && active?.browse && active.root === root) {
+				setActive(undefined);
+				setViewToken(value => value + 1);
 			}
-			const next = remaining[0];
-			return next ? { root: next, browse: true } : undefined;
-		});
-		if (active?.browse && active.root === root) {
-			setViewToken(value => value + 1);
+		} catch (reason) {
+			setError(String(reason));
+		}
+	};
+
+	/** Removes the record entirely; never touches the directory on disk. */
+	const deleteProjectRecord = async (root: string) => {
+		try {
+			await deleteOpenedProject(root);
+			setOpenedProjects(current => current.filter(item => item.root !== root));
+			if (active?.browse && active.root === root) {
+				setActive(undefined);
+				setViewToken(value => value + 1);
+			}
+		} catch (reason) {
+			setError(String(reason));
 		}
 	};
 
@@ -722,9 +769,12 @@ export function App() {
 					onNewSession={() => openDialog('create')}
 					onOpenProject={() => openDialog('browse')}
 					openedProjects={openedProjects}
+					railSortPrefs={railSortPrefs}
+					onRailSortChange={setRailSort}
 					openRoot={active?.browse ? active.root : undefined}
 					onActivateProject={activateProject}
-					onCloseProject={closeProject}
+					onArchiveProject={archiveProject}
+					onDeleteProject={deleteProjectRecord}
 					onRenameSession={renameSessionEntry}
 					onArchiveSession={archiveSessionEntry}
 					onDeleteSession={deleteSessionEntry}

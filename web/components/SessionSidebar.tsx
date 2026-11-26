@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { searchSessions, type GroupInfo, type ProjectInfo, type SessionEntry, type SessionMatch } from '../api';
+import { searchSessions, type GroupInfo, type OpenedProject, type ProjectInfo, type SessionEntry, type SessionMatch } from '../api';
 import { t, useLang } from '../i18n';
 import { ALL, ProjectFilter } from './ProjectFilter';
 import { projectLabels } from '../projectNames';
+import { SORT_MODES, sortModeLabel, type RailSortPrefs, type SortMode } from './railSortPrefs';
 
 /**
  * When each conversation was last opened, so the rail can stop marking it.
@@ -68,6 +69,18 @@ function writeGrouping(value: Grouping): void {
 }
 
 /**
+ * Returns a comparator that orders by one of the three modes. `created` and
+ * `updated` are descending (newest first), `name` is alphabetical.
+ */
+function sortBy<T>(mode: SortMode, nameOf: (item: T) => string, timeOf: (item: T) => { created: number; updated: number }): (a: T, b: T) => number {
+	if (mode === 'name') {
+		return (a, b) => nameOf(a).localeCompare(nameOf(b), undefined, { numeric: true, sensitivity: 'base' });
+	}
+	const field = mode === 'created' ? 'created' : 'updated';
+	return (a, b) => timeOf(b)[field] - timeOf(a)[field];
+}
+
+/**
  * How project blocks are ordered: by their newest conversation, or by name.
  *
  * Time is the default because "what did I touch last" is the question a rail
@@ -108,6 +121,33 @@ function Highlighted({ text, query }: { readonly text: string; readonly query: s
 	);
 }
 
+/** Three-way order picker shared by the rail's ordered lists. */
+function SortPicker({ mode, onChange, label }: {
+	readonly mode: SortMode;
+	readonly onChange: (value: SortMode) => void;
+	readonly label: string;
+}) {
+	const lang = useLang();
+	return (
+		<div className="rail-sort-picker" role="group" aria-label={`${label} · ${lang === 'zh' ? '排序' : 'Sort'}`}>
+			{SORT_MODES.map(value => {
+				const name = sortModeLabel(value)[lang];
+				return (
+					<button
+						type="button"
+						key={value}
+						className={`rail-sort-item${mode === value ? ' active' : ''}`}
+						title={`${label} · ${name}`}
+						onClick={() => onChange(value)}
+					>
+						{name}
+					</button>
+				);
+			})}
+		</div>
+	);
+}
+
 interface SessionSidebarProps {
 	readonly projects: readonly ProjectInfo[];
 	readonly sessions: readonly SessionEntry[];
@@ -121,17 +161,21 @@ interface SessionSidebarProps {
 	/** Picks a folder to open for reading, without starting a conversation. */
 	readonly onOpenProject: () => void;
 	/**
-	 * Folders opened this way, newest first, remembered across reloads.
+	 * Folders opened for reading, persisted per account on the service.
 	 *
 	 * Kept separate from the sessions: a conversation list answers "what was I
 	 * doing", this answers "what is open right now", and the two do not have to
-	 * agree.
+	 * agree. Archived folders stay in the list for the archive toggle.
 	 */
-	readonly openedProjects: readonly string[];
+	readonly openedProjects: readonly OpenedProject[];
+	readonly railSortPrefs: RailSortPrefs;
+	readonly onRailSortChange: (key: keyof RailSortPrefs, value: SortMode) => void;
 	/** The root being read right now, if any: highlights its row. */
 	readonly openRoot: string | undefined;
 	readonly onActivateProject: (root: string) => void;
-	readonly onCloseProject: (root: string) => void;
+	readonly onArchiveProject: (root: string, archived: boolean) => void;
+	/** Removes the record entirely; the directory on disk is untouched. */
+	readonly onDeleteProject: (root: string) => void;
 	/** Empty title restores the generated one; the rail never sends that. */
 	readonly onRenameSession: (session: SessionEntry, title: string) => void;
 	readonly onArchiveSession: (session: SessionEntry, archived: boolean) => void;
@@ -180,9 +224,12 @@ export function SessionSidebar({
 	onNewSession,
 	onOpenProject,
 	openedProjects,
+	railSortPrefs,
+	onRailSortChange,
 	openRoot,
 	onActivateProject,
-	onCloseProject,
+	onArchiveProject,
+	onDeleteProject,
 	onRenameSession,
 	onArchiveSession,
 	onDeleteSession,
@@ -366,12 +413,23 @@ export function SessionSidebar({
 	// changes the hook count between renders, and React then refuses to render
 	// the whole rail — which is what took the project filter down with it.
 	// Path matches the folder name too, so one rule covers both.
+	const [showArchivedProjects, setShowArchivedProjects] = useState(false);
+	const { activeProjects, archivedProjects } = useMemo(() => ({
+		activeProjects: openedProjects.filter(p => p.archivedAt === undefined),
+		archivedProjects: openedProjects.filter(p => p.archivedAt !== undefined),
+	}), [openedProjects]);
 	const visibleOpenProjects = useMemo(() => {
 		const needle = projectQuery.trim().toLowerCase();
-		return needle === ''
-			? openedProjects
-			: openedProjects.filter(root => root.toLowerCase().includes(needle));
-	}, [openedProjects, projectQuery]);
+		const source = showArchivedProjects ? archivedProjects : activeProjects;
+		const shown = needle === ''
+			? [...source]
+			: source.filter(p => p.root.toLowerCase().includes(needle));
+		return shown.sort(sortBy(
+			railSortPrefs.projects,
+			p => p.root.split(/[\\/]/).filter(Boolean).pop() ?? p.root,
+			p => ({ created: p.addedAt, updated: p.openedAt }),
+		));
+	}, [activeProjects, archivedProjects, showArchivedProjects, projectQuery, railSortPrefs.projects]);
 
 	const labels = useMemo(() => projectLabels(projects), [projects]);
 	const projectById = useMemo(
@@ -471,14 +529,18 @@ export function SessionSidebar({
 		(newest, session) => Math.max(newest, session.updatedAt),
 		group.createdAt,
 	);
-	const orderedGroups = [...groups].sort((left, right) => activityOf(right) - activityOf(left));
+	const orderedGroups = [...groups].sort(sortBy(
+		railSortPrefs.groups,
+		group => group.name,
+		group => ({ created: group.createdAt, updated: activityOf(group) }),
+	));
 	const groupBucket = (group: GroupInfo): Bucket | undefined => {
 		// An archived group lists its archived members; an active one lists the
 		// conversations that are still in the list.
 		const archived = group.archivedAt !== undefined;
 		const members = membersOf(group)
 			.filter(session => session.archived === archived)
-			.sort((left, right) => right.updatedAt - left.updatedAt);
+			.sort(sortBy(railSortPrefs.sessions, session => session.title, session => ({ created: session.createdAt, updated: session.updatedAt })));
 		// A hit on the group name keeps the whole group visible; otherwise only
 		// the conversations whose own text matches — searching "parser" should
 		// not drag in every unrelated conversation that shares a group.
@@ -498,9 +560,12 @@ export function SessionSidebar({
 	// fall back to the project/date buckets instead of disappearing from the rail.
 	const ungrouped = activeSessions.filter(session =>
 		(session.groupId === undefined || !groupIds.has(session.groupId)) && matchesSession(session));
+	const applySessionSort = (list: readonly SessionEntry[]) => [...list].sort(
+		sortBy(railSortPrefs.sessions, session => session.title, session => ({ created: session.createdAt, updated: session.updatedAt })),
+	);
 	const restBuckets = grouping === 'project'
-		? projectBuckets(ungrouped, projectName, projectById, projectSort)
-		: bucketize(ungrouped);
+		? projectBuckets(ungrouped, projectName, projectById, projectSort, railSortPrefs.sessions)
+		: bucketize(applySessionSort(ungrouped));
 
 	// Archived conversations keep the group they were archived with: a group is
 	// archived and restored as a whole, so it has to come back as a whole too.
@@ -873,6 +938,12 @@ export function SessionSidebar({
 						+ {t('新建组')}
 					</button>
 				</div>
+				<div className="rail-sort-row">
+					<span className="rail-sort-label">{t('组')}</span>
+					<SortPicker mode={railSortPrefs.groups} onChange={value => onRailSortChange('groups', value)} label={t('会话组')} />
+					<span className="rail-sort-label">{t('会话')}</span>
+					<SortPicker mode={railSortPrefs.sessions} onChange={value => onRailSortChange('sessions', value)} label={t('组内会话')} />
+				</div>
 				{creatingGroup ? (
 					<div className="groups-create">
 						<input
@@ -1126,6 +1197,20 @@ export function SessionSidebar({
 			</div>
 			) : (
 				<>
+					<div className="rail-sort-row">
+						<span className="rail-sort-label">{t('项目')}</span>
+						<SortPicker mode={railSortPrefs.projects} onChange={value => onRailSortChange('projects', value)} label={t('已打开的项目')} />
+					</div>
+					{archivedProjects.length > 0 && (
+						<label className="rail-archive-toggle">
+							<input
+								type="checkbox"
+								checked={showArchivedProjects}
+								onChange={event => setShowArchivedProjects(event.target.checked)}
+							/>
+							{t('显示已归档项目')}（{archivedProjects.length}）
+						</label>
+					)}
 					<div className="rail-search">
 						<input
 							value={projectQuery}
@@ -1152,28 +1237,40 @@ export function SessionSidebar({
 						)}
 					</div>
 					<div className="rail-list">
-						{openedProjects.length === 0 && (
+						{activeProjects.length === 0 && archivedProjects.length === 0 && (
 							<div className="rail-empty">{t('还没有打开的项目，点上面的「打开项目」选一个目录')}</div>
 						)}
-						{openedProjects.length > 0 && visibleOpenProjects.length === 0 && (
+						{visibleOpenProjects.length === 0 && (activeProjects.length > 0 || archivedProjects.length > 0) && (
 							<div className="rail-empty">{t('没有匹配「{query}」的项目', { query: projectQuery.trim() })}</div>
 						)}
-						{visibleOpenProjects.map(root => (
-							<div key={root} className={`rail-project${root === openRoot ? ' active' : ''}`} title={root}>
-								<button type="button" className="rail-project-main" onClick={() => onActivateProject(root)}>
-									<span className="rail-project-name">{root.split(/[\\/]/).filter(Boolean).pop() ?? root}</span>
-									<span className="rail-project-path">{root}</span>
-								</button>
-								<button
-									type="button"
-									className="rail-project-close"
-									title={t('从列表移除（磁盘上的文件不受影响）')}
-									onClick={() => onCloseProject(root)}
-								>
-									×
-								</button>
-							</div>
-						))}
+						{visibleOpenProjects.map(project => {
+							const root = project.root;
+							const archived = project.archivedAt !== undefined;
+							return (
+								<div key={root} className={`rail-project${root === openRoot ? ' active' : ''}${archived ? ' archived' : ''}`} title={root}>
+									<button type="button" className="rail-project-main" onClick={() => onActivateProject(root)}>
+										<span className="rail-project-name">{root.split(/[\\/]/).filter(Boolean).pop() ?? root}</span>
+										<span className="rail-project-path">{root}</span>
+									</button>
+									<button
+										type="button"
+										className="rail-project-action"
+										title={archived ? t('恢复项目') : t('归档项目（从列表隐藏，可恢复）')}
+										onClick={() => onArchiveProject(root, !archived)}
+									>
+										<Icon name={archived ? 'unarchive' : 'archive'} />
+									</button>
+									<button
+										type="button"
+										className="rail-project-action"
+										title={t('彻底移除记录（磁盘上的文件不受影响）')}
+										onClick={() => onDeleteProject(root)}
+									>
+										<Icon name="delete" />
+									</button>
+								</div>
+							);
+						})}
 					</div>
 				</>
 			)}
@@ -1233,6 +1330,7 @@ function projectBuckets(
 	nameOf: (projectId: string) => string,
 	projectById: ReadonlyMap<string, ProjectInfo>,
 	sort: ProjectSort,
+	sessionSort: SortMode,
 ): readonly Bucket[] {
 	const byProject = new Map<string, SessionEntry[]>();
 	for (const session of sessions) {
@@ -1244,16 +1342,16 @@ function projectBuckets(
 		}
 	}
 	const blocks = [...byProject.entries()].map(([projectId, members]): Bucket => {
-		const sorted = [...members].sort((left, right) => right.updatedAt - left.updatedAt);
+		const sorted = [...members].sort(sortBy(sessionSort, session => session.title, session => ({ created: session.createdAt, updated: session.updatedAt })));
 		return {
 			label: nameOf(projectId),
 			project: { id: projectId, label: nameOf(projectId), hint: projectById.get(projectId)?.cwd },
 			sessions: sorted,
 		};
 	});
-	// Sessions inside a block always stay newest-first; this only orders the
-	// blocks. Numeric collation keeps `work2` before `work10`, and `base`
-	// ignores case, which is how a file manager sorts names too.
+	// This orders the blocks; conversations inside each block follow the
+	// separate three-way session sort. Numeric collation keeps `work2` before
+	// `work10`, and `base` ignores case, like a file manager.
 	return sort === 'name'
 		? blocks.sort((left, right) => left.label.localeCompare(right.label, undefined, { numeric: true, sensitivity: 'base' }))
 		: blocks.sort((left, right) => (right.sessions[0]?.updatedAt ?? 0) - (left.sessions[0]?.updatedAt ?? 0));

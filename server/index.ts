@@ -37,6 +37,7 @@ import {
 	type PublicUser,
 } from './auth.js';
 import { fsRouter } from './fsApi.js';
+import { deleteOpenedProject, listOpenedProjects, setOpenedProjectArchived, touchOpenedProject } from './openedProjects.js';
 import { gitFileVersions, gitStatus } from './git.js';
 import {
 	createGroup,
@@ -373,6 +374,55 @@ app.post('/api/projects', async (req, res) => {
 			lastActivity: Date.now(),
 		},
 	});
+});
+
+// ------------------------------------------------------------ opened folders
+
+/** Account id for a request; an empty id is mapped to the shared-token bucket. */
+async function openedOwner(req: Request): Promise<string> {
+	const user = await userForToken(tokenFrom(req));
+	return user?.id ?? '';
+}
+
+app.get('/api/opened-projects', async (req, res) => {
+	res.json({ projects: await listOpenedProjects(await openedOwner(req)) });
+});
+
+app.post('/api/opened-projects', async (req, res) => {
+	const body = req.body as { root?: unknown } | undefined;
+	if (typeof body?.root !== 'string' || body.root.trim().length === 0) {
+		throw new BadRequestError('`root` is required.');
+	}
+	const owner = await openedOwner(req);
+	res.json({ projects: await touchOpenedProject(owner, path.resolve(body.root.trim())) });
+});
+
+app.post('/api/opened-projects/archive', async (req, res) => {
+	const body = req.body as { root?: unknown; archived?: unknown } | undefined;
+	if (typeof body?.root !== 'string' || typeof body?.archived !== 'boolean') {
+		throw new BadRequestError('`root` and `archived` are required.');
+	}
+	const owner = await openedOwner(req);
+	const ok = await setOpenedProjectArchived(owner, path.resolve(body.root.trim()), body.archived);
+	if (!ok) {
+		res.status(404).json({ error: '项目不在已打开列表中。' });
+		return;
+	}
+	res.json({ ok: true });
+});
+
+app.delete('/api/opened-projects', async (req, res) => {
+	const body = req.body as { root?: unknown } | undefined;
+	if (typeof body?.root !== 'string' || body.root.trim().length === 0) {
+		throw new BadRequestError('`root` is required.');
+	}
+	const owner = await openedOwner(req);
+	const ok = await deleteOpenedProject(owner, path.resolve(body.root.trim()));
+	if (!ok) {
+		res.status(404).json({ error: '项目不在已打开列表中。' });
+		return;
+	}
+	res.json({ ok: true });
 });
 
 // ------------------------------------------------------------------- groups

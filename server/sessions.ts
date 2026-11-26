@@ -48,6 +48,8 @@ export interface SessionEntry {
 	readonly cwd: string;
 	readonly title: string;
 	readonly updatedAt: number;
+	/** When the transcript file was created; falls back to mtime where birthtime is unavailable. */
+	readonly createdAt: number;
 	readonly size: number;
 	/** Archived sessions keep their transcript but stay out of the default list. */
 	readonly archived: boolean;
@@ -279,7 +281,7 @@ export async function listAllSessions(options: { readonly includeArchived?: bool
 	await metaReady;
 	const meta = metaStore.snapshot;
 	const projects = await listProjects();
-	const entries: { id: string; projectId: string; cwd: string; filePath: string; updatedAt: number; size: number }[] = [];
+	const entries: { id: string; projectId: string; cwd: string; filePath: string; updatedAt: number; createdAt: number; size: number }[] = [];
 
 	for (const project of projects) {
 		const directory = path.join(projectsDir(), project.id);
@@ -287,7 +289,15 @@ export async function listAllSessions(options: { readonly includeArchived?: bool
 		const stats = await Promise.all(files.map(async file => {
 			const filePath = path.join(directory, file);
 			const stat = await fs.stat(filePath).catch(() => undefined);
-			return stat ? { id: file.replace(/\.jsonl$/, ''), filePath, updatedAt: stat.mtimeMs, size: stat.size } : undefined;
+			return stat ? {
+				id: file.replace(/\.jsonl$/, ''),
+				filePath,
+				updatedAt: stat.mtimeMs,
+				// birthtime is 0 or equal to mtime on filesystems that do not track
+				// creation; clamp it so a bogus future value cannot break sorting.
+				createdAt: stat.birthtimeMs > 0 ? Math.min(stat.birthtimeMs, stat.mtimeMs) : stat.mtimeMs,
+				size: stat.size,
+			} : undefined;
 		}));
 		for (const stat of stats) {
 			if (stat) {
@@ -320,6 +330,7 @@ export async function listAllSessions(options: { readonly includeArchived?: bool
 			// Reading the first prompt is the expensive part; a rename skips it.
 			title: custom?.title ?? await readTitle(entry.filePath),
 			updatedAt: entry.updatedAt,
+			createdAt: entry.createdAt,
 			size: entry.size,
 			archived: archived(entry),
 			// Groups live in their own file, so the rail cannot see them otherwise.
