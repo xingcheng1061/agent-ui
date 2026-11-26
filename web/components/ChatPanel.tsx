@@ -2042,7 +2042,9 @@ function ChatItemView({ item, childrenOf, outputOf, live = false, onDismiss, anc
 	})();
 	return anchor === undefined
 		? body
-		: <div className="chat-anchor" data-anchor={anchor}>{body}</div>;
+		// The wrapper is now the flex child, so it must carry the alignment the
+		// bubble used to own — otherwise loaded user messages drift to the left.
+		: <div className={`chat-anchor${item.kind === 'user' ? ' user' : ''}`} data-anchor={anchor}>{body}</div>;
 }
 
 /**

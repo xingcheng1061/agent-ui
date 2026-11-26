@@ -1845,6 +1845,12 @@ button {
 	border-radius: 6px;
 }
 
+/* Loaded messages are wrapped for search anchors; keep user bubbles right. */
+.chat-anchor.user {
+	align-self: flex-end;
+	max-width: 85%;
+}
+
 .chat-anchor.chat-hit {
 	animation: chat-hit-flash 2.2s ease-out;
 }
