@@ -7,6 +7,7 @@ import { acquireAgentConnection, type AgentConnectionHandle } from './agentConne
 import { ChatFind } from './ChatFind';
 import { CodeHighlight, guessLanguage } from './CodeHighlight';
 import { draftKey, readDraft, writeDraft } from './composerDrafts';
+import { TaskMonitor } from './TaskMonitor';
 import { readCachedTranscript, writeCachedTranscript } from './sessionCache';
 import { getStream, pruneStreams } from './sessionStore';
 import { Markdown } from './Markdown';
@@ -144,6 +145,8 @@ interface ChatPanelProps {
 	 * hit. Absent when there is no code pane to open it in.
 	 */
 	readonly onOpenPath?: (filePath: string, line?: number) => void;
+	/** Jumps to the conversation that owns a background task. */
+	readonly onOpenTaskSession?: (sessionId: string) => void;
 	/** A content-search hit to scroll to; the token makes repeat clicks act again. */
 	readonly focusMatch?: {
 		readonly match: SessionMatch;
@@ -299,7 +302,7 @@ function dropDurableDeltas(
 	});
 }
 
-export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStarted, onTurnEnd, onOpenPath, focusMatch }: ChatPanelProps) {
+export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStarted, onTurnEnd, onOpenPath, onOpenTaskSession, focusMatch }: ChatPanelProps) {
 	// The `/` menu caches translated labels in a memo; see its dependency list.
 	const lang = useLang();
 	const [items, setItems] = useState<readonly Item[]>([]);
@@ -402,6 +405,10 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	/** Set between a stop click and the turn actually ending, so the click shows. */
 	const [stopRequested, setStopRequested] = useState(false);
 	const streamingRef = useRef(false);
+	/** Set once `result` arrives; a main delta after it is a late tail, not a new turn. */
+	const afterResultRef = useRef(false);
+	/** Clears the busy state a moment after the last late delta. */
+	const tailIdleTimerRef = useRef<number | undefined>(undefined);
 	/** Messages waiting for the running turn, mirrored from the server. */
 	const [queued, setQueued] = useState<readonly QueuedMessage[]>([]);
 	/** Last queue snapshot, so a shrinking queue can tell what started running. */
@@ -432,6 +439,26 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	onTurnEndRef.current = onTurnEnd;
 	resumeIdRef.current = sessionId;
 	streamingRef.current = streaming;
+
+	/**
+	 * A main-turn delta after `result` means text is still flushing. Keep the
+	 * composer busy and clear it once that tail stops, so it never shows "ended"
+	 * while characters are still arriving. Normal turns are unaffected: the
+	 * guard only applies after `result` has been seen.
+	 */
+	const markTextActive = () => {
+		if (!afterResultRef.current) {
+			return;
+		}
+		setStreaming(true);
+		if (tailIdleTimerRef.current !== undefined) {
+			window.clearTimeout(tailIdleTimerRef.current);
+		}
+		tailIdleTimerRef.current = window.setTimeout(() => {
+			tailIdleTimerRef.current = undefined;
+			setStreaming(false);
+		}, 600);
+	};
 
 	const appendStream = (kind: 'assistant' | 'thinking', text: string, parentToolUseId?: string) => {
 		const key = parentToolUseId ?? 'main';
@@ -470,6 +497,11 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		setPermission(undefined);
 		clearAttention();
 		setStreaming(false);
+		afterResultRef.current = false;
+		if (tailIdleTimerRef.current !== undefined) {
+			window.clearTimeout(tailIdleTimerRef.current);
+			tailIdleTimerRef.current = undefined;
+		}
 		setBackendLive(undefined);
 		setQueued([]);
 		queuedRef.current = [];
@@ -539,10 +571,9 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	};
 
 	/**
-	 * Reads the newest page from the browser cache when present, otherwise from
-	 * the server's jsonl. A cache hit still revalidates in the background so a
-	 * finished turn written by another tab eventually shows up; `messageId`
-	 * dedup in the replay keeps that from printing anything twice.
+	 * Reads the cache on in-app switches; a full page reload deliberately misses
+	 * once (see `freshBoot`) and re-reads the jsonl. A cache hit still revalidates
+	 * in the background so a turn finished elsewhere shows up eventually.
 	 */
 	const loadPage = async (id: string): Promise<{ readonly page: TranscriptPage; readonly cached: boolean }> => {
 		const cached = await readCachedTranscript(id);
@@ -580,7 +611,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		replayBuffer.current = [];
 		pruneStreams();
 		loadPage(sessionId)
-			.then(async ({ page, cached }) => {
+			.then(({ page, cached }) => {
 				if (loadedIdRef.current !== sessionId) {
 					return;
 				}
@@ -600,25 +631,38 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						.map(item => item.kind === 'tool' ? `${item.name}${item.parentToolUseId ? '*' : ''}` : item.kind)
 						.join(','),
 				});
+				// Buffered frames (arrived during the load) and the stream log
+				// overlap on `seq`. Merge them into one ordered, deduplicated list
+				// and drop deltas already persisted in the jsonl — otherwise a
+				// finished turn prints twice and the tail lands before earlier frames.
 				const buffered = replayBuffer.current ?? [];
 				replayBuffer.current = null;
-				flushReplay(buffered);
-				// Frames that arrived while the transcript loaded were just flushed;
-				// the log holds those too. Skip exactly those seqs — not "everything
-				// below the highest", which would also drop a longer tail recorded
-				// while this panel was showing another conversation.
-				const bufferedSeqs = new Set(buffered.map(event => event.seq));
 				const stream = getStream(sessionId);
+				const bySeq = new Map<number, AgentServerEvent>();
+				const noSeq: AgentServerEvent[] = [];
+				const collect = (events: readonly AgentServerEvent[]) => {
+					for (const event of events) {
+						if (typeof event.seq === 'number') {
+							if (!bySeq.has(event.seq)) bySeq.set(event.seq, event);
+						} else {
+							noSeq.push(event);
+						}
+					}
+				};
+				// Stream first so a buffered frame (the fresher copy of the same
+				// seq) wins; then order by seq so the tail follows the head.
+				collect(stream?.events ?? []);
+				collect(buffered);
+				const ordered = [...bySeq.entries()]
+					.sort((a, b) => a[0] - b[0])
+					.map(([, event]) => event);
+				for (const event of dropDurableDeltas([...noSeq, ...ordered], transcript)) {
+					handleEventRef.current(event);
+				}
 				if (loadedIdRef.current !== sessionId) {
 					return;
 				}
 				if (stream) {
-					for (const event of dropDurableDeltas(stream.events, transcript)) {
-						if (event.seq !== undefined && bufferedSeqs.has(event.seq)) {
-							continue;
-						}
-						handleEventRef.current(event);
-					}
 					if (stream.queued.length > 0) {
 						setQueued(stream.queued);
 						queuedRef.current = stream.queued;
@@ -627,9 +671,9 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						setStreaming(true);
 					}
 				}
-				// A cached page may miss a turn that finished elsewhere. Refresh
-				// from the jsonl in the background, silently; the reload helper
-				// already refuses to replace a turn that is still streaming.
+				// A cached page can miss a turn that finished elsewhere. Revalidate
+				// from the jsonl in the background; the reload helper refuses to
+				// replace a turn that is still streaming.
 				if (cached) {
 					window.setTimeout(() => reloadTranscriptRef.current('cache-revalidate', true), 0);
 				}
@@ -845,9 +889,20 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					setThinkingTokens(event.estimated);
 					return;
 				case 'assistant_delta':
+					// Text can reach stdout just after `result` (a background
+					// subagent's output, or the CLI flushing its final block). A
+					// premature `result` must not leave text flowing under an
+					// "ended" composer: re-assert busy on each main delta and
+					// clear once the tail goes quiet.
+					if (event.parentToolUseId === undefined) {
+						markTextActive();
+					}
 					appendStream('assistant', event.text, event.parentToolUseId);
 					return;
 				case 'thinking_delta':
+					if (event.parentToolUseId === undefined) {
+						markTextActive();
+					}
 					appendStream('thinking', event.text, event.parentToolUseId);
 					return;
 				case 'tool_use': {
@@ -992,6 +1047,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					return;
 				case 'result': {
 					closeStream();
+					afterResultRef.current = true;
 					setStreaming(false);
 					setThinkingTokens(0);
 					// The turn is over: whatever approval was on screen belongs to it
@@ -1096,6 +1152,10 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 			disposed = true;
 			stopEvents();
 			stopState();
+			if (tailIdleTimerRef.current !== undefined) {
+				window.clearTimeout(tailIdleTimerRef.current);
+				tailIdleTimerRef.current = undefined;
+			}
 			connection.release();
 			if (connectionRef.current === connection) {
 				connectionRef.current = undefined;
@@ -1245,6 +1305,11 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		setPicker(undefined);
 		setMenuDismissed(false);
 		setStreaming(true);
+		afterResultRef.current = false;
+		if (tailIdleTimerRef.current !== undefined) {
+			window.clearTimeout(tailIdleTimerRef.current);
+			tailIdleTimerRef.current = undefined;
+		}
 		connectionRef.current?.markBusy();
 		setThinkingTokens(0);
 		lastEventRef.current = Date.now();
@@ -1590,7 +1655,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				<span className="spacer" />
 			</div>
 
-			{tasks.length > 0 && (
+			{tasks.length > 0 && !onOpenTaskSession && (
 				<div className="task-strip">
 					{tasks.map(task => (
 						<span key={task.taskId} className={`task-chip ${task.status}`} title={`${task.description ?? ''}\ntask ${task.taskId}`}>
@@ -1602,6 +1667,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					))}
 				</div>
 			)}
+			{onOpenTaskSession && <TaskMonitor inline onOpenSession={onOpenTaskSession} />}
 
 			<div
 				className="chat-list"

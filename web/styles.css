@@ -2969,6 +2969,41 @@ button {
 	flex: none;
 }
 
+/* Inline in the chat pane: a slim strip above the message list. */
+.task-monitor.inline {
+	position: static;
+}
+
+.task-monitor-inline-open {
+	display: block;
+	width: 100%;
+	padding: 3px 10px;
+	background: var(--bg-hover);
+	border: none;
+	border-bottom: 1px solid var(--border);
+	color: var(--fg-dim);
+	font: inherit;
+	font-size: 11px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.task-monitor.inline .task-monitor-panel {
+	position: static;
+	width: auto;
+	max-height: none;
+	padding: 6px 10px;
+	border: none;
+	border-bottom: 1px solid var(--border);
+	border-radius: 0;
+	box-shadow: none;
+}
+
+.task-monitor.inline .task-monitor-empty {
+	padding: 6px 4px;
+	text-align: left;
+}
+
 .task-monitor-toggle.active {
 	color: var(--accent);
 	border-color: var(--accent-border);

@@ -267,6 +267,11 @@ const EN: Readonly<Record<string, string>> = {
 	'后台 agent 进程仍在运行，刷新不会丢': 'The agent process is still running in the background; a refresh does not lose it',
 	'后台没有该会话的进程，下一条消息会新建': 'No process for this conversation; the next message starts one',
 	'后台运行中': 'Running in background',
+	'收起': 'Collapse',
+	'中断轮次': 'Interrupt turn',
+	'停掉任务': 'Stop task',
+	'中断所属会话的当前轮次；后台子 agent 通常不受影响，轮次结束后也无效': 'Interrupt the owning conversation’s current turn; background subagents are usually unaffected, and it does nothing once the turn has ended',
+	'结束所属会话的 CLI 进程：这是唯一能真正停掉后台任务的办法，但会丢失该会话的进程状态': 'Kill the owning conversation’s CLI process: the only way to truly stop a background task, but the session’s process state is lost',
 	'后台未运行': 'Not running',
 	'输入任务，交给 agent 执行（文件改动可在"代码"页查看）': 'Describe a task and let the agent run it (file changes appear under "Code")',
 

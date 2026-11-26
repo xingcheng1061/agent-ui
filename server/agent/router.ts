@@ -51,20 +51,7 @@ interface LiveSession {
 	reapTimer?: NodeJS.Timeout;
 	/** A turn is being answered; reaping now would silently kill the work. */
 	busy: boolean;
-	/**
-	 * Events of the most recent turn, each already carrying its `seq`.
-	 *
-	 * A reconnect sends its highest applied seq on `attach`, and this log is what
-	 * lets the server hand back only the events it missed. The browser keeps no
-	 * transcript on disk, so without this a dropped socket loses every delta
-	 * produced while it was down — the jsonl does not have them until the
-	 * message finishes.
-	 *
-	 * Bounded by count and cleared when the next turn starts, so this is a
-	 * per-turn relay buffer, not a second history.
-	 */
-	readonly log: AgentServerEvent[];
-	/** Highest `seq` handed out for this session; never reset. */
+	/** Highest `seq` handed out for this session; used for client-side dedup. */
 	lastSeq: number;
 	/**
 	 * Messages waiting for the running turn to end.
@@ -77,9 +64,6 @@ interface LiveSession {
 	/** Running tasks / subagents, keyed by task id, for the global task panel. */
 	tasks: Map<string, RunningTaskInfo>;
 }
-
-/** Upper bound on the in-flight event log; a turn can produce thousands of deltas. */
-const MAX_LOG_EVENTS = 2000;
 
 /** How often dead peers are probed; a missed pong terminates the socket. */
 const KEEP_ALIVE_INTERVAL_MS = 30_000;
@@ -523,7 +507,6 @@ class AgentConnection {
 		this._persistQueue(entry);
 		this._log(`starting queued message ${next.id.slice(0, 8)} (${entry.queued.length} left)`);
 		entry.busy = true;
-		entry.log.length = 0;
 		// The client just saw `result` (which ends a turn) and the queue shrink;
 		// without this it would think nothing is running while this one works.
 		this._announceBusy(entry);
@@ -613,11 +596,7 @@ class AgentConnection {
 						this._detach();
 					}
 					this._attach(entry);
-					const lastSeq = typeof command.lastSeq === 'number' && command.lastSeq > 0 ? command.lastSeq : undefined;
-					this._log(`attach adopted ${entry.cliSessionId?.slice(0, 8) ?? '(pending)'} busy=${entry.busy} lastSeq=${lastSeq ?? '-'}`);
-					// A socket that dropped out while the turn was running comes back
-					// with its last applied seq; hand it only what it has not seen.
-					this._replayTail(entry, lastSeq);
+					this._log(`attach adopted ${entry.cliSessionId?.slice(0, 8) ?? '(pending)'} busy=${entry.busy}`);
 					// Always, including the empty list: a client that shows a queue
 					// entry the server no longer has cannot cancel it, and cancelling
 					// a phantom looks exactly like "cancel does not work".
@@ -674,9 +653,6 @@ class AgentConnection {
 					return;
 				}
 				entry.busy = true;
-				// The log is per-turn: the previous turn's events are already in the
-				// jsonl and replaying them would duplicate its tail here.
-				entry.log.length = 0;
 				// The attach above already told this client `busy: false`; correct it
 				// before the turn's first event, or the button stays on 发送.
 				this._announceBusy(entry);
@@ -963,20 +939,10 @@ class AgentConnection {
 
 			entry.lastSeq += 1;
 			const outbound = { ...event, seq: entry.lastSeq } satisfies AgentServerEvent;
-			// Keep the tail of the turn so a reconnecting socket can ask for
-			// exactly what it missed. `result`/`exit` are kept too: they are the
-			// last thing a client that dropped out mid-answer needs to see.
-			entry.log.push(outbound);
-			if (entry.log.length > MAX_LOG_EVENTS) {
-				entry.log.splice(0, entry.log.length - MAX_LOG_EVENTS);
-			}
+			// No server-side replay buffer: the jsonl is the only history, and a
+			// client that misses frames re-reads it on (re)attach. `seq` is kept
+			// so the client can dedupe the live stream against that history.
 			this._broadcast(entry, JSON.stringify(outbound));
-			// The turn is now durable in the jsonl. Keeping its events would replay
-			// a finished turn into the next page that attaches, duplicating the
-			// result card on top of the transcript's copy.
-			if (event.type === 'result' || event.type === 'exit') {
-				entry.log.length = 0;
-			}
 		};
 
 		entry = {
@@ -997,7 +963,6 @@ class AgentConnection {
 			),
 			sockets: new Set(),
 			busy: false,
-			log: [],
 				lastSeq: 0,
 				queued: [],
 				tasks: new Map(),
@@ -1038,9 +1003,6 @@ class AgentConnection {
 			sessionId: entry.cliSessionId,
 			busy: entry.busy,
 			lastSeq: entry.lastSeq,
-			// No buffer, so there is nothing to report: a client that missed events
-			// has to fall back to its own mirror.
-			// oldestSeq: entry.log[0]?.seq,
 		});
 		// Let a reconnecting client learn the id it should keep using, plus the
 		// model/mode the running backend is actually in.
@@ -1090,27 +1052,6 @@ class AgentConnection {
 			this._pendingModel = undefined;
 		}
 		return applied;
-	}
-
-	/**
-	 * Sends only the events the reconnecting client has not applied.
-	 *
-	 * With no `lastSeq` (a fresh page) there is nothing to resume from, so the
-	 * client falls back to the jsonl tail; replaying the whole turn here would
-	 * duplicate what the transcript already carries.
-	 */
-	private _replayTail(entry: LiveSession, lastSeq: number | undefined): void {
-		if (lastSeq === undefined) {
-			return;
-		}
-		const tail = entry.log.filter(event => (event.seq ?? 0) > lastSeq);
-		if (tail.length === 0) {
-			return;
-		}
-		this._log(`replaying ${tail.length} buffered events after seq ${lastSeq}`);
-		for (const event of tail) {
-			this._send(event);
-		}
 	}
 
 	private _detach(): void {

@@ -66,8 +66,19 @@ async function withStore<T>(name: string, mode: IDBTransactionMode, run: (store:
 	});
 }
 
+/**
+ * A page refresh must re-read the jsonl once, so the first cache lookup after
+ * this module loads (i.e. after every full reload) deliberately misses. Later
+ * in-app session switches are free to use the cache.
+ */
+let freshBoot = true;
+
 /** Reads a cached transcript page; `undefined` means fall back to the server. */
 export async function readCachedTranscript(sessionId: string): Promise<TranscriptPage | undefined> {
+	if (freshBoot) {
+		freshBoot = false;
+		return undefined;
+	}
 	try {
 		const entry = await withStore(STORE_TRANSCRIPTS, 'readonly', store =>
 			request(store.get(sessionId) as IDBRequest<CachedTranscript | undefined>));

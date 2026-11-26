@@ -34,14 +34,12 @@ import { GroupFilesDialog } from './components/GroupFilesDialog';
 import { NewSessionDialog } from './components/NewSessionDialog';
 import { PasswordDialog } from './components/PasswordDialog';
 import { SessionSidebar } from './components/SessionSidebar';
-import { TaskMonitor } from './components/TaskMonitor';
 import { Splitter, clamp, usePersistedSize } from './components/Splitter';
 import { attentionEnabled, onAttentionChange, setAttentionEnabled } from './attention';
 import { setLang, t, useLang } from './i18n';
 import { getTheme, toggleTheme } from './theme';
 import { Workspace } from './components/Workspace';
 import { disposeAllTerminalSessions } from './components/terminalSessions';
-import { hydrateStreams } from './components/sessionStore';
 import { readRailSortPrefs, writeRailSortPref, type RailSortPrefs, type SortMode } from './components/railSortPrefs';
 
 interface ActiveView {
@@ -343,11 +341,6 @@ export function App() {
 		return () => document.removeEventListener('keydown', onKeyDown);
 	}, []);
 
-	// Restore the browser-side stream cache before panels read it.
-	useEffect(() => {
-		void hydrateStreams();
-	}, []);
-
 	// Resolve the session before anything else: every other call is 401 without it.
 	useEffect(() => {
 		let cancelled = false;
@@ -452,19 +445,31 @@ export function App() {
 	};
 
 	/** Jumps from the global task panel to the conversation that owns a task. */
-	const openTaskSession = (sessionId: string) => {
-		const session = sessions.find(entry => entry.id === sessionId);
-		if (session) {
-			selectSession(session);
+	const openTaskSession = async (sessionId: string) => {
+		// A session whose turn is still running often has no jsonl file yet, so
+		// it is missing from `sessions`. The running snapshot is polled on its
+		// own clock and can lag the task panel by seconds — refresh it before
+		// giving up, or "定位" silently does nothing.
+		let session = sessions.find(entry => entry.id === sessionId);
+		let running = runningRef.current.find(entry => entry.sessionId === sessionId);
+		if (!session && !running) {
+			await refreshRunning();
+			session = sessions.find(entry => entry.id === sessionId);
+			running = runningRef.current.find(entry => entry.sessionId === sessionId);
+		}
+		const root = session?.cwd ?? running?.root;
+		if (!root) {
+			setError(t('找不到该任务所属的会话'));
 			return;
 		}
-		// A brand-new session may not be in the list yet; the running snapshot
-		// carries its root, so fall back to that instead of doing nothing.
-		const running = runningRef.current.find(entry => entry.sessionId === sessionId);
-		if (running) {
-			setActive({ root: running.root, sessionId, agent: running.agent });
-			setViewToken(value => value + 1);
+		// Already on this conversation: remounting would reload the transcript
+		// from disk and drop the queued user message and the in-flight text that
+		// have not reached the jsonl yet. Just stay put.
+		if (active?.sessionId === sessionId && active.root === root) {
+			return;
 		}
+		setActive({ root, sessionId, agent: running?.agent ?? HISTORY_AGENT });
+		setViewToken(value => value + 1);
 	};
 
 	// ChatFind (Ctrl+F inside the conversation) asks us to scroll to a hit. It
@@ -730,7 +735,6 @@ export function App() {
 					</button>
 				</span>
 				<span className="spacer" />
-				<TaskMonitor onOpenSession={openTaskSession} />
 				<button
 					type="button"
 					className="toggle"
@@ -803,6 +807,7 @@ export function App() {
 								sessionId={active.sessionId}
 								agent={active.agent}
 								focusMatch={focusMatch?.match.sessionId === active.sessionId ? focusMatch : undefined}
+								onOpenTaskSession={openTaskSession}
 								onAgentChange={nextAgent => setActive({ root: active.root, agent: nextAgent })}
 								onSessionStarted={sessionId => {
 									setActive(current => current ? { ...current, sessionId } : current);

@@ -10,6 +10,8 @@ interface MonitorTask extends RunningTask {
 
 interface TaskMonitorProps {
 	readonly onOpenSession: (sessionId: string) => void;
+	/** Inline in the chat pane: no top-bar toggle, open by default. */
+	readonly inline?: boolean;
 }
 
 function elapsed(since: number): string {
@@ -36,9 +38,9 @@ function elapsed(since: number): string {
  * stop button is explicit about what it actually does — interrupt the owning
  * turn, or kill its process — instead of pretending to have finer control.
  */
-export function TaskMonitor({ onOpenSession }: TaskMonitorProps) {
+export function TaskMonitor({ onOpenSession, inline = false }: TaskMonitorProps) {
 	const [tasks, setTasks] = useState<readonly MonitorTask[]>([]);
-	const [open, setOpen] = useState(false);
+	const [open, setOpen] = useState(inline);
 	const [busy, setBusy] = useState<string | undefined>(undefined);
 	const [, setTick] = useState(0);
 	// `setTick` keeps the elapsed-time labels moving between polls.
@@ -79,20 +81,28 @@ export function TaskMonitor({ onOpenSession }: TaskMonitorProps) {
 	};
 
 	return (
-		<div className="task-monitor">
-			<button
-				type="button"
-				className={`toggle task-monitor-toggle${tasks.length > 0 ? ' active' : ''}`}
-				title={t('后台任务与子 agent')}
-				onClick={() => setOpen(value => !value)}
-			>
-				{t('任务')}{tasks.length > 0 ? ` (${tasks.length})` : ''}
-			</button>
+		<div className={`task-monitor${inline ? ' inline' : ''}`}>
+			{!inline && (
+				<button
+					type="button"
+					className={`toggle task-monitor-toggle${tasks.length > 0 ? ' active' : ''}`}
+					title={t('后台任务与子 agent')}
+					onClick={() => setOpen(value => !value)}
+				>
+					{t('任务')}{tasks.length > 0 ? ` (${tasks.length})` : ''}
+				</button>
+			)}
+			{inline && !open && (
+				<button type="button" className="task-monitor-inline-open" onClick={() => setOpen(true)}>
+					{t('后台任务 / 子 agent')}{tasks.length > 0 ? ` (${tasks.length})` : ''}
+				</button>
+			)}
 			{open && (
 				<div className="task-monitor-panel">
 					<div className="task-monitor-head">
-						<strong>{t('后台任务 / 子 agent')}</strong>
+						<strong>{t('后台任务 / 子 agent')}{tasks.length > 0 ? ` (${tasks.length})` : ''}</strong>
 						<button type="button" className="link-btn" onClick={() => void refresh()}>{t('刷新')}</button>
+						{inline && <button type="button" className="link-btn" onClick={() => setOpen(false)}>{t('收起')}</button>}
 					</div>
 					{tasks.length === 0
 						? <div className="task-monitor-empty">{t('当前没有运行中的后台任务')}</div>
@@ -120,19 +130,19 @@ export function TaskMonitor({ onOpenSession }: TaskMonitorProps) {
 										type="button"
 										className="chip danger"
 										disabled={busy === task.taskId}
-										title={t('该任务所属会话的当前轮次会被中断（CLI 不支持单独结束任务）')}
+										title={t('中断所属会话的当前轮次；后台子 agent 通常不受影响，轮次结束后也无效')}
 										onClick={() => void stop(task, false)}
 									>
-										{t('中断')}
+										{t('中断轮次')}
 									</button>
 									<button
 										type="button"
 										className="chip danger"
 										disabled={busy === task.taskId}
-										title={t('强制结束该任务所属的会话进程')}
+										title={t('结束所属会话的 CLI 进程：这是唯一能真正停掉后台任务的办法，但会丢失该会话的进程状态')}
 										onClick={() => void stop(task, true)}
 									>
-										{t('强停')}
+										{t('停掉任务')}
 									</button>
 								</div>
 							</div>
