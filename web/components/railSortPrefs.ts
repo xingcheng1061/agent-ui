@@ -26,12 +26,13 @@ const KEYS: Record<keyof RailSortPrefs, string> = {
 
 export const SORT_MODES: readonly SortMode[] = ['name', 'created', 'updated'];
 
+/** Full labels for the dropdown, so the criterion is unambiguous. */
 export function sortModeLabel(mode: SortMode): { readonly zh: string; readonly en: string } {
 	return mode === 'name'
-		? { zh: '名称', en: 'Name' }
+		? { zh: '按名称排序', en: 'Sort by name' }
 		: mode === 'created'
-			? { zh: '创建', en: 'Created' }
-			: { zh: '更新', en: 'Updated' };
+			? { zh: '按创建时间排序', en: 'Sort by creation time' }
+			: { zh: '按最后更新时间排序', en: 'Sort by last update' };
 }
 
 function read(key: keyof RailSortPrefs): SortMode {

@@ -808,7 +808,6 @@ export function App() {
 								agent={active.agent}
 								focusMatch={focusMatch?.match.sessionId === active.sessionId ? focusMatch : undefined}
 								onOpenTaskSession={openTaskSession}
-								onAgentChange={nextAgent => setActive({ root: active.root, agent: nextAgent })}
 								onSessionStarted={sessionId => {
 									setActive(current => current ? { ...current, sessionId } : current);
 									// A group picked in the new-session dialog is applied as

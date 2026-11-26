@@ -30,6 +30,12 @@ export interface SessionStream {
 	queued: readonly QueuedMessage[];
 	/** Running tasks, so a returning panel can paint them before events replay. */
 	tasks: readonly StreamTask[];
+	/**
+	 * User messages sent from this browser that the jsonl has not confirmed yet.
+	 * A panel that remounts mid-turn restores these bubbles; messages that later
+	 * land in the transcript are removed by text.
+	 */
+	sent: readonly string[];
 	/** Whether the server reported a turn running the last time it spoke. */
 	busy: boolean;
 	/** Last time anything was written, for pruning. */
@@ -47,7 +53,7 @@ const streams = new Map<string, SessionStream>();
 function slot(sessionId: string): SessionStream {
 	let stream = streams.get(sessionId);
 	if (!stream) {
-		stream = { events: [], queued: [], tasks: [], busy: false, updatedAt: Date.now() };
+		stream = { events: [], queued: [], tasks: [], sent: [], busy: false, updatedAt: Date.now() };
 		streams.set(sessionId, stream);
 	}
 	return stream;
@@ -115,6 +121,31 @@ export function clearStreamTask(sessionId: string | undefined, taskId: string): 
 	persist(sessionId, stream);
 }
 
+/** Records a message this browser sent, so a remount can restore its bubble. */
+export function addSentMessage(sessionId: string | undefined, text: string): void {
+	if (!sessionId) {
+		return;
+	}
+	const stream = slot(sessionId);
+	stream.sent = [...stream.sent, text];
+	stream.updatedAt = Date.now();
+	persist(sessionId, stream);
+}
+
+/** Drops sent texts that the jsonl now carries, so they are not drawn twice. */
+export function confirmSentMessages(sessionId: string | undefined, transcriptTexts: ReadonlySet<string>): void {
+	if (!sessionId) {
+		return;
+	}
+	const stream = streams.get(sessionId);
+	if (!stream || stream.sent.length === 0) {
+		return;
+	}
+	stream.sent = stream.sent.filter(text => !transcriptTexts.has(text));
+	stream.updatedAt = Date.now();
+	persist(sessionId, stream);
+}
+
 /** Records whether a turn is running. */
 export function setStreamBusy(sessionId: string | undefined, busy: boolean): void {
 	if (!sessionId) {
@@ -158,7 +189,7 @@ export async function hydrateStreams(): Promise<void> {
 	for (const entry of cached) {
 		if (!streams.has(entry.sessionId)) {
 			const { sessionId: _id, ...stream } = entry;
-			streams.set(entry.sessionId, { ...stream, updatedAt: stream.updatedAt ?? Date.now() });
+			streams.set(entry.sessionId, { ...stream, sent: stream.sent ?? [], updatedAt: stream.updatedAt ?? Date.now() });
 		}
 	}
 }

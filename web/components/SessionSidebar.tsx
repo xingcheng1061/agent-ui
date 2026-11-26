@@ -121,7 +121,7 @@ function Highlighted({ text, query }: { readonly text: string; readonly query: s
 	);
 }
 
-/** Three-way order picker shared by the rail's ordered lists. */
+/** Dropdown for one ordered list; each option names its sorting criterion. */
 function SortPicker({ mode, onChange, label }: {
 	readonly mode: SortMode;
 	readonly onChange: (value: SortMode) => void;
@@ -129,22 +129,17 @@ function SortPicker({ mode, onChange, label }: {
 }) {
 	const lang = useLang();
 	return (
-		<div className="rail-sort-picker" role="group" aria-label={`${label} · ${lang === 'zh' ? '排序' : 'Sort'}`}>
-			{SORT_MODES.map(value => {
-				const name = sortModeLabel(value)[lang];
-				return (
-					<button
-						type="button"
-						key={value}
-						className={`rail-sort-item${mode === value ? ' active' : ''}`}
-						title={`${label} · ${name}`}
-						onClick={() => onChange(value)}
-					>
-						{name}
-					</button>
-				);
-			})}
-		</div>
+		<label className="rail-sort-picker" title={`${label} · ${t('排序方式')}`}>
+			<select
+				aria-label={`${label} · ${t('排序方式')}`}
+				value={mode}
+				onChange={event => onChange(event.target.value as SortMode)}
+			>
+				{SORT_MODES.map(value => (
+					<option key={value} value={value}>{sortModeLabel(value)[lang]}</option>
+				))}
+			</select>
+		</label>
 	);
 }
 
@@ -939,10 +934,12 @@ export function SessionSidebar({
 					</button>
 				</div>
 				<div className="rail-sort-row">
-					<span className="rail-sort-label">{t('组')}</span>
+					<span className="rail-sort-label">{t('会话组')}</span>
 					<SortPicker mode={railSortPrefs.groups} onChange={value => onRailSortChange('groups', value)} label={t('会话组')} />
+				</div>
+				<div className="rail-sort-row">
 					<span className="rail-sort-label">{t('会话')}</span>
-					<SortPicker mode={railSortPrefs.sessions} onChange={value => onRailSortChange('sessions', value)} label={t('组内会话')} />
+					<SortPicker mode={railSortPrefs.sessions} onChange={value => onRailSortChange('sessions', value)} label={t('会话列表')} />
 				</div>
 				{creatingGroup ? (
 					<div className="groups-create">

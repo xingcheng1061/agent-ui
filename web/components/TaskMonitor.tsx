@@ -12,6 +12,8 @@ interface TaskMonitorProps {
 	readonly onOpenSession: (sessionId: string) => void;
 	/** Inline in the chat pane: no top-bar toggle, open by default. */
 	readonly inline?: boolean;
+	/** When set, only this conversation's tasks are shown (no cross-session bleed). */
+	readonly sessionId?: string;
 }
 
 function elapsed(since: number): string {
@@ -38,7 +40,7 @@ function elapsed(since: number): string {
  * stop button is explicit about what it actually does — interrupt the owning
  * turn, or kill its process — instead of pretending to have finer control.
  */
-export function TaskMonitor({ onOpenSession, inline = false }: TaskMonitorProps) {
+export function TaskMonitor({ onOpenSession, inline = false, sessionId }: TaskMonitorProps) {
 	const [tasks, setTasks] = useState<readonly MonitorTask[]>([]);
 	const [open, setOpen] = useState(inline);
 	const [busy, setBusy] = useState<string | undefined>(undefined);
@@ -50,15 +52,20 @@ export function TaskMonitor({ onOpenSession, inline = false }: TaskMonitorProps)
 			const sessions = await runningSessions();
 			const next: MonitorTask[] = [];
 			for (const session of sessions) {
+				// The inline panel belongs to one conversation; showing other
+				// conversations' tasks here made "定位" jump to unrelated chats.
+				if (sessionId !== undefined && session.sessionId !== sessionId) {
+					continue;
+				}
 				for (const task of session.tasks) {
 					next.push({ ...task, sessionId: session.sessionId, root: session.root, agent: session.agent });
 				}
 			}
 			setTasks(next);
-		} catch {
+			} catch {
 			// A transient failure must not wipe the last known state.
-		}
-	}, []);
+			}
+			}, [sessionId]);
 
 	useEffect(() => {
 		void refresh();

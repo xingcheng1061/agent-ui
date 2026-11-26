@@ -9,7 +9,8 @@ import { CodeHighlight, guessLanguage } from './CodeHighlight';
 import { draftKey, readDraft, writeDraft } from './composerDrafts';
 import { TaskMonitor } from './TaskMonitor';
 import { readCachedTranscript, writeCachedTranscript } from './sessionCache';
-import { getStream, pruneStreams } from './sessionStore';
+import { addSentMessage, confirmSentMessages, getStream, pruneStreams } from './sessionStore';
+import { speechSupported, startDictation, type SpeechFailure } from '../speechRecognition';
 import { Markdown } from './Markdown';
 import { Splitter, clamp, usePersistedSize } from './Splitter';
 
@@ -136,7 +137,6 @@ interface ChatPanelProps {
 	readonly sessionId: string | undefined;
 	/** Backend to connect to; changing it starts a new conversation. */
 	readonly agent?: string;
-	readonly onAgentChange?: (agent: string) => void;
 	readonly onSessionStarted: (sessionId: string) => void;
 	/** Fired when a turn finishes, so the code panel can refresh git state. */
 	readonly onTurnEnd?: () => void;
@@ -302,7 +302,7 @@ function dropDurableDeltas(
 	});
 }
 
-export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStarted, onTurnEnd, onOpenPath, onOpenTaskSession, focusMatch }: ChatPanelProps) {
+export function ChatPanel({ root, sessionId, agent, onSessionStarted, onTurnEnd, onOpenPath, onOpenTaskSession, focusMatch }: ChatPanelProps) {
 	// The `/` menu caches translated labels in a memo; see its dependency list.
 	const lang = useLang();
 	const [items, setItems] = useState<readonly Item[]>([]);
@@ -350,6 +350,72 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		window.clearTimeout(draftSaveTimerRef.current);
 		draftSaveTimerRef.current = window.setTimeout(() => writeDraft(draftScopeRef.current, next), 300);
 	};
+
+	/** Dictation inserts final utterances at the caret, like typing. */
+	const [listening, setListening] = useState(false);
+	const stopDictationRef = useRef<(() => void) | undefined>(undefined);
+
+	const dictationFailureText = (failure: SpeechFailure): string => {
+		switch (failure.kind) {
+			case 'unsupported':
+				return t('当前浏览器不支持语音输入，请使用 Chrome');
+			case 'denied':
+				return t('麦克风权限被拒绝，请在地址栏允许后重试');
+			case 'no-speech':
+				return t('没有识别到语音，请再试一次');
+			case 'network':
+				return t('语音识别需要联网，当前网络不可用');
+			default:
+				return t('语音输入失败：{detail}', { detail: failure.detail });
+		}
+	};
+
+	const stopDictation = () => {
+		stopDictationRef.current?.();
+		stopDictationRef.current = undefined;
+		setListening(false);
+	};
+
+	const toggleDictation = () => {
+		if (listening) {
+			stopDictation();
+			return;
+		}
+		setListening(true);
+		stopDictationRef.current = startDictation({
+			onFinal: text => {
+				// Read the caret live: an async recognition result may arrive after
+				// the user moved it, so the state mirror can be stale.
+				const element = inputRef.current;
+				const at = element?.selectionStart ?? draftRef.current.length;
+				const before = draftRef.current.slice(0, at);
+				const after = draftRef.current.slice(at);
+				// No automatic space: zh-CN is the configured language, and adding
+				// one between Chinese phrases is wrong. The user can edit freely.
+				const inserted = before + text + after;
+				const caret = (before + text).length;
+				changeDraft(inserted);
+				setCursor(caret);
+				setMenuDismissed(false);
+				requestAnimationFrame(() => {
+					const node = inputRef.current;
+					if (node) {
+						node.focus();
+						node.setSelectionRange(caret, caret);
+					}
+				});
+			},
+			onEnd: () => {
+				stopDictationRef.current = undefined;
+				setListening(false);
+			},
+			onError: failure => setStatus(dictationFailureText(failure)),
+		});
+	};
+
+	// Stop the microphone when this panel goes away (session switch, unmount).
+	useEffect(() => () => stopDictationRef.current?.(), []);
+
 	const [connection, setConnection] = useState<'connecting' | 'open' | 'closed'>('connecting');
 	const [meta, setMeta] = useState<{
 		agent?: string;
@@ -407,6 +473,8 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 	const streamingRef = useRef(false);
 	/** Set once `result` arrives; a main delta after it is a late tail, not a new turn. */
 	const afterResultRef = useRef(false);
+	/** Texts sent before a new session's id arrived from `system`. */
+	const pendingSentRef = useRef<string[]>([]);
 	/** Clears the busy state a moment after the last late delta. */
 	const tailIdleTimerRef = useRef<number | undefined>(undefined);
 	/** Messages waiting for the running turn, mirrored from the server. */
@@ -538,7 +606,17 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				if (streamingRef.current) {
 					return;
 				}
-				setItems(toChatItems(page.items, page.start));
+				const transcriptTexts = new Set(page.items
+					.filter(item => item.kind === 'user')
+					.map(item => item.text ?? ''));
+				confirmSentMessages(id, transcriptTexts);
+				const restored = getStream(id)?.sent ?? [];
+				setItems([
+					...toChatItems(page.items, page.start),
+					...restored
+						.filter(text => !transcriptTexts.has(text))
+						.map(text => ({ kind: 'user' as const, id: nextId(), text })),
+				]);
 				setHasMore(page.hasMore);
 				oldestRef.current = page.start ?? 0;
 				void writeCachedTranscript(id, page);
@@ -616,7 +694,24 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					return;
 				}
 				const transcript = page.items;
-				setItems(toChatItems(transcript, page.start));
+				const transcriptTexts = new Set(transcript
+					.filter(item => item.kind === 'user')
+					.map(item => item.text ?? ''));
+				confirmSentMessages(sessionId, transcriptTexts);
+				const restoredSent = getStream(sessionId)?.sent ?? [];
+				setItems([
+					...toChatItems(transcript, page.start),
+					// Messages sent mid-turn are not in the jsonl yet; their bubbles
+					// would vanish on every switch without this.
+					...restoredSent
+						.filter(text => !transcriptTexts.has(text))
+						.map(text => {
+							// If this text is still queued, its bubble is already here;
+							// don't let the queue handler print a second one later.
+							queueShownRef.current.push(text);
+							return { kind: 'user' as const, id: nextId(), text };
+						}),
+				]);
 				setHasMore(page.hasMore);
 				oldestRef.current = page.start ?? 0;
 				setStatus(t('已载入 {id}', { id: sessionId.slice(0, 8) }));
@@ -814,6 +909,10 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					if (createdHereRef.current) {
 						createdHereRef.current = false;
 						loadedIdRef.current = event.sessionId;
+						for (const text of pendingSentRef.current) {
+							addSentMessage(event.sessionId, text);
+						}
+						pendingSentRef.current = [];
 					}
 					onSessionStartedRef.current(event.sessionId);
 					setMeta(previous => ({
@@ -1293,6 +1392,14 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 		}
 		streamRef.current.clear();
 		setItems(previous => [...previous, { kind: 'user', id: nextId(), text }]);
+		// Keep the bubble across a remount: a message sent mid-turn is in the
+		// server queue, not yet in the jsonl, so re-reading history would omit it.
+		if (resumeIdRef.current) {
+			addSentMessage(resumeIdRef.current, text);
+		} else {
+			// A brand-new session gets its id from the CLI's `system` event.
+			pendingSentRef.current.push(text);
+		}
 		if (streamingRef.current && !immediate) {
 			// This one joins the queue and already has its bubble.
 			queueShownRef.current.push(text);
@@ -1641,33 +1748,10 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 					{activity ?? status}
 					{!activity && meta.sessionId ? ` · ${meta.sessionId.slice(0, 8)}` : ''}
 				</span>
-				{activity && <span className="stat-pill accent">{t('进行中')}</span>}
-				{thinkingTokens > 0 && <span className="stat-pill">{t('思考 {count}', { count: formatTokens(thinkingTokens) })}</span>}
-				{runningTasks > 0 && <span className="stat-pill accent">{t('↳ {count} 个任务运行中', { count: runningTasks })}</span>}
-				{backendLive !== undefined && (
-					<span
-						className={`stat-pill${backendLive ? ' accent' : ''}`}
-						title={backendLive ? t('后台 agent 进程仍在运行，刷新不会丢') : t('后台没有该会话的进程，下一条消息会新建')}
-					>
-						{backendLive ? t('后台运行中') : t('后台未运行')}
-					</span>
-				)}
 				<span className="spacer" />
-			</div>
-
-			{tasks.length > 0 && !onOpenTaskSession && (
-				<div className="task-strip">
-					{tasks.map(task => (
-						<span key={task.taskId} className={`task-chip ${task.status}`} title={`${task.description ?? ''}\ntask ${task.taskId}`}>
-							<span className={`task-dot ${task.status}`} />
-							{task.subagentType ? `${task.subagentType} · ` : ''}
-							{task.description ?? task.taskId}
-							<span className="task-chip-meta">{taskMeta(task, now)}</span>
-						</span>
-					))}
 				</div>
-			)}
-			{onOpenTaskSession && <TaskMonitor inline onOpenSession={onOpenTaskSession} />}
+
+
 
 			<div
 				className="chat-list"
@@ -1906,6 +1990,18 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 							{t('立即发送')}
 						</button>
 					)}
+					{speechSupported() && (
+						<button
+							type="button"
+							className={`chip mic${listening ? ' active' : ''}`}
+							title={listening ? t('停止语音输入') : t('语音输入（点击开始，识别结果插入光标处）')}
+							aria-pressed={listening}
+							onMouseDown={event => event.preventDefault()}
+							onClick={toggleDictation}
+						>
+							{listening ? t('● 停止') : t('🎤 语音')}
+						</button>
+					)}
 					<button
 						type="button"
 						className={stopping ? 'primary stop' : 'primary'}
@@ -1922,6 +2018,36 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 						{stopping ? t('停止') : streaming && canSend ? t('排队发送') : t('发送')}
 					</button>
 				</div>
+			</div>
+
+			{/* Live state and background tasks sit below the composer. */}
+			<div className="composer-status">
+				<div className="composer-status-pills">
+					{activity && <span className="stat-pill accent">{t('进行中')}</span>}
+					{thinkingTokens > 0 && <span className="stat-pill">{t('思考 {count}', { count: formatTokens(thinkingTokens) })}</span>}
+					{runningTasks > 0 && <span className="stat-pill accent">{t('↳ {count} 个任务运行中', { count: runningTasks })}</span>}
+					{backendLive !== undefined && (
+						<span
+							className={`stat-pill${backendLive ? ' accent' : ''}`}
+							title={backendLive ? t('后台 agent 进程仍在运行，刷新不会丢') : t('后台没有该会话的进程，下一条消息会新建')}
+						>
+							{backendLive ? t('后台运行中') : t('后台未运行')}
+						</span>
+					)}
+				</div>
+				{tasks.length > 0 && !onOpenTaskSession && (
+					<div className="task-strip">
+						{tasks.map(task => (
+							<span key={task.taskId} className={`task-chip ${task.status}`} title={`${task.description ?? ''}\ntask ${task.taskId}`}>
+								<span className={`task-dot ${task.status}`} />
+								{task.subagentType ? `${task.subagentType} · ` : ''}
+								{task.description ?? task.taskId}
+								<span className="task-chip-meta">{taskMeta(task, now)}</span>
+							</span>
+						))}
+					</div>
+				)}
+				{onOpenTaskSession && <TaskMonitor inline sessionId={sessionId} onOpenSession={onOpenTaskSession} />}
 			</div>
 
 			<div className="chat-toolbar">
@@ -1948,23 +2074,7 @@ export function ChatPanel({ root, sessionId, agent, onAgentChange, onSessionStar
 				>
 					{permissionModes.map(mode => <option key={mode} value={mode}>{mode}</option>)}
 				</select>
-				{(meta.agentList?.length ?? 0) > 1 && (
-					<select
-						className="selector"
-						value={meta.agent ?? agent ?? ''}
-						title={t('Agent 后端（切换会开始新会话）')}
-						onChange={event => {
-							const next = event.target.value;
-							if (next && next !== (meta.agent ?? agent)) {
-								onAgentChange?.(next);
-							}
-						}}
-					>
-						{!meta.agent && <option value="">agent…</option>}
-						{meta.agentList?.map(info => <option key={info.id} value={info.id}>{info.name}</option>)}
-					</select>
-				)}
-				<span className="toolbar-label">{t('Agent / 模型 / 权限模式')}</span>
+				<span className="toolbar-label">{t('模型 / 权限模式')}</span>
 			</div>
 		</section>
 	);

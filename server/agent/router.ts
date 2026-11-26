@@ -404,17 +404,22 @@ class AgentConnection {
 	 * list again. Config is state, not a step of the stream, so re-sending it
 	 * costs nothing.
 	 */
-	private _sendStaticConfig(): void {
+	private _sendStaticConfig(sessionId?: string): void {
 		const driver = this._driver();
-		const choice = choiceForSession(undefined, driver.id);
+		// A new conversation (no id) takes the remembered default; an existing
+		// session takes its own stored choice. A live entry's model is only
+		// authoritative when it is the session the client actually asked for —
+		// otherwise a socket reused for "new conversation" leaks the old model.
+		const choice = choiceForSession(sessionId, driver.id);
+		const attached = sessionId !== undefined && this._entry?.cliSessionId === sessionId ? this._entry : undefined;
 		const capabilities = AgentConnection._capabilities.get(driver.id);
 		this._sendConfig({
 			agent: driver.id,
 			agents: this._options.registry.list(),
 			models: driver.models,
 			permissionModes: driver.permissionModes,
-			model: this._entry?.model ?? this._pendingModel ?? pickModel(driver, choice.model),
-			permissionMode: this._entry?.permissionMode ?? this._pendingMode ?? pickMode(driver, choice.permissionMode),
+			model: attached?.model ?? this._pendingModel ?? pickModel(driver, choice.model),
+			permissionMode: attached?.permissionMode ?? this._pendingMode ?? pickMode(driver, choice.permissionMode),
 			// `subagents`, not `agents`: the latter already means the backend list.
 			...(capabilities ? {
 				slashCommands: capabilities.slashCommands,
@@ -572,10 +577,10 @@ class AgentConnection {
 				// Answer with the static config too: a pooled socket that outlives
 				// a panel already consumed the connect-time one, and its pickers
 				// would otherwise stay empty until the next turn.
-				this._sendStaticConfig();
 				const requested = typeof command.sessionId === 'string' && command.sessionId
 					? command.sessionId
 					: undefined;
+				this._sendStaticConfig(requested);
 				let entry = this._entry ?? (requested ? this._findLive(requested) : undefined);
 				if (!entry && !requested) {
 					// The CLI reports its session id with the first `system/init`, so a
