@@ -460,7 +460,18 @@ export function Editor({ root, filePath, preview = false, reloadToken = 0, revea
 			<div className={`editor-host${preview ? ' is-hidden' : ''}`} ref={containerRef} />
 			{preview && (
 				<div className="markdown-preview">
-					<Markdown text={previewText} mermaid controls={false} diagramZoomRequiresCtrl />
+					{/* Keep the document chrome-free but let diagrams maximise, same as chat. */}
+					<Markdown
+						text={previewText}
+						mermaid
+						diagramZoomRequiresCtrl
+						controls={{
+							table: false,
+							code: false,
+							image: false,
+							mermaid: { download: false, copy: false, fullscreen: true, panZoom: true },
+						}}
+					/>
 				</div>
 			)}
 		</>

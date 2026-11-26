@@ -1,6 +1,6 @@
 import { math } from '@streamdown/math';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Streamdown, type Components, type DiagramPlugin, type MermaidErrorComponentProps } from 'streamdown';
+import { Streamdown, type Components, type ControlsConfig, type DiagramPlugin, type MermaidErrorComponentProps } from 'streamdown';
 import 'katex/dist/katex.min.css';
 import 'streamdown/styles.css';
 import { getTheme, onThemeChange, type ThemeName } from '../theme';
@@ -11,8 +11,8 @@ interface MarkdownProps {
 	readonly streaming?: boolean;
 	/** Render ` ```mermaid ` fences as diagrams. Loads mermaid on demand. */
 	readonly mermaid?: boolean;
-	/** Off for document previews, where streamdown's per-block chrome is noise. */
-	readonly controls?: boolean;
+	/** Block-level controls; accepts per-kind config so previews can keep just the diagram tools. */
+	readonly controls?: ControlsConfig;
 	/**
 	 * Require Ctrl/Cmd + wheel to zoom a diagram; a plain wheel scrolls the
 	 * surrounding pane. On in chat messages, where a diagram sits inline and
